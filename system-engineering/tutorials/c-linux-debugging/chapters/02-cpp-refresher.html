@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2 · C++ — the modern subset</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 02</span>
+  C++ — the modern subset
+</h1>
+<p class="lede">
+  The C++ you write in 2026 is a different language from the C++ of
+  2003. RAII, smart pointers, references, move semantics, lambdas,
+  templates that don't make you cry. This chapter focuses on the
+  modern subset — the parts that earn their complexity.
+</p>
+
+<h2 id="dialect">Pick a dialect, pin it</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ c++ --version
+g++ (GCC) 14.2.0
+$ c++ -std=c++20 -Wall -Wextra -Wpedantic -O2 -g hello.cpp -o hello
+</code></pre>
+</div>
+
+<p><strong>C++20</strong> is the practical default in 2026: concepts, ranges, <code>std::span</code>, <code>std::format</code>, three-way comparison, structured bindings (already in 17), modules (still rough). C++23 adds nice-to-haves but compiler support is uneven. Codebases still on C++17 are common; the gap to 20 is small.</p>
+
+<p>Reach for these warnings: <code>-Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Wnull-dereference -Wuseless-cast</code>. With <code>-fsanitize=address,undefined</code> in dev builds.</p>
+
+<h2 id="raii">RAII — the One Big Idea</h2>
+
+<p>Resource Acquisition Is Initialisation. A handle (file, mutex, allocation, lock, socket) is owned by an object whose destructor releases it. When the object goes out of scope — by return, by exception, by anything — the resource is released. Deterministic, automatic.</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;fstream&gt;
+#include &lt;string&gt;
+
+void write_log(const std::string&amp; line) {
+    std::ofstream f("/var/log/app.log", std::ios::app);  // ctor opens
+    f &lt;&lt; line &lt;&lt; "\n";
+    // dtor closes here, even if an exception is thrown above
+}
+</code></pre>
+</div>
+
+<p>The mental model: <strong>"every resource has an owner; when the owner dies, so does the resource"</strong>. Apply this and most lifetime bugs vanish.</p>
+
+<h2 id="smart-pointers">Smart pointers — owners with semantics</h2>
+
+<p>Three you actually use:</p>
+
+<table>
+<thead><tr><th>Type</th><th>Owns</th><th>Copy?</th><th>Move?</th></tr></thead>
+<tbody>
+<tr><td><code>std::unique_ptr&lt;T&gt;</code></td><td>One owner</td><td>No</td><td>Yes — transfers ownership</td></tr>
+<tr><td><code>std::shared_ptr&lt;T&gt;</code></td><td>Reference-counted</td><td>Yes — bumps refcount</td><td>Yes</td></tr>
+<tr><td><code>std::weak_ptr&lt;T&gt;</code></td><td>Non-owning observer</td><td>Yes</td><td>Yes</td></tr>
+</tbody>
+</table>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;memory&gt;
+#include &lt;string&gt;
+
+struct Job {
+    std::string name;
+    Job(std::string n) : name(std::move(n)) {}
+};
+
+auto j = std::make_unique&lt;Job&gt;("compile");        // unique owner
+// auto k = j;                                     // ERROR — can't copy unique_ptr
+auto k = std::move(j);                            // OK — transfer; j is now nullptr
+
+auto s = std::make_shared&lt;Job&gt;("link");           // shared owner
+auto t = s;                                       // OK — shared, refcount=2
+std::weak_ptr&lt;Job&gt; w = s;                         // observer, no count
+</code></pre>
+</div>
+
+<p>Default to <code>unique_ptr</code>. Use <code>shared_ptr</code> only when ownership is genuinely shared. <code>weak_ptr</code> breaks cycles or models "may be alive, may not".</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Don't <code>new</code> when <code>make_unique</code> exists</div>
+<p><code>std::make_unique&lt;T&gt;(args...)</code> is exception-safe and concise. Bare <code>new</code> in modern C++ is a code smell — almost always replaceable with a smart pointer or a stack-allocated value.</p>
+</div>
+
+<h2 id="references">References — pointers without the rope</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>void scale(int&amp; x, int factor) { x *= factor; }   // by reference — modifies caller's int
+void print(const std::string&amp; s)  { /* ... */ }   // const ref — no copy, no mutate
+void take_ownership(std::string&amp;&amp; s) { ... }      // rvalue ref — moves into me
+</code></pre>
+</div>
+
+<p>Rules of thumb:</p>
+<ul>
+  <li><strong>Pass by const ref</strong> for non-trivial types you're not modifying. Avoids copies.</li>
+  <li><strong>Pass by ref</strong> when you intend to modify.</li>
+  <li><strong>Pass by value</strong> for small or trivially-copyable types (int, double, struct of two ints, <code>std::string_view</code>).</li>
+  <li><strong>Pass by rvalue ref</strong> when you specifically want to take ownership of a temporary.</li>
+</ul>
+
+<h2 id="move">Move semantics — what they actually mean</h2>
+
+<p>A move is a transfer-of-resources operation. After moving from an object, it's left in a valid-but-unspecified state — usually empty.</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>std::vector&lt;int&gt; make_big() {
+    std::vector&lt;int&gt; v(1'000'000);
+    return v;                               // NRVO or move; no copy
+}
+
+std::vector&lt;int&gt; v = make_big();             // cheap — pointer-sized fields swap
+
+std::string a = "hello";
+std::string b = std::move(a);                // b owns the buffer; a is now empty (but valid)
+// don't read a's value here — but a.clear(), a.size(), a = "..." are fine
+</code></pre>
+</div>
+
+<p>The Rule of Three becomes the <strong>Rule of Five</strong>: if you write any of (destructor, copy ctor, copy assign), you probably need to write all five (also move ctor, move assign). Better: the <strong>Rule of Zero</strong> — design types so the compiler-generated specials are correct, and write none of them.</p>
+
+<h2 id="containers">Containers and ranges</h2>
+
+<table>
+<thead><tr><th>Container</th><th>Use when</th></tr></thead>
+<tbody>
+<tr><td><code>std::vector&lt;T&gt;</code></td>      <td>The default. Contiguous, cache-friendly. ~always faster than list.</td></tr>
+<tr><td><code>std::array&lt;T, N&gt;</code></td>     <td>Fixed-size, on the stack — replaces C arrays.</td></tr>
+<tr><td><code>std::span&lt;T&gt;</code> (C++20)</td>  <td>Non-owning view of contiguous data — pass to functions instead of (ptr, len).</td></tr>
+<tr><td><code>std::string</code></td>            <td>Owning string. Same shape as vector.</td></tr>
+<tr><td><code>std::string_view</code> (C++17)</td><td>Non-owning string. Pass to functions that don't store it.</td></tr>
+<tr><td><code>std::unordered_map&lt;K,V&gt;</code></td><td>Hash map. Default for &gt; ~32 elements.</td></tr>
+<tr><td><code>std::map&lt;K,V&gt;</code></td>          <td>Ordered (BST). Use when you need keys-in-order or iterator stability.</td></tr>
+<tr><td><code>std::optional&lt;T&gt;</code> (C++17)</td><td>"T or nothing" — replaces sentinel values.</td></tr>
+<tr><td><code>std::variant&lt;A,B,...&gt;</code> (17)</td><td>Type-safe tagged union — replaces raw <code>union</code>.</td></tr>
+<tr><td><code>std::expected&lt;T,E&gt;</code> (C++23)</td><td>Result type — value or error, no exception.</td></tr>
+</tbody>
+</table>
+
+<p>Algorithm idioms — never write a raw loop when an algorithm does it:</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;algorithm&gt;
+#include &lt;numeric&gt;
+#include &lt;ranges&gt;       // C++20
+#include &lt;vector&gt;
+
+std::vector&lt;int&gt; v = {3, 1, 4, 1, 5, 9, 2, 6};
+
+std::ranges::sort(v);                                       // sorted
+auto sum = std::accumulate(v.begin(), v.end(), 0);
+auto it  = std::ranges::find(v, 5);
+bool any = std::ranges::any_of(v, [](int x){ return x &gt; 8; });
+
+// C++20 ranges
+auto evens_squared = v
+    | std::views::filter([](int x){ return x % 2 == 0; })
+    | std::views::transform([](int x){ return x * x; });
+</code></pre>
+</div>
+
+<h2 id="lambdas">Lambdas</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>auto add = [](int a, int b) { return a + b; };
+
+int factor = 3;
+auto scale = [factor](int x) { return x * factor; };       // capture by value
+auto bump  = [&amp;factor]() { factor++; };                    // capture by reference (careful with lifetime)
+
+// generic lambda (C++14)
+auto twice = [](auto x) { return x + x; };
+
+// constexpr lambda (C++17), [[nodiscard]] return (C++20)
+auto compute = [] [[nodiscard]] (int n) constexpr -&gt; int { return n * n; };
+</code></pre>
+</div>
+
+<p>Capture rules: <code>[=]</code> by value (copies), <code>[&amp;]</code> by reference (cheap but careful with lifetime), <code>[this]</code> captures the enclosing object's <code>this</code>, <code>[*this]</code> (C++17) captures by value. Avoid <code>[&amp;]</code> in code that escapes the current scope (returned, posted to a thread, stored).</p>
+
+<h2 id="templates">Templates — the friendly basics</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>template &lt;typename T&gt;
+T max_of(T a, T b) { return (a &gt; b) ? a : b; }
+
+auto m1 = max_of(3, 5);              // T deduced as int
+auto m2 = max_of&lt;double&gt;(3, 5.0);    // explicit
+</code></pre>
+</div>
+
+<p>Constraints (C++20 concepts) make templates honest about what they need:</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;concepts&gt;
+
+template &lt;std::integral T&gt;
+T sum(std::span&lt;const T&gt; xs) {
+    T s = 0;
+    for (T x : xs) s += x;
+    return s;
+}
+</code></pre>
+</div>
+
+<p>Compile errors with concepts are 10× more readable than the old SFINAE walls of text. Use them.</p>
+
+<h2 id="classes">Classes — the modern shape</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;string&gt;
+#include &lt;vector&gt;
+#include &lt;memory&gt;
+
+class JobQueue {
+public:
+    JobQueue() = default;                          // explicitly defaulted
+    ~JobQueue() = default;
+
+    // Non-copyable, movable — common shape for things-that-own-state.
+    JobQueue(const JobQueue&amp;)            = delete;
+    JobQueue&amp; operator=(const JobQueue&amp;) = delete;
+    JobQueue(JobQueue&amp;&amp;)            noexcept = default;
+    JobQueue&amp; operator=(JobQueue&amp;&amp;) noexcept = default;
+
+    void push(std::string name) { jobs_.emplace_back(std::move(name)); }
+    [[nodiscard]] std::size_t size() const noexcept { return jobs_.size(); }
+
+private:
+    std::vector&lt;std::string&gt; jobs_;
+};
+</code></pre>
+</div>
+
+<p>Idioms worth committing:</p>
+<ul>
+  <li><strong>Trailing underscore</strong> for private members (<code>jobs_</code>) — many style guides; pick one.</li>
+  <li><strong><code>noexcept</code></strong> on move ops — required for STL containers to use move on resize.</li>
+  <li><strong><code>[[nodiscard]]</code></strong> on return values that callers shouldn't ignore.</li>
+  <li><strong><code>= delete</code></strong> for "not allowed" — better than the C++03 trick of declaring private with no body.</li>
+  <li><strong>Initialise members at declaration</strong> when sensible: <code>std::size_t count_ = 0;</code>.</li>
+  <li><strong>Single-arg constructors</strong> should generally be <code>explicit</code> to avoid surprising implicit conversions.</li>
+</ul>
+
+<h2 id="errors">Errors — exceptions or values?</h2>
+
+<p>Three schools, all defensible:</p>
+<ol>
+  <li><strong>Exceptions</strong> — C++ classic. Costly when thrown, free when not. Don't use across module boundaries (ABI). Forbidden in some embedded / kernel work.</li>
+  <li><strong>Result types</strong> — <code>std::expected&lt;T, E&gt;</code> (C++23) or <code>tl::expected</code>, or hand-rolled. Explicit, cheap, clutters call sites.</li>
+  <li><strong>Error codes + out params</strong> — POSIX style. Cumbersome but ABI-safe.</li>
+</ol>
+
+<p>Pick one per codebase. Mixing is the worst of all worlds. Embedded teams typically forbid exceptions and use error codes; modern application code uses exceptions or <code>expected</code>.</p>
+
+<h2 id="formatting">Modern formatting and printing</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;format&gt;             // C++20
+#include &lt;print&gt;              // C++23
+#include &lt;iostream&gt;
+
+std::string s = std::format("x={:08x} y={:.2f}", 0xc0ffee, 3.14);
+std::println("hello, {}!", "world");        // C++23
+
+// fallback: fmt library, identical API
+</code></pre>
+</div>
+
+<p><code>std::format</code>/<code>std::print</code> beat both <code>printf</code> and <code>iostreams</code> on safety and ergonomics. If you're stuck on older compilers, the <a href="https://github.com/fmtlib/fmt">{fmt}</a> library is the same API and works back to C++11.</p>
+
+<h2 id="iostream-warning">A word on iostreams</h2>
+
+<p><code>std::cout &lt;&lt; "x=" &lt;&lt; x &lt;&lt; "\n";</code> works but it's slow, hard to format, and links a lot of code. Modern C++ leans on <code>std::format</code>/<code>std::print</code> instead. Reach for iostreams only when you have to.</p>
+
+<h2 id="cpp-c">C++ ↔ C interop</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>// header used from both C and C++
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int parse_packet(const unsigned char *buf, size_t n);
+
+#ifdef __cplusplus
+}
+#endif
+</code></pre>
+</div>
+
+<p><code>extern "C"</code> disables C++ name mangling so the symbol is visible to C linkers. Required when:</p>
+<ul>
+  <li>Exposing C++ functions to C code.</li>
+  <li>Using C libraries from C++ — most C headers do this themselves.</li>
+  <li>Writing dynamic-library entry points (<code>dlsym</code> wants un-mangled names).</li>
+</ul>
+
+<p>You can pass C++ classes through an opaque handle: <code>typedef struct Foo Foo;</code> in the C-visible header, full definition in C++.</p>
+
+<h2 id="hands-on">Hands-on: a tiny RAII guard</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · finally for C++</div>
+<div class="hands-on-body">
+<p>Sometimes you have a C-style resource (file descriptor, mutex from <code>pthread.h</code>, OpenGL handle) without a C++ wrapper. Wrap it once:</p>
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;utility&gt;
+
+template &lt;class F&gt;
+class scope_exit {
+    F f_;
+    bool armed_ = true;
+public:
+    explicit scope_exit(F f) : f_(std::move(f)) {}
+    ~scope_exit() { if (armed_) f_(); }
+    void release() noexcept { armed_ = false; }
+
+    scope_exit(const scope_exit&amp;)            = delete;
+    scope_exit&amp; operator=(const scope_exit&amp;) = delete;
+};
+
+template &lt;class F&gt;
+auto on_scope_exit(F f) { return scope_exit&lt;F&gt;(std::move(f)); }
+</code></pre>
+</div>
+<div class="code" data-lang="cpp">
+<pre><code>void load_thing(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd &lt; 0) throw std::system_error(errno, std::generic_category(), "open");
+
+    auto guard = on_scope_exit([fd]{ close(fd); });
+    // ... use fd ...
+    // close happens automatically on return or throw
+}
+</code></pre>
+</div>
+<p>For one-line cleanup, this beats a class hierarchy. C++23 has <code>std::scope_exit</code> in the experimental TS; until then, write your own.</p>
+</div>
+</div>
+
+<h2 id="dont">Things to actively avoid</h2>
+
+<ul>
+  <li><strong>Bare <code>new</code> / <code>delete</code></strong> outside of one-line factories. <code>make_unique</code>/<code>make_shared</code> always.</li>
+  <li><strong>Raw arrays as members.</strong> <code>std::array&lt;T, N&gt;</code> instead.</li>
+  <li><strong><code>printf</code></strong> when <code>std::format</code> works.</li>
+  <li><strong><code>using namespace std;</code></strong> in headers (or anywhere global). It pollutes every consumer.</li>
+  <li><strong>Macros</strong> when a <code>constexpr</code> function or template would do.</li>
+  <li><strong>Inheriting from STL types</strong> — they have non-virtual destructors. Compose, don't inherit.</li>
+  <li><strong>Throwing from destructors.</strong> Don't.</li>
+  <li><strong>Returning references to locals.</strong> They dangle. Compilers warn; ASan catches.</li>
+</ul>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Smart-pointer choice</span>
+</div>
+<div class="exercise-body">
+<p>For each, pick <code>unique_ptr</code>, <code>shared_ptr</code>, <code>weak_ptr</code>, or "raw pointer / reference":</p>
+<ol type="a">
+<li>A factory returning a newly-allocated <code>Widget</code>.</li>
+<li>A cache that holds objects until users drop their last handle.</li>
+<li>An observer that wants to act on a target if it's still alive.</li>
+<li>A function that reads but doesn't store the argument.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li><code>unique_ptr&lt;Widget&gt;</code>. Sole owner; caller can move it into a <code>shared_ptr</code> if they want sharing.</li>
+<li><code>shared_ptr</code> with the cache holding <code>weak_ptr</code>, so users hold the last refcount. Or just <code>shared_ptr</code> if the cache is the owner.</li>
+<li><code>weak_ptr</code>; <code>weak.lock()</code> upgrades to a shared_ptr if the target is still alive.</li>
+<li><code>const T&amp;</code> for a non-trivial type, or <code>std::string_view</code>/<code>std::span&lt;const T&gt;</code> when applicable.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Spot the dangling reference</span>
+</div>
+<div class="exercise-body">
+<div class="code" data-lang="cpp">
+<pre><code>const std::string&amp; greet(const std::string&amp; name) {
+    return "hello, " + name;
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The expression <code>"hello, " + name</code> creates a temporary <code>std::string</code>. Returning a const reference to it returns a reference to a destroyed object — UB. Compiler usually warns: <code>-Wreturn-stack-address</code> / <code>-Wreturn-local-addr</code>.</p>
+<p>Fix: return by value. Modern compilers will use NRVO/move, no copy.</p>
+<div class="code" data-lang="cpp">
+<pre><code>std::string greet(const std::string&amp; name) {
+    return "hello, " + name;
+}
+</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why move?</span>
+</div>
+<div class="exercise-body">
+<p>Why does <code>v.emplace_back(std::move(s))</code> matter, given that <code>std::string</code> already supports move construction?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Without <code>std::move</code>, <code>s</code> is an <em>lvalue</em>, so the chosen overload copies. The string copy allocates and copies bytes. With <code>std::move</code>, <code>s</code> is treated as an rvalue, the move constructor steals the buffer (pointer swap), and <code>s</code> is left empty. For long strings, the difference is between an O(n) copy and an O(1) pointer swap.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Rule of five from scratch</span>
+</div>
+<div class="exercise-body">
+<p>Write a tiny owning <code>FileHandle</code> RAII type around <code>FILE*</code> that supports moves but not copies, with <code>noexcept</code> moves and a sensible <code>operator bool</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;cstdio&gt;
+#include &lt;utility&gt;
+
+class FileHandle {
+    std::FILE *f_ = nullptr;
+public:
+    FileHandle() = default;
+    explicit FileHandle(std::FILE *f) noexcept : f_(f) {}
+    ~FileHandle() { if (f_) std::fclose(f_); }
+
+    FileHandle(const FileHandle&amp;)            = delete;
+    FileHandle&amp; operator=(const FileHandle&amp;) = delete;
+
+    FileHandle(FileHandle&amp;&amp; o) noexcept : f_(o.f_) { o.f_ = nullptr; }
+    FileHandle&amp; operator=(FileHandle&amp;&amp; o) noexcept {
+        if (this != &amp;o) {
+            if (f_) std::fclose(f_);
+            f_ = o.f_;
+            o.f_ = nullptr;
+        }
+        return *this;
+    }
+
+    explicit operator bool() const noexcept { return f_ != nullptr; }
+    std::FILE *get()    const noexcept { return f_; }
+    std::FILE *release() noexcept       { std::FILE *r = f_; f_ = nullptr; return r; }
+};
+</code></pre>
+</div>
+<p>Better: rely on <code>std::unique_ptr&lt;std::FILE, decltype(&amp;std::fclose)&gt;</code> with <code>fclose</code> as the deleter — same effect, less code.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>C++20+ as the default; <code>-std=c++20 -Wall -Wextra -Wpedantic</code> + ASan/UBSan in dev.</li>
+  <li>RAII for every resource. <code>unique_ptr</code> is the workhorse; <code>shared_ptr</code> only for genuinely shared ownership.</li>
+  <li>Pass non-trivial types as <code>const T&amp;</code> or <code>T&amp;&amp;</code>; trivial as value; views (<code>span</code>, <code>string_view</code>) when you don't want to own.</li>
+  <li>Rule of Five if you must, Rule of Zero where you can.</li>
+  <li><code>std::format</code>/<code>std::print</code> &gt; <code>printf</code> &gt; <code>iostream</code> for new code.</li>
+  <li>C↔C++ via <code>extern "C"</code>; expose opaque handles, never C++ classes, across the boundary.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="01-c-refresher.html"><span class="lbl">← Prev</span><span class="ttl">C — the working subset</span></a>
+  <a href="03-memory-and-ub.html" class="next"><span class="lbl">Next →</span><span class="ttl">Memory model &amp; UB</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

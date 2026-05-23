@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · Production Patterns — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 11</span>
+  Production Patterns
+</h1>
+<p class="lede">
+  The patterns that turn a working manifest into a workload your
+  on-call won't curse you for. Probes, resource requests/limits,
+  affinity, HPA, PDB, RBAC, security context, Pod Security Standards,
+  observability hooks. The chapter that pays for itself the first
+  time prod doesn't burn down on a Friday.
+</p>
+
+<h2 id="probes">Probes — readiness, liveness, startup</h2>
+
+<p>The kubelet checks each container with <em>probes</em>. Three kinds, each answers a different question.</p>
+
+<table>
+<thead><tr><th>Probe</th><th>Question</th><th>If it fails</th></tr></thead>
+<tbody>
+<tr><td><code>readinessProbe</code></td><td>Are you ready to serve traffic?</td><td>Service stops sending traffic to this Pod (removes from EndpointSlice). Pod is <em>not</em> killed.</td></tr>
+<tr><td><code>livenessProbe</code></td><td>Are you alive?</td><td>Container is killed and restarted.</td></tr>
+<tr><td><code>startupProbe</code></td><td>Are you done starting?</td><td>Container is killed and restarted. Disables the other two until it passes.</td></tr>
+</tbody>
+</table>
+
+<div class="code" data-lang="yaml">
+<pre><code>containers:
+  - name: app
+    image: my-app:1.0
+    ports: [{ containerPort: 8080 }]
+    readinessProbe:
+      httpGet: { path: /ready, port: 8080 }
+      periodSeconds: 5
+      failureThreshold: 3
+    livenessProbe:
+      httpGet: { path: /healthz, port: 8080 }
+      periodSeconds: 10
+      failureThreshold: 3
+      initialDelaySeconds: 30
+    startupProbe:
+      httpGet: { path: /healthz, port: 8080 }
+      periodSeconds: 5
+      failureThreshold: 60          # allow 5 minutes of startup</code></pre>
+</div>
+
+<h4>Rules of thumb</h4>
+<ul>
+  <li><strong>Always have a readiness probe.</strong> Without one, traffic hits cold pods that haven't loaded config / opened DB connections / warmed caches.</li>
+  <li><strong>Liveness should detect <em>real</em> deadlocks, not transient errors.</strong> Liveness too aggressive = restart loops on intermittent issues = downtime amplified. A common pattern: liveness only fails on "I'm wedged" (no thread responsive); readiness fails on "I depend on a downstream that's flaky".</li>
+  <li><strong>Use <code>startupProbe</code> for slow-starting apps</strong> (JVM, large model loads). Otherwise tune <code>initialDelaySeconds</code> on liveness — but startupProbe is the cleaner answer.</li>
+  <li><strong>Endpoints must be cheap.</strong> A liveness check that runs a slow query for every probe will kill the pod under load.</li>
+  <li>Different paths per probe: <code>/ready</code> can include downstream checks; <code>/healthz</code> only checks "this process is responsive".</li>
+</ul>
+
+<h4>Probe types</h4>
+<div class="code" data-lang="yaml">
+<pre><code># HTTP
+readinessProbe:
+  httpGet: { path: /ready, port: 8080, httpHeaders: [{ name: Host, value: example.com }] }
+
+# TCP socket — just open a connection
+readinessProbe:
+  tcpSocket: { port: 5432 }
+
+# Exec — run a command, exit 0 means healthy
+livenessProbe:
+  exec:
+    command: ["sh", "-c", "redis-cli ping | grep -q PONG"]
+
+# gRPC (1.27+)
+readinessProbe:
+  grpc: { port: 9000 }</code></pre>
+</div>
+
+<h2 id="resources">Resources — requests &amp; limits</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>resources:
+  requests:
+    cpu:    "100m"        # 100 millicores = 0.1 of a core
+    memory: "128Mi"
+  limits:
+    cpu:    "500m"
+    memory: "256Mi"</code></pre>
+</div>
+
+<table>
+<thead><tr><th>Field</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td><strong>requests</strong></td><td>What the scheduler reserves on a node before placing the Pod. The Pod gets <em>at least</em> this much.</td></tr>
+<tr><td><strong>limits</strong></td><td>The cap. CPU above limits is throttled; memory above is OOM-killed.</td></tr>
+</tbody>
+</table>
+
+<h4>The CPU limits debate</h4>
+<p>For most workloads, <strong>set CPU requests but not CPU limits</strong>. CPU is compressible — being throttled is fine, being killed is not. CFS-throttling at the cgroup level can cause severe latency spikes at fractional limits. Conventional wisdom in 2026: requests yes, limits only when you have a real reason (multi-tenancy isolation, billing).</p>
+
+<p>For memory: <strong>set both, equal to each other</strong>. Memory isn't compressible — exceeding limits = OOMKill. Equal means no over-commit; the Pod gets a <strong>Guaranteed</strong> QoS class.</p>
+
+<h4>QoS classes</h4>
+<ul>
+  <li><strong>Guaranteed</strong>: every container has limits == requests for both CPU and memory. Last to be evicted under node pressure.</li>
+  <li><strong>Burstable</strong>: at least one container has requests &lt; limits, or only requests set. Middle-priority on eviction.</li>
+  <li><strong>BestEffort</strong>: no requests or limits set anywhere. First evicted under pressure.</li>
+</ul>
+
+<p>Production rule: every container has at least requests. <code>BestEffort</code> pods are a foot-gun — they'll get evicted at the worst moment.</p>
+
+<h2 id="affinity">Affinity, anti-affinity, taints, tolerations</h2>
+
+<p>Tools to influence scheduling.</p>
+
+<h4>nodeSelector — simple</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  nodeSelector:
+    disktype: ssd</code></pre>
+</div>
+<p>Only place this Pod on nodes labelled <code>disktype=ssd</code>.</p>
+
+<h4>Affinity — flexible</h4>
+<div class="code" data-lang="yaml">
+<pre><code>affinity:
+  nodeAffinity:                                # I want / prefer these nodes
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - { key: kubernetes.io/arch, operator: In, values: [amd64] }
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - { key: topology.kubernetes.io/zone, operator: In, values: [us-east-1a] }
+  podAntiAffinity:                             # spread me away from like-pods
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector: { matchLabels: { app: api } }
+        topologyKey: kubernetes.io/hostname    # one per node</code></pre>
+</div>
+
+<p>"required" = scheduling won't happen unless satisfied. "preferred" = soft preference. <code>topologyKey</code> defines what counts as the same domain — hostname (one per node), zone (one per AZ).</p>
+
+<p>Common pattern: spread a Deployment across nodes/zones for HA via pod anti-affinity. Or a cleaner alternative below.</p>
+
+<h4>topologySpreadConstraints — modern, cleaner</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector: { matchLabels: { app: api } }</code></pre>
+</div>
+<p>"At most 1 imbalance across zones for pods labelled <code>app: api</code>". Cleaner expression of "spread me across zones" than affinity gymnastics.</p>
+
+<h4>Taints &amp; tolerations</h4>
+<p>The inverse: a node says "no pods unless they tolerate me". GPU nodes, Windows nodes, control-plane nodes are typically tainted so only pods that explicitly want them land there.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl taint node gpu-1 nvidia.com/gpu=true:NoSchedule</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule</code></pre>
+</div>
+
+<h2 id="hpa">HorizontalPodAutoscaler</h2>
+
+<p>"Adjust replicas based on metrics." Most common: scale on CPU.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: api }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70           # target: avg CPU = 70% of requests
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 80 }
+  behavior:                                # 1.23+; control scale-up/down speed
+    scaleDown:
+      stabilizationWindowSeconds: 300      # avoid flapping
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max</code></pre>
+</div>
+
+<p>Requirements:</p>
+<ul>
+  <li>Containers must have <code>resources.requests.cpu</code> set — utilisation is computed against requests.</li>
+  <li><code>metrics-server</code> installed in the cluster (it usually is on managed clusters).</li>
+</ul>
+
+<p>For non-CPU metrics (request rate, queue depth, custom Prometheus metric), use the <strong>External Metrics</strong> path — install <code>kube-prometheus-stack</code> or KEDA, then HPAs can scale on anything.</p>
+
+<h4>KEDA — the practical answer for "scale on anything"</h4>
+<p>KEDA bridges any event source (Kafka lag, SQS depth, Redis list length, Prometheus query result, cron schedule) to HPA. It also enables scale-to-zero, which native HPA doesn't.</p>
+
+<h2 id="vpa">VerticalPodAutoscaler — usually not</h2>
+
+<p>VPA adjusts requests/limits over time. Sounds great, but in practice it interacts badly with HPA, requires pod restarts to change resources, and most teams use the <em>recommendation</em> mode for sizing guidance rather than auto-update mode. Useful as a tool; not a panacea.</p>
+
+<h2 id="pdb">PodDisruptionBudget</h2>
+
+<p>"During <em>voluntary</em> disruptions (drain, eviction), don't take more than N pods down at once." Critical for stateful workloads and anything where reduced capacity matters.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: api }
+spec:
+  selector: { matchLabels: { app: api } }
+  minAvailable: 2          # OR maxUnavailable: 1
+  # unhealthyPodEvictionPolicy: AlwaysAllow   # 1.27+; let unhealthy pods get evicted</code></pre>
+</div>
+
+<p>Voluntary = node drain by admin, autoscaler scale-down, eviction API. <em>In</em>voluntary (kernel panic, network split) doesn't respect PDBs — they're a soft contract for orchestrated operations.</p>
+
+<p>For a Deployment with 3 replicas: <code>minAvailable: 2</code> means a node drain pauses if it would leave fewer than 2. Drains progress as pods reschedule and become ready elsewhere.</p>
+
+<h2 id="security-context">Security context — least privilege at the pod level</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  securityContext:                         # pod-level
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: app
+      image: my-app:1.0
+      securityContext:                     # container-level (overrides)
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+        privileged: false</code></pre>
+</div>
+
+<p>The minimum set of "production hardening" knobs:</p>
+<ul>
+  <li><code>runAsNonRoot: true</code> — refuse to start if image runs as UID 0.</li>
+  <li><code>readOnlyRootFilesystem: true</code> — apps that don't write should not have a writeable rootfs. Mount <code>emptyDir</code> for what does need to write.</li>
+  <li><code>allowPrivilegeEscalation: false</code> — block setuid binaries.</li>
+  <li><code>capabilities: drop: [ALL]</code> — drop every Linux capability you didn't ask for.</li>
+  <li><code>seccompProfile: RuntimeDefault</code> — use the runtime's seccomp profile (containerd ships a sane default).</li>
+</ul>
+
+<h2 id="psa">Pod Security Admission</h2>
+
+<p>Replaces the deprecated PodSecurityPolicy. Three levels of profile, applied at the namespace via labels:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    pod-security.kubernetes.io/enforce: restricted    # block non-conforming pods
+    pod-security.kubernetes.io/audit:   restricted    # log violations
+    pod-security.kubernetes.io/warn:    restricted    # warn at apply time</code></pre>
+</div>
+
+<table>
+<thead><tr><th>Profile</th><th>Allows</th></tr></thead>
+<tbody>
+<tr><td><code>privileged</code></td><td>Anything. For system namespaces.</td></tr>
+<tr><td><code>baseline</code></td><td>Most things; blocks the worst (privileged, hostNetwork, hostPath).</td></tr>
+<tr><td><code>restricted</code></td><td>Strict: non-root, cap drop, seccomp default, no privilege escalation, etc.</td></tr>
+</tbody>
+</table>
+
+<p>Set <code>enforce: restricted</code> on app namespaces. The cluster rejects pod manifests that violate the profile — your security context above is essentially the <code>restricted</code> profile written out.</p>
+
+<h2 id="rbac">RBAC — properly</h2>
+
+<p>RBAC has four building blocks:</p>
+<ul>
+  <li><strong>Role / ClusterRole</strong> — what actions are allowed.</li>
+  <li><strong>RoleBinding / ClusterRoleBinding</strong> — who gets that Role.</li>
+</ul>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: deploy-watcher }
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: alpha-watcher, namespace: team-alpha }
+subjects:
+  - kind: User
+    name: alice@example.com
+    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: monitor
+    namespace: team-alpha
+roleRef:
+  kind: ClusterRole
+  name: deploy-watcher
+  apiGroup: rbac.authorization.k8s.io</code></pre>
+</div>
+
+<p>Role = namespaced; ClusterRole = cluster-wide. RoleBinding = grants in one namespace; ClusterRoleBinding = grants cluster-wide. You can bind a ClusterRole via a RoleBinding to scope cluster-wide-defined permissions to a namespace — handy.</p>
+
+<h4>Audit your permissions</h4>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl auth can-i list pods
+yes
+$ kubectl auth can-i delete deploy --as=system:serviceaccount:team-alpha:monitor
+no
+$ kubectl auth can-i --list                          # everything I can do
+$ kubectl auth can-i --list --as=user@example.com</code></pre>
+</div>
+
+<p><code>can-i</code> is the friendly face of the SubjectAccessReview API. Use it to validate "did I just give the wrong permissions?" before applying.</p>
+
+<h2 id="observability">Observability hooks</h2>
+
+<h4>Logs</h4>
+<p>Containers write to stdout/stderr; the runtime captures to log files; a node-level shipper (Fluent Bit, Vector) tails them and forwards to a backend (Loki, Elasticsearch, CloudWatch). Don't write to files inside the container.</p>
+
+<h4>Metrics</h4>
+<p>Pod exposes <code>/metrics</code> in Prometheus format on a port; <code>prometheus.io/scrape: "true"</code> annotation tells Prometheus to scrape (with the right config). For the modern approach, install <code>kube-prometheus-stack</code> via Helm and use ServiceMonitor / PodMonitor CRDs instead of annotations.</p>
+
+<h4>Traces</h4>
+<p>OpenTelemetry SDK in your app, OTel Collector running as a DaemonSet or sidecar, exporting to Jaeger/Tempo/Datadog/etc. Distributed tracing is the only way to debug latency in a microservice mesh.</p>
+
+<h4>Events</h4>
+<p>Kubernetes itself emits Events for everything — pod scheduled, image pulled, probe failed, OOMKilled. <code>kubectl describe pod X</code> shows recent events. <code>kubectl get events -A --sort-by=.lastTimestamp</code> for cluster-wide. They're truncated after an hour by default; ship them to your log backend if you want history.</p>
+
+<h2 id="pre-stop">Graceful shutdown</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  terminationGracePeriodSeconds: 60
+  containers:
+    - name: app
+      image: my-app:1.0
+      lifecycle:
+        preStop:
+          exec:
+            command: ["sh", "-c", "sleep 10 &amp;&amp; kill -TERM 1"]</code></pre>
+</div>
+
+<p>Lifecycle when a Pod is deleted:</p>
+<ol>
+  <li>API server marks the Pod for deletion (<code>deletionTimestamp</code> set).</li>
+  <li>Endpoints controller removes Pod from EndpointSlice — Service stops sending new traffic. <em>This is async</em>.</li>
+  <li>Kubelet runs the <code>preStop</code> hook (if any).</li>
+  <li>Kubelet sends SIGTERM to PID 1.</li>
+  <li>Wait <code>terminationGracePeriodSeconds</code> for graceful shutdown.</li>
+  <li>If still running, SIGKILL.</li>
+</ol>
+
+<p>The <code>sleep 10</code> in <code>preStop</code> is the canonical "give kube-proxy time to update iptables before we stop accepting traffic" trick. Without it, you get a thin window where the Service still routes to a Pod that has already started shutting down.</p>
+
+<p>Your app must handle SIGTERM gracefully (Chapter 6). If it ignores SIGTERM, you get hard kills.</p>
+
+<h2 id="hands-on">Hands-on: a "production-shaped" Deployment</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · every production knob in one manifest</div>
+<div class="hands-on-body">
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: prod
+  labels: { app.kubernetes.io/name: api, app.kubernetes.io/version: "1.2.3" }
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata:
+      labels: { app: api, app.kubernetes.io/version: "1.2.3" }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "9100"
+        config-hash:          "sha256:abc123"
+    spec:
+      serviceAccountName: api
+      automountServiceAccountToken: false        # turn off if not calling K8s API
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    10001
+        fsGroup:      10001
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: api } }
+      containers:
+        - name: api
+          image: registry.example.com/api:1.2.3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http,    containerPort: 8080 }
+            - { name: metrics, containerPort: 9100 }
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          envFrom:
+            - configMapRef: { name: api-config }
+          resources:
+            requests: { cpu: 100m,  memory: 256Mi }
+            limits:   {              memory: 256Mi }   # mem only; no cpu limit
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec: { command: ["sh", "-c", "sleep 10"] }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp,   mountPath: /tmp }
+            - { name: cache, mountPath: /var/cache/api }
+      volumes:
+        - { name: tmp,   emptyDir: {} }
+        - { name: cache, emptyDir: { sizeLimit: 1Gi } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: api, namespace: prod }
+spec:
+  selector: { matchLabels: { app: api } }
+  minAvailable: 2
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: api, namespace: prod }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api }
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }</code></pre>
+</div>
+<p>Read line by line. Every block solves a real production problem. Use this as a starting template; remove what doesn't apply rather than adding what's missing later.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Probe paths</span>
+</div>
+<div class="exercise-body">
+<p>Should <code>/ready</code> and <code>/healthz</code> check the same things? Why or why not?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>No. <code>/ready</code> can return false if downstream dependencies are unavailable (database, cache) — Service stops sending traffic, but the pod isn't killed and can recover. <code>/healthz</code> should only return false if the process is genuinely wedged and needs a restart. Identical paths conflate "should I serve right now?" with "should I be killed?".</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">QoS class</span>
+</div>
+<div class="exercise-body">
+<p>What QoS class does this pod end up in?</p>
+<div class="code" data-lang="yaml">
+<pre><code>containers:
+  - name: a
+    resources: { requests: { cpu: 100m, memory: 100Mi }, limits: { cpu: 100m, memory: 100Mi } }
+  - name: b
+    resources: { requests: { cpu: 100m, memory: 100Mi } }     # no limits</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>Burstable</strong>. For Guaranteed, every container needs limits == requests for both CPU and memory. Container <code>b</code> has only requests, no limits — that downgrades the whole pod.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Spread by zone</span>
+</div>
+<div class="exercise-body">
+<p>Spread a Deployment across 3 AZs evenly, but allow scheduling even if perfect spread isn't possible. Show with topologySpreadConstraints.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway          # soft
+      labelSelector: { matchLabels: { app: api } }</code></pre>
+</div>
+<p><code>ScheduleAnyway</code> = soft. <code>DoNotSchedule</code> = hard (might block scaling if the constraint can't be satisfied).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">PDB blocks drain</span>
+</div>
+<div class="exercise-body">
+<p>You have a Deployment with 3 replicas and a PDB <code>minAvailable: 3</code>. You try to drain the only node hosting one of these pods. What happens, and what's your fix?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The drain blocks indefinitely — eviction would drop available pods to 2, violating the PDB. Either:</p>
+<ol>
+<li>Lower the PDB (<code>minAvailable: 2</code>) — sensible for 3 replicas.</li>
+<li>Add capacity (more nodes / more replicas) so eviction can move pods elsewhere first.</li>
+<li>Force-drain (<code>kubectl drain --disable-eviction --force</code>) — but you've now bypassed the safety mechanism.</li>
+</ol>
+<p>Lesson: a PDB equal to replica count makes the workload undrainable. Use <code>maxUnavailable: 1</code> or <code>minAvailable: replicas - 1</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Lock down a namespace</span>
+</div>
+<div class="exercise-body">
+<p>Add Pod Security Admission "restricted" enforce to a namespace, then write a Pod manifest that conforms.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: v1
+kind: Namespace
+metadata:
+  name: locked
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: web, namespace: locked }
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: web
+      image: nginxinc/nginx-unprivileged:1.27        # listens on 8080, runs as non-root
+      ports: [{ containerPort: 8080 }]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: tmp,        mountPath: /tmp }
+        - { name: var-cache,  mountPath: /var/cache/nginx }
+        - { name: var-run,    mountPath: /var/run }
+  volumes:
+    - { name: tmp,       emptyDir: {} }
+    - { name: var-cache, emptyDir: {} }
+    - { name: var-run,   emptyDir: {} }</code></pre>
+</div>
+<p>Standard nginx image runs as root and binds 80 — fails restricted. The <code>nginx-unprivileged</code> variant runs as a non-root user on 8080 and is the canonical "restricted-friendly" web server.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><strong>Probes</strong>: readiness gates traffic; liveness restarts; startup gives slow apps a grace window. Distinct paths matter.</li>
+  <li><strong>Resources</strong>: requests for both, memory limits = requests (Guaranteed), often skip CPU limits.</li>
+  <li><strong>Scheduling</strong>: <code>topologySpreadConstraints</code> for HA spread; affinity/tolerations for special-purpose nodes.</li>
+  <li><strong>HPA</strong> for replica scaling; KEDA when you need to scale on anything other than CPU/memory.</li>
+  <li><strong>PDB</strong> protects voluntary disruptions but mustn't be over-tight or it makes drains impossible.</li>
+  <li><strong>SecurityContext</strong>: non-root, RO root, drop ALL caps, seccomp default — every prod container.</li>
+  <li><strong>Pod Security Admission</strong> at namespace scope to enforce baselines.</li>
+  <li><strong>RBAC</strong>: least privilege; <code>kubectl auth can-i</code> to verify.</li>
+  <li><strong>Graceful shutdown</strong>: <code>preStop sleep</code> + handle SIGTERM in your app.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="12-k8s-networking-storage.html"><span class="lbl">← Prev</span><span class="ttl">Networking &amp; Storage</span></a>
+  <a href="14-helm-gitops-operators.html" class="next"><span class="lbl">Next →</span><span class="ttl">Helm, GitOps, Operators</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

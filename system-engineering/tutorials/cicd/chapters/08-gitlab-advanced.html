@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>8 · GitLab CI — Advanced — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 08</span>
+  GitLab CI — Advanced
+</h1>
+<p class="lede">
+  <code>rules</code> in depth, <code>needs</code> &amp; DAG, matrix
+  jobs, <code>extends</code>, <code>include</code>, multi-project
+  pipelines, dynamic child pipelines, and the GitLab CI patterns that
+  separate hobby repos from production pipelines.
+</p>
+
+<h2 id="rules-deep">Rules — full reference</h2>
+
+<p>A <code>rules:</code> list is evaluated top-to-bottom; the first matching rule decides if and how the job runs.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>unit-tests:
+  script: [pytest]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: [src/**/*]
+      when: on_success
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: on_success
+      allow_failure: true                # don't fail MR if tests fail
+    - when: never                         # default: don't run</code></pre>
+</div>
+
+<p>Rule clauses:</p>
+<ul>
+  <li><code>if:</code> — expression using predefined or custom CI variables. Operators: <code>==</code>, <code>!=</code>, <code>=~</code> (regex match), <code>!~</code>, <code>&amp;&amp;</code>, <code>||</code>, <code>!</code>.</li>
+  <li><code>changes:</code> — list of paths; job runs only if any matched file changed.</li>
+  <li><code>exists:</code> — list of paths; runs only if files exist in the repo.</li>
+  <li><code>when:</code> — <code>on_success</code> (default), <code>always</code>, <code>never</code>, <code>manual</code>, <code>delayed</code>.</li>
+  <li><code>allow_failure:</code> — if true, job's failure doesn't fail the pipeline.</li>
+  <li><code>variables:</code> — rule-scoped variable overrides (powerful).</li>
+</ul>
+
+<h4>Common patterns</h4>
+
+<div class="code" data-lang="yaml">
+<pre><code># Run on MRs and on main, not on feature branches
+rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Skip pipeline if commit message says [skip ci]
+rules:
+  - if: $CI_COMMIT_MESSAGE =~ /\[skip ci\]/
+    when: never
+  - when: on_success
+
+# Run only on version tags
+rules:
+  - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/
+
+# Nightly job on main
+rules:
+  - if: $CI_PIPELINE_SOURCE == "schedule" &amp;&amp; $CI_COMMIT_BRANCH == "main"</code></pre>
+</div>
+
+<div class="callout pitfall">
+<div class="callout-title"><code>rules:</code> and <code>only:</code>/<code>except:</code> don't mix</div>
+<p>
+  A job must use either <code>rules:</code> or the legacy
+  <code>only:</code>/<code>except:</code>. Mixing them is an error.
+  Modern GitLab favours <code>rules</code> — use it exclusively in
+  new code.
+</p>
+</div>
+
+<h2 id="needs-dag">needs — the real DAG</h2>
+
+<p>
+  <code>needs:</code> on a job means "don't wait for my stage to
+  start — start as soon as these specific jobs finish". It turns
+  waterfall stages into a true directed-acyclic graph.
+</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>stages: [lint, test, build, deploy]
+
+lint-py:   { stage: lint, script: [ruff check] }
+lint-yaml: { stage: lint, script: [yamllint .] }
+
+test-unit:
+  stage: test
+  needs: [lint-py]                # as soon as lint-py finishes
+  script: [pytest tests/unit]
+
+test-integ:
+  stage: test
+  needs: []                       # no deps; start at t=0
+  script: [./scripts/integration.sh]
+
+build:
+  stage: build
+  needs: [test-unit, test-integ]
+  script: [make dist]
+
+deploy:
+  stage: deploy
+  needs: [build]
+  script: [./deploy.sh]</code></pre>
+</div>
+
+<p>Wall-clock: the lint stage no longer blocks slow integration tests. Pipelines that would run for 15 minutes under strict stages finish in 7.</p>
+
+<p><code>needs</code> can also be cross-pipeline:</p>
+<div class="code" data-lang="yaml">
+<pre><code>deploy-from-upstream:
+  stage: deploy
+  needs:
+    - project: mygroup/upstream
+      ref: main
+      job: build-artifact
+  script: ["./deploy.sh"]</code></pre>
+</div>
+
+<p>This pulls artifacts from another project's successful pipeline.</p>
+
+<h2 id="matrix">Parallel and matrix jobs</h2>
+
+<p>One job, many instances:</p>
+<div class="code" data-lang="yaml">
+<pre><code>test:
+  parallel: 5
+  script: ["pytest --shard=$CI_NODE_INDEX/$CI_NODE_TOTAL"]</code></pre>
+</div>
+
+<p>GitLab spins up 5 copies; <code>$CI_NODE_INDEX</code> goes 1–5, <code>$CI_NODE_TOTAL</code> is 5. You feed these to your test runner's sharding.</p>
+
+<p>Full matrix:</p>
+<div class="code" data-lang="yaml">
+<pre><code>test:
+  parallel:
+    matrix:
+      - PYTHON: ["3.9", "3.10", "3.11", "3.12"]
+        OS:     ["ubuntu-latest", "macos-latest"]
+      - PYTHON: ["3.12"]
+        OS:     ["windows-latest"]
+  image: "python:$PYTHON"
+  script: [pytest]</code></pre>
+</div>
+
+<p>Two matrix entries (OR'd): the first is 4×2=8 combinations, the second is 1×1=1, total 9 jobs. Each gets variables set from the axes.</p>
+
+<h2 id="extends">extends — per-job inheritance</h2>
+
+<p>Cleaner than YAML anchors:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>.python-base:
+  image: python:3.11-slim
+  before_script:
+    - pip install -r requirements.txt
+
+lint:
+  extends: .python-base
+  script: [ruff check src/]
+
+test:
+  extends: .python-base
+  script: [pytest]</code></pre>
+</div>
+
+<p>You can extend multiple parents and override specifics:</p>
+<div class="code" data-lang="yaml">
+<pre><code>.docker-build:
+  image: docker:24
+  services: [docker:24-dind]
+
+.registry-login:
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+
+publish:
+  extends: [.docker-build, .registry-login]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA</code></pre>
+</div>
+
+<p>Later parents win on conflicts; the child's own keys win above all.</p>
+
+<h2 id="include">include — split your config</h2>
+
+<p>A big <code>.gitlab-ci.yml</code> is unmaintainable. Split it:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>include:
+  # From the same repo
+  - local: .gitlab/ci/lint.yml
+  - local: .gitlab/ci/test.yml
+  - local: .gitlab/ci/deploy.yml
+
+  # From a template shipped with GitLab
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+
+  # From another project in the same instance
+  - project: mygroup/ci-templates
+    ref: v1.2.0
+    file: /templates/python.yml
+
+  # From any URL
+  - remote: 'https://example.com/shared/build.yml'
+
+  # Component — modern, best practice for sharing reusable bits
+  - component: $CI_SERVER_FQDN/mygroup/components/docker-build@1.0</code></pre>
+</div>
+
+<p>Everything included merges into one final config. A lint job defined in <code>.gitlab/ci/lint.yml</code> is a peer to jobs defined in the main file.</p>
+
+<p><strong>Components</strong> (the last entry) are GitLab's modern reuse primitive — versioned, documented, with explicit inputs. Use them over raw <code>include:</code> for shareable logic.</p>
+
+<h2 id="components">CI/CD components</h2>
+
+<p>A component is a small, reusable pipeline fragment stored in its own "CI/CD Catalog" project. Define inputs as <code>spec.inputs</code>:</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">templates/docker-build/template.yml</span></div>
+<pre><code>spec:
+  inputs:
+    image:
+      description: "Image to build"
+    dockerfile:
+      default: Dockerfile
+    registry:
+      default: $CI_REGISTRY
+---
+docker-build:
+  image: docker:24
+  services: [docker:24-dind]
+  script:
+    - docker build -f $[[ inputs.dockerfile ]] -t $[[ inputs.registry ]]/$[[ inputs.image ]]:$CI_COMMIT_SHA .
+    - docker push $[[ inputs.registry ]]/$[[ inputs.image ]]:$CI_COMMIT_SHA</code></pre>
+</div>
+
+<p>Consumer:</p>
+<div class="code" data-lang="yaml">
+<pre><code>include:
+  - component: gitlab.example.com/group/templates/docker-build@1.0
+    inputs:
+      image: myapp
+      dockerfile: ci/Dockerfile</code></pre>
+</div>
+
+<p>Components have versioning, a catalog UI, and enforced input schemas. Preferable to ad-hoc <code>include:</code> for anything you want to share across projects.</p>
+
+<h2 id="child-pipelines">Child &amp; dynamic pipelines</h2>
+
+<p>Trigger a separate pipeline from a job — useful for monorepos where only part of the repo should run:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>frontend-pipeline:
+  stage: build
+  trigger:
+    include: frontend/.gitlab-ci.yml
+    strategy: depend                # parent waits for child
+
+backend-pipeline:
+  stage: build
+  trigger:
+    include: backend/.gitlab-ci.yml</code></pre>
+</div>
+
+<p><strong>Dynamic</strong> child pipelines generate the child YAML on the fly:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>generate-config:
+  stage: build
+  script:
+    - python generate-pipeline.py &gt; generated.yml
+  artifacts:
+    paths: [generated.yml]
+
+trigger-generated:
+  stage: build
+  needs: [generate-config]
+  trigger:
+    include:
+      - artifact: generated.yml
+        job: generate-config</code></pre>
+</div>
+
+<p>Killer for monorepos: the <code>generate-pipeline.py</code> looks at which files changed, emits only the relevant jobs, and the child pipeline runs <em>just</em> those.</p>
+
+<h2 id="auto-devops">Auto DevOps and SAST templates</h2>
+
+<p>GitLab ships built-in pipeline templates for common stages:</p>
+<ul>
+  <li><strong>Auto DevOps</strong> — one-setting enable; GitLab auto-detects language, lints, tests, builds, dockerises, and deploys to a K8s cluster.</li>
+  <li><strong>SAST / Dependency Scanning / Container Scanning / Secret Detection / DAST / Fuzz Testing / License Scanning</strong> — all available as <code>template:</code> includes. Many are free; some are paid-tier.</li>
+</ul>
+
+<div class="code" data-lang="yaml">
+<pre><code>include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+  - template: Jobs/Dependency-Scanning.gitlab-ci.yml
+  - template: Jobs/Container-Scanning.gitlab-ci.yml</code></pre>
+</div>
+
+<p>Results surface on the MR as first-class security reports. More in Chapter 11.</p>
+
+<h2 id="merge-trains">Merge trains</h2>
+
+<p>
+  A premium feature: when multiple MRs are ready to merge, GitLab
+  queues them, rebases each onto the prior, runs the pipeline for the
+  combined result, and merges them in order if every combined pipeline
+  passes. Solves the "green-on-its-own, red-when-merged" problem
+  elegantly. Available on Premium/Ultimate tiers.
+</p>
+
+<h2 id="mr-pipelines">Merge request pipelines</h2>
+
+<p>Three flavors:</p>
+<ol>
+  <li><strong>Branch pipeline.</strong> Runs on every push to a branch. Doesn't know the MR.</li>
+  <li><strong>Merge request pipeline.</strong> Runs in the context of an MR, has access to <code>$CI_MERGE_REQUEST_*</code> variables. Enable via rules.</li>
+  <li><strong>Merged results pipeline.</strong> Runs on a speculative merge-commit (source + target). Catches "my change passes alone but breaks with target" cases.</li>
+</ol>
+
+<p>To enable MR pipelines, gate a job with:</p>
+<div class="code" data-lang="yaml">
+<pre><code>rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"</code></pre>
+</div>
+
+<h2 id="container-registry">The integrated container registry</h2>
+
+<p>Every GitLab project has its own container registry. Use predefined variables to push:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>publish:
+  image: docker:24
+  services: [docker:24-dind]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - docker push    $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker tag     $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE:latest
+    - docker push    $CI_REGISTRY_IMAGE:latest</code></pre>
+</div>
+
+<p>No secret management needed — <code>$CI_REGISTRY_PASSWORD</code> is auto-injected and scoped to the job.</p>
+
+<h2 id="gitlab-runner">Running a self-hosted runner</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Install
+$ curl -L --output /tmp/gitlab-runner.deb \
+     https://gitlab-runner-downloads.s3.amazonaws.com/latest/deb/gitlab-runner_amd64.deb
+$ sudo dpkg -i /tmp/gitlab-runner.deb
+
+# Register
+$ sudo gitlab-runner register \
+     --url https://gitlab.example.com \
+     --token  glrt-XXX \
+     --executor docker \
+     --docker-image alpine:3.19 \
+     --description "linux-docker-1"
+
+# Start
+$ sudo gitlab-runner start</code></pre>
+</div>
+
+<p>Runner config lives in <code>/etc/gitlab-runner/config.toml</code>. Settings worth tuning:</p>
+<ul>
+  <li><code>concurrent</code> — how many jobs this runner handles at once.</li>
+  <li><code>[runners.docker]</code> — image pull policy, volume mounts, networks.</li>
+  <li><code>[runners.cache]</code> — S3 / GCS cache backend so caches survive the runner dying.</li>
+</ul>
+
+<h2 id="hands-on">Hands-on: a mid-sized pipeline</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · DAG, rules, extends, include</div>
+<div class="hands-on-body">
+<p>Start from the Chapter 7 pipeline. Refactor:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.gitlab-ci.yml</span></div>
+<pre><code>include:
+  - local: .gitlab/ci/python.yml
+
+stages: [lint, test, build, deploy]
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip"
+
+lint:
+  extends: .python
+  stage: lint
+  script: [ruff check src/]
+
+test-unit:
+  extends: .python
+  stage: test
+  needs: [lint]
+  script: [pytest --junitxml=unit.xml]
+  artifacts: { reports: { junit: unit.xml } }
+
+test-integ:
+  extends: .python
+  stage: test
+  needs: [lint]
+  services: [postgres:16]
+  variables:
+    POSTGRES_PASSWORD: test
+    DATABASE_URL: "postgres://postgres:test@postgres:5432/postgres"
+  script: [pytest tests/integration/]
+
+build:
+  extends: .python
+  stage: build
+  needs: [test-unit, test-integ]
+  script: [python -m build]
+  artifacts: { paths: [dist/], expire_in: 1 week }
+
+deploy-staging:
+  stage: deploy
+  needs: [build]
+  image: alpine:3.19
+  script: ["echo fake-deploy $CI_COMMIT_SHA to staging"]
+  environment: { name: staging, url: https://staging.example.com }
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-prod:
+  stage: deploy
+  needs: [build]
+  image: alpine:3.19
+  script: ["echo fake-deploy $CI_COMMIT_SHA to prod"]
+  environment: { name: production }
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+      when: manual</code></pre>
+</div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.gitlab/ci/python.yml</span></div>
+<pre><code>.python:
+  image: python:3.11-slim
+  cache:
+    key: { files: [requirements.txt] }
+    paths: [.pip/, .venv/]
+  before_script:
+    - python -m venv .venv
+    - . .venv/bin/activate
+    - pip install -r requirements.txt</code></pre>
+</div>
+<p>Push. Observe:</p>
+<ul>
+<li>The pipeline graph is a DAG — <code>test-unit</code> and <code>test-integ</code> start as soon as <code>lint</code> passes.</li>
+<li>The <code>deploy-staging</code> job only appears when you're on the default branch.</li>
+<li>The <code>deploy-prod</code> job only appears on version-tag pipelines, and even then requires a manual click.</li>
+</ul>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">skip ci</span>
+</div>
+<div class="exercise-body">
+<p>Write rules that make a pipeline skip <em>entirely</em> if the commit message contains <code>[skip ci]</code>, without touching any jobs individually.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Workflow-level rules apply to the whole pipeline:</p>
+<div class="code" data-lang="yaml">
+<pre><code>workflow:
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /\[skip ci\]/
+      when: never
+    - when: always</code></pre>
+</div>
+<p>Side note: GitLab already recognises <code>[skip ci]</code> and <code>[ci skip]</code> natively in commit messages — this rule is mostly useful to customise the matching, or add your own patterns like <code>[nopipe]</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Sharded tests</span>
+</div>
+<div class="exercise-body">
+<p>Run pytest split across 4 parallel jobs.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>test:
+  image: python:3.11
+  parallel: 4
+  script:
+    - pip install pytest pytest-split
+    - pytest --splits $CI_NODE_TOTAL --group $CI_NODE_INDEX</code></pre>
+</div>
+<p><code>pytest-split</code> is a plugin that accepts <code>--splits N --group K</code> and divides the test suite deterministically. For Go, <code>go test</code> has native sharding via <code>-shuffle</code> and <code>-run</code> patterns.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Template extraction</span>
+</div>
+<div class="exercise-body">
+<p>You have five projects that each push a Docker image. Extract the Docker-build job into a shared template in a <code>ci-templates</code> project.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">ci-templates/docker.yml</span></div>
+<pre><code>.docker-build:
+  image: docker:24
+  services: [docker:24-dind]
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - docker push   $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA</code></pre>
+</div>
+<p>Consumer:</p>
+<div class="code" data-lang="yaml">
+<pre><code>include:
+  - project: mygroup/ci-templates
+    ref: main
+    file: /docker.yml
+
+publish:
+  extends: .docker-build
+  stage: build</code></pre>
+</div>
+<p>Better: wrap as a proper Component (earlier in this chapter). Pin by tag (<code>ref: v1.0.0</code>), not <code>main</code>, so consumers pick when to upgrade.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Dynamic pipeline for monorepo</span>
+</div>
+<div class="exercise-body">
+<p>Sketch a dynamic child pipeline scheme where a generator job inspects changed paths and emits a child YAML that contains only jobs for those paths.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>generate:
+  image: python:3.11
+  script:
+    - python ci/generate.py &gt; child.yml
+    - cat child.yml
+  artifacts: { paths: [child.yml] }
+
+run-child:
+  stage: test
+  needs: [generate]
+  trigger:
+    include:
+      - artifact: child.yml
+        job: generate
+    strategy: depend</code></pre>
+</div>
+<p><code>ci/generate.py</code> looks at the base vs current commit:</p>
+<div class="code" data-lang="sh">
+<pre><code>changed=$(git diff --name-only "$CI_MERGE_REQUEST_DIFF_BASE_SHA"...HEAD)
+echo "$changed"</code></pre>
+</div>
+<p>Then emits Python/Node/etc jobs as appropriate. Very common pattern for monorepos with 20+ microservices.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Merge request pipeline only</span>
+</div>
+<div class="exercise-body">
+<p>Design rules so a pipeline never runs twice for the same commit — either the branch pipeline, or the MR pipeline, never both.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>workflow:
+  rules:
+    # Always run MR pipelines when an MR exists
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Run branch pipelines only when there is NO open MR
+    - if: $CI_COMMIT_BRANCH &amp;&amp; $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH
+      when: always</code></pre>
+</div>
+<p>This is GitLab's official recommended workflow rules for "avoid duplicate pipelines". The variable <code>$CI_OPEN_MERGE_REQUESTS</code> is set when the current commit is associated with an open MR.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>rules</code> is the modern predicate for "when does this job run"; first match wins; <code>workflow:rules:</code> applies at pipeline scope.</li>
+  <li><code>needs:</code> turns stages into a DAG — huge wall-time wins for wide pipelines.</li>
+  <li><code>parallel: N</code> or <code>parallel: matrix</code> for sharding and cross-version testing.</li>
+  <li><code>extends</code> + <code>include</code> decompose big YAML; <strong>Components</strong> are the modern reusable primitive.</li>
+  <li>Dynamic child pipelines for monorepos: a generator emits YAML an <code>include:</code>s it from an artifact.</li>
+  <li>Built-in templates cover SAST/DAST/secret scanning/etc. — opt in with one-line includes.</li>
+  <li>Integrated container registry is zero-config: <code>$CI_REGISTRY_*</code> variables hand you auth automatically.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="07-gitlab-intro.html"><span class="lbl">← Prev</span><span class="ttl">GitLab CI — Fundamentals</span></a>
+  <a href="09-gha-intro.html" class="next"><span class="lbl">Next →</span><span class="ttl">GitHub Actions — Fundamentals</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

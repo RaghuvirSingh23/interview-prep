@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>9 · Real Projects — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 09</span>
+  Real Projects
+</h1>
+<p class="lede">
+  Time to put it together. This chapter is four real build patterns:
+  a C project with automatic header dependencies, a data pipeline, a
+  LaTeX document, and a polyglot project that ties them together. By
+  the end you'll recognise these patterns in every mature Makefile you
+  read.
+</p>
+
+<h2 id="c-with-deps">Pattern 1 — C with auto-dependency generation</h2>
+
+<p>
+  The biggest weakness of "pure" Make for C is that you have to
+  manually declare <em>which header files each source depends on</em>.
+  For any non-trivial project this is unsustainable — people get it
+  wrong, the build produces wrong output, hours are lost.
+</p>
+
+<p>The fix is ingenious. Every serious C compiler (gcc, clang) has flags to emit a <em>dependency file</em> — a little Makefile fragment listing exactly which headers the source included. We use those fragments.</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — C with auto-deps</span></div>
+<pre><code>CC      := cc
+CFLAGS  := -O2 -Wall -Wextra -MMD -MP
+LDFLAGS :=
+LDLIBS  :=
+
+SRC_DIR := src
+BLD_DIR := build
+
+SRC := $(wildcard $(SRC_DIR)/*.c)
+OBJ := $(patsubst $(SRC_DIR)/%.c,$(BLD_DIR)/%.o,$(SRC))
+DEP := $(OBJ:.o=.d)
+BIN := $(BLD_DIR)/hello
+
+.PHONY: all clean
+.DELETE_ON_ERROR:
+
+all: $(BIN)
+
+$(BIN): $(OBJ)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(BLD_DIR)/%.o: $(SRC_DIR)/%.c | $(BLD_DIR)
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+$(BLD_DIR):
+	mkdir -p $@
+
+-include $(DEP)
+
+clean: ; rm -rf $(BLD_DIR)</code></pre>
+</div>
+
+<p>
+  This is — no exaggeration — the Makefile template I've used for 15
+  years. It handles dependency tracking for C/C++ projects of any size.
+  Let's dissect the clever parts.
+</p>
+
+<h3 id="mmd-mp">The <code>-MMD -MP</code> incantation</h3>
+
+<p>When you compile with <code>-MMD</code>, gcc/clang produces a <code>.d</code> file alongside the <code>.o</code>:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cat build/main.d
+build/main.o: src/main.c include/greet.h include/util.h</code></pre>
+</div>
+
+<p>That's Makefile syntax! When we <code>-include</code> it on the next run, Make now knows that <code>build/main.o</code> depends on those headers.</p>
+
+<p>
+  The <code>-MP</code> flag adds an empty rule for each header
+  mentioned. Why? So that when you <em>delete</em> a header, Make
+  doesn't bail with "no rule to make <code>util.h</code>" — it just
+  treats the absent file as a phony target.
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cat build/main.d     # with -MMD -MP
+build/main.o: src/main.c include/greet.h include/util.h
+
+include/greet.h:
+
+include/util.h:</code></pre>
+</div>
+
+<h3 id="the-include">The <code>-include</code> line</h3>
+
+<div class="code" data-lang="make">
+<pre><code>-include $(DEP)</code></pre>
+</div>
+
+<p>
+  Note the leading <code>-</code>: silent if files are missing. First
+  build, nothing exists — that's fine, we just compile, produce
+  <code>.o</code>s and <code>.d</code>s in the same step, and from then
+  on Make knows the header dependencies.
+</p>
+
+<p>
+  This is the single most valuable Make idiom for C/C++. Memorise it.
+  Every <code>Makefile</code> for a C codebase should have some
+  variant of it.
+</p>
+
+<div class="callout hood">
+<div class="callout-title"><code>-MMD</code> vs <code>-MD</code></div>
+<p>
+  <code>-MD</code> records dependencies on <em>all</em> headers,
+  including system headers (<code>stdio.h</code> etc.).
+  <code>-MMD</code> records only <em>user</em> headers. The system
+  headers almost never change between builds; tracking them just
+  bloats the <code>.d</code> files and sometimes causes surprising
+  rebuilds when you upgrade your system. Prefer <code>-MMD</code>.
+</p>
+</div>
+
+<h3 id="try-it">Try it</h3>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · auto-deps in the wild</div>
+<div class="hands-on-body">
+<p>Create this structure:</p>
+<div class="code" data-lang="sh">
+<pre><code>src/main.c
+src/greet.c
+include/greet.h</code></pre>
+</div>
+<p>Plus the Makefile above (create the <code>include/</code> path and add <code>-I include</code> to <code>CFLAGS</code>):</p>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">include/greet.h</span></div>
+<pre><code>#ifndef GREET_H
+#define GREET_H
+void greet(const char *who);
+#endif</code></pre>
+</div>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">src/main.c</span></div>
+<pre><code>#include "greet.h"
+int main(void) { greet("auto-deps"); return 0; }</code></pre>
+</div>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">src/greet.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+#include "greet.h"
+void greet(const char *who) { printf("Hi %s\n", who); }</code></pre>
+</div>
+<p>Add <code>-I include</code> to <code>CFLAGS</code> and build:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+mkdir -p build
+cc -O2 -Wall -Wextra -MMD -MP -I include -c src/main.c -o build/main.o
+cc -O2 -Wall -Wextra -MMD -MP -I include -c src/greet.c -o build/greet.o
+cc    build/main.o build/greet.o   -o build/hello
+$ cat build/main.d
+build/main.o: src/main.c include/greet.h
+include/greet.h:
+$ touch include/greet.h
+$ make
+cc -O2 -Wall -Wextra -MMD -MP -I include -c src/main.c -o build/main.o
+cc -O2 -Wall -Wextra -MMD -MP -I include -c src/greet.c -o build/greet.o
+cc    build/main.o build/greet.o   -o build/hello</code></pre>
+</div>
+<p>
+  The header change triggered both <code>.c</code> files to recompile
+  — correctly — because the <code>.d</code> files from the previous
+  build told Make about the dependency. We never wrote
+  <code>main.o: include/greet.h</code> by hand.
+</p>
+</div>
+</div>
+
+<h2 id="libraries">Adding a static library</h2>
+
+<p>Evolve the C Makefile to build a library and link against it:</p>
+
+<div class="code" data-lang="make">
+<pre><code>LIB_SRC := $(wildcard src/lib/*.c)
+LIB_OBJ := $(patsubst src/lib/%.c,build/lib/%.o,$(LIB_SRC))
+
+APP_SRC := $(wildcard src/app/*.c)
+APP_OBJ := $(patsubst src/app/%.c,build/app/%.o,$(APP_SRC))
+
+BIN := build/hello
+LIB := build/libmine.a
+
+.PHONY: all clean
+all: $(BIN)
+
+$(LIB): $(LIB_OBJ)
+	ar crs $@ $^
+
+$(BIN): $(APP_OBJ) $(LIB)
+	$(CC) $(LDFLAGS) $(APP_OBJ) $(LIB) $(LDLIBS) -o $@
+
+# Both compile rules use the same pattern but write to different dirs.
+build/lib/%.o: src/lib/%.c | build/lib
+	$(CC) $(CFLAGS) -I include -c $&lt; -o $@
+
+build/app/%.o: src/app/%.c | build/app
+	$(CC) $(CFLAGS) -I include -c $&lt; -o $@
+
+build/lib build/app: ; mkdir -p $@
+
+-include $(LIB_OBJ:.o=.d) $(APP_OBJ:.o=.d)
+
+clean: ; rm -rf build</code></pre>
+</div>
+
+<p>Notes:</p>
+<ul>
+  <li>We split <code>build/</code> into <code>build/app/</code> and <code>build/lib/</code> to avoid name collisions.</li>
+  <li>The two pattern rules are near-identical; later we'll unify them with canned recipes or <code>.SECONDEXPANSION</code>.</li>
+  <li>The static lib is built with <code>ar crs</code>. <code>c</code> = create, <code>r</code> = replace members, <code>s</code> = write symbol index (replaces the old <code>ranlib</code> step).</li>
+</ul>
+
+<h2 id="data-pipeline">Pattern 2 — Data pipeline</h2>
+
+<p>
+  Make is not just for C. Its real talent is <em>dependency tracking
+  for anything that reads files and writes files</em>. Data scientists
+  and researchers use it for reproducible pipelines. Example: you have
+  raw CSVs, a cleaning script, a feature-extraction script, and a
+  model.
+</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — data pipeline</span></div>
+<pre><code>.DELETE_ON_ERROR:
+.PHONY: all clean
+
+DATA_IN := $(wildcard raw/*.csv)
+CLEANED := $(patsubst raw/%.csv,clean/%.csv,$(DATA_IN))
+FEATURES := features/all.parquet
+MODEL   := models/gbm.pkl
+REPORT  := report/report.pdf
+
+all: $(REPORT)
+
+clean/%.csv: raw/%.csv scripts/clean.py | clean
+	python scripts/clean.py $&lt; $@
+
+$(FEATURES): $(CLEANED) scripts/featurize.py | features
+	python scripts/featurize.py $(CLEANED) $@
+
+$(MODEL): $(FEATURES) scripts/train.py | models
+	python scripts/train.py $&lt; $@
+
+$(REPORT): $(MODEL) $(FEATURES) scripts/report.py report/template.tex | report
+	python scripts/report.py --model $(MODEL) --features $(FEATURES) --out $@
+
+clean features models report:
+	mkdir -p $@
+
+clean-all:
+	rm -rf clean features models report</code></pre>
+</div>
+
+<p>Observations:</p>
+<ul>
+  <li>Scripts are listed as prerequisites. Change <code>clean.py</code>, and everything downstream rebuilds. This is something ad-hoc scripts famously <em>don't</em> do.</li>
+  <li><code>.DELETE_ON_ERROR:</code> is especially important here. If <code>featurize.py</code> crashes halfway and writes a truncated parquet, deleting it forces a fresh retry next run.</li>
+  <li>Order-only directories create the output hierarchy on demand.</li>
+  <li><code>make</code> with no argument builds the <em>entire pipeline</em>; change a single CSV and only the affected branches rebuild.</li>
+</ul>
+
+<p>
+  This is worth internalising. Make beats home-grown Python "pipeline
+  frameworks" for small-to-medium data work because it's already
+  installed, it's been debugged since 1976, and it forces you to
+  think in graphs.
+</p>
+
+<h2 id="latex">Pattern 3 — LaTeX</h2>
+
+<p>LaTeX needs two or three runs to resolve cross-references. Captured cleanly:</p>
+
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:
+.PHONY: all clean
+
+SRC    := thesis.tex
+FIGS   := $(wildcard figs/*.pdf)
+CHAPS  := $(wildcard chapters/*.tex)
+OUT    := thesis.pdf
+
+all: $(OUT)
+
+$(OUT): $(SRC) $(CHAPS) $(FIGS) refs.bib
+	pdflatex -interaction=nonstopmode $(SRC)
+	bibtex   $(basename $(SRC))
+	pdflatex -interaction=nonstopmode $(SRC)
+	pdflatex -interaction=nonstopmode $(SRC)
+
+clean:
+	rm -f $(OUT) *.aux *.log *.toc *.bbl *.blg *.out</code></pre>
+</div>
+
+<p>
+  The four-command dance is the standard LaTeX idiom; wrapping it in
+  a Make rule gives you "change any source, run <code>make</code>,
+  get a fresh PDF" without memorising the sequence.
+</p>
+
+<p>More sophisticated: use <code>latexmk</code> which handles the repeat-until-stable for you:</p>
+<div class="code" data-lang="make">
+<pre><code>$(OUT): $(SRC) $(CHAPS) $(FIGS) refs.bib
+	latexmk -pdf -interaction=nonstopmode $(SRC)</code></pre>
+</div>
+
+<h2 id="directory-creation">Idiom — directory creation done right</h2>
+
+<p>You'll find yourself needing build directories over and over. The cleanest pattern:</p>
+
+<div class="code" data-lang="make">
+<pre><code>build/obj/%.o: src/%.c | build/obj
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+# Order-only: the directory must exist, but we don't re-run on its mtime.
+build/obj:
+	@mkdir -p $@</code></pre>
+</div>
+
+<p>Alternatively, do it in the recipe:</p>
+<div class="code" data-lang="make">
+<pre><code>build/obj/%.o: src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+
+<p>
+  Both work. The first is cleaner (one <code>mkdir</code> per
+  directory, not per file). The second is more robust when output
+  directories are computed per-target.
+</p>
+
+<h2 id="install">Idiom — install / uninstall</h2>
+
+<div class="code" data-lang="make">
+<pre><code>prefix      := /usr/local
+bindir      := $(prefix)/bin
+mandir      := $(prefix)/share/man/man1
+DESTDIR     :=
+INSTALL     := install
+
+.PHONY: install uninstall
+install: $(BIN)
+	$(INSTALL) -d $(DESTDIR)$(bindir)
+	$(INSTALL) -m 755 $(BIN) $(DESTDIR)$(bindir)/
+	$(INSTALL) -d $(DESTDIR)$(mandir)
+	$(INSTALL) -m 644 docs/hello.1 $(DESTDIR)$(mandir)/
+
+uninstall:
+	rm -f $(DESTDIR)$(bindir)/hello
+	rm -f $(DESTDIR)$(mandir)/hello.1</code></pre>
+</div>
+
+<p>Notes:</p>
+<ul>
+  <li><code>prefix</code>, <code>bindir</code>, <code>mandir</code> are GNU conventions — packagers expect these names.</li>
+  <li><code>DESTDIR</code> is prepended by Linux distribution packagers to stage an install into a fake root (e.g. <code>DESTDIR=/tmp/pkg make install</code>). Always honor it.</li>
+  <li>Use the BSD <code>install(1)</code> tool rather than <code>cp + chmod</code>: it atomically copies and sets permissions.</li>
+</ul>
+
+<h2 id="versioning">Idiom — version info from git</h2>
+
+<div class="code" data-lang="make">
+<pre><code>VERSION != git describe --tags --dirty --always 2&gt;/dev/null || echo unknown
+BUILD_DATE != date -u +%Y-%m-%dT%H:%M:%SZ
+
+CPPFLAGS += -DVERSION='"$(VERSION)"' -DBUILD_DATE='"$(BUILD_DATE)"'</code></pre>
+</div>
+
+<p>Then in your C code:</p>
+<div class="code" data-lang="c">
+<pre><code>printf("hello %s, built %s\n", VERSION, BUILD_DATE);</code></pre>
+</div>
+
+<p>
+  Every invocation re-queries git — but on a modern machine this is
+  fast. If you hate the cost, guard with a check that rebuilds only on
+  HEAD changes (advanced).
+</p>
+
+<h2 id="pkg-config">Idiom — <code>pkg-config</code></h2>
+
+<p>For every non-trivial system library, use <code>pkg-config</code> rather than hand-rolling flags:</p>
+<div class="code" data-lang="make">
+<pre><code>PKGS := openssl libxml-2.0 sqlite3
+
+CFLAGS  += $(shell pkg-config --cflags $(PKGS))
+LDLIBS  += $(shell pkg-config --libs   $(PKGS))</code></pre>
+</div>
+
+<p>Or, safer, with a fail-fast check:</p>
+<div class="code" data-lang="make">
+<pre><code>PKGS := openssl libxml-2.0 sqlite3
+
+ifneq ($(shell pkg-config --exists $(PKGS) &amp;&amp; echo ok),ok)
+$(error Missing one of: $(PKGS))
+endif
+
+CFLAGS  += $(shell pkg-config --cflags $(PKGS))
+LDLIBS  += $(shell pkg-config --libs   $(PKGS))</code></pre>
+</div>
+
+<h2 id="full-c-template">Full reference template</h2>
+
+<p>Here's the Makefile I copy-paste into new C projects. Dissect it as you read:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — full reference</span></div>
+<pre><code>.DELETE_ON_ERROR:
+.SUFFIXES:
+MAKEFLAGS += --no-builtin-rules
+
+SHELL       := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+
+# --- project ------------------------------------------------------------
+NAME      := hello
+VERSION   != git describe --tags --dirty --always 2&gt;/dev/null || echo dev
+
+# --- tooling (overridable) ---------------------------------------------
+CC        ?= cc
+AR        ?= ar
+INSTALL   ?= install
+
+# --- flags --------------------------------------------------------------
+CPPFLAGS  += -I include -DVERSION='"$(VERSION)"'
+CFLAGS    += -std=c11 -Wall -Wextra -Wpedantic
+CFLAGS    += -MMD -MP
+LDFLAGS   +=
+LDLIBS    +=
+
+ifdef DEBUG
+  CFLAGS += -O0 -g
+else
+  CFLAGS += -O2
+endif
+
+# --- layout -------------------------------------------------------------
+SRC_DIR   := src
+BLD_DIR   := build
+BIN       := $(BLD_DIR)/$(NAME)
+SRCS      := $(wildcard $(SRC_DIR)/*.c)
+OBJS      := $(patsubst $(SRC_DIR)/%.c,$(BLD_DIR)/%.o,$(SRCS))
+DEPS      := $(OBJS:.o=.d)
+
+# --- user-facing targets ------------------------------------------------
+.PHONY: all clean install uninstall check help
+.DEFAULT_GOAL := all
+
+all: $(BIN)
+
+help:
+	@printf '%s\n' \
+	 'Targets:' \
+	 '  all        build $(BIN)' \
+	 '  clean      remove $(BLD_DIR)' \
+	 '  check      build &amp; run tests' \
+	 '  install    install to $$(prefix) (default /usr/local)' \
+	 '  uninstall  remove installed files' \
+	 '' \
+	 'Variables:' \
+	 '  DEBUG=1    build -O0 -g' \
+	 '  CC=clang   use clang' \
+	 '  prefix=... install prefix'
+
+$(BIN): $(OBJS) | $(BLD_DIR)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(BLD_DIR)/%.o: $(SRC_DIR)/%.c | $(BLD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $&lt; -o $@
+
+$(BLD_DIR):
+	@mkdir -p $@
+
+-include $(DEPS)
+
+# --- install ------------------------------------------------------------
+prefix ?= /usr/local
+bindir := $(prefix)/bin
+DESTDIR ?=
+
+install: $(BIN)
+	$(INSTALL) -d $(DESTDIR)$(bindir)
+	$(INSTALL) -m 755 $(BIN) $(DESTDIR)$(bindir)/
+
+uninstall:
+	rm -f $(DESTDIR)$(bindir)/$(NAME)
+
+# --- tests --------------------------------------------------------------
+TEST_SRCS := $(wildcard tests/*.c)
+TEST_BINS := $(patsubst tests/%.c,$(BLD_DIR)/tests/%,$(TEST_SRCS))
+
+$(BLD_DIR)/tests/%: tests/%.c | $(BLD_DIR)/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) $&lt; -o $@
+
+$(BLD_DIR)/tests:
+	@mkdir -p $@
+
+check: $(TEST_BINS)
+	@for t in $^; do echo "-- $$t"; "$$t" || exit 1; done
+	@echo "All tests passed."
+
+# --- cleanup ------------------------------------------------------------
+clean:
+	rm -rf $(BLD_DIR)</code></pre>
+</div>
+
+<p>
+  This template scales from 10 to 1000+ files without structural
+  changes. Swap <code>NAME</code>, add more sources, keep going.
+</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.1</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Verify auto-deps work</span>
+</div>
+<div class="exercise-body">
+<p>
+  With the auto-deps Makefile, build cleanly. Check <code>build/*.d</code>
+  exists. Now edit a header (add a comment, save). Run <code>make</code>
+  and verify that <em>all</em> .c files using that header recompile,
+  without listing any dependency in the Makefile by hand.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The <code>.d</code> files contain lines like:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cat build/greet.d
+build/greet.o: src/greet.c include/greet.h</code></pre>
+</div>
+<p>After the <code>-include $(DEP)</code> runs, Make knows this. Touching <code>include/greet.h</code> marks <code>greet.c</code> as needing to rebuild:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ touch include/greet.h
+$ make -n
+cc -O2 ... -c src/main.c -o build/main.o
+cc -O2 ... -c src/greet.c -o build/greet.o
+cc build/main.o build/greet.o -o build/hello</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Deleting a header gracefully</span>
+</div>
+<div class="exercise-body">
+<p>
+  Without <code>-MP</code>, what happens if you delete a header that's
+  listed in a <code>.d</code> file? What does <code>-MP</code> change?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Without <code>-MP</code>, the <code>.d</code> file has:</p>
+<div class="code" data-lang="make">
+<pre><code>build/main.o: src/main.c include/gone.h</code></pre>
+</div>
+<p>When you delete <code>include/gone.h</code>, Make reads the <code>.d</code>, sees <code>include/gone.h</code> listed as a prerequisite, can't find it, and aborts with "No rule to make target 'include/gone.h'".</p>
+<p>With <code>-MP</code>, the <code>.d</code> also contains:</p>
+<div class="code" data-lang="make">
+<pre><code>include/gone.h:</code></pre>
+</div>
+<p>An empty rule for each header. When the file doesn't exist, Make treats this empty rule as a "success" (a file that requires no building), so the missing file is silently tolerated. <code>main.o</code> is rebuilt (because the prereq list has an old header that's gone), and the fresh <code>.d</code> file no longer mentions it. Next run, equilibrium.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Polyglot project</span>
+</div>
+<div class="exercise-body">
+<p>You have a C program that reads data from a CSV that's generated by a Python script. Write a single Makefile where <code>make run</code>:</p>
+<ol>
+  <li>Generates <code>data.csv</code> from <code>gen.py</code> if needed.</li>
+  <li>Builds <code>./processor</code> from <code>processor.c</code> if needed.</li>
+  <li>Runs <code>./processor data.csv</code>.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all run clean
+.DELETE_ON_ERROR:
+
+all: processor data.csv
+
+processor: processor.c
+	$(CC) $(CFLAGS) $&lt; -o $@
+
+data.csv: gen.py
+	python $&lt; &gt; $@
+
+run: processor data.csv
+	./processor data.csv
+
+clean:
+	rm -f processor data.csv</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Out-of-tree build</span>
+</div>
+<div class="exercise-body">
+<p>Modify the full reference Makefile so that users can do:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make BLD_DIR=/tmp/hello-build</code></pre>
+</div>
+<p>… and have the build artifacts land in <code>/tmp/hello-build</code> while the source tree stays clean. What (if anything) needs to change?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Nothing — the reference template already supports this because all
+  outputs are computed as <code>$(BLD_DIR)/...</code>. The only subtle
+  thing: <code>BLD_DIR</code> is set with <code>:=</code>, so a command-line
+  <code>BLD_DIR=...</code> overrides it (command-line wins over
+  Makefile assignments, as per Chapter 4).
+</p>
+<p>Test:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make BLD_DIR=/tmp/hb
+mkdir -p /tmp/hb
+cc ... -c src/main.c -o /tmp/hb/main.o
+...
+$ ls
+src/  include/  Makefile       # no build/
+$ ls /tmp/hb
+main.o main.d hello</code></pre>
+</div>
+<p>This is exactly the Linux kernel's <code>O=...</code> pattern.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">A mini website</span>
+</div>
+<div class="exercise-body">
+<p>
+  You have a directory of Markdown files and a single <code>template.html</code>.
+  Each <code>.md</code> should become an <code>.html</code> by piping
+  through <code>pandoc --template=template.html</code>. The output
+  lands in <code>_site/</code>. Write the Makefile.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:
+.PHONY: all clean
+
+MD    := $(wildcard *.md)
+HTML  := $(patsubst %.md,_site/%.html,$(MD))
+
+all: $(HTML)
+
+_site/%.html: %.md template.html | _site
+	pandoc --template=template.html $&lt; -o $@
+
+_site:
+	mkdir -p $@
+
+clean: ; rm -rf _site</code></pre>
+</div>
+<p>
+  <code>template.html</code> is a prerequisite on every <code>.html</code>
+  — edit the template, everything rebuilds. This scales to blogs of
+  hundreds of pages with sub-second incremental builds.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Handle the compile-flag-change problem</span>
+</div>
+<div class="exercise-body">
+<p>
+  Remember from Chapter 1: if you change <code>CFLAGS</code> in the
+  Makefile, Make won't rebuild anything because the <code>.c</code>
+  files aren't newer. Design a scheme using a "flags file" that tracks
+  current <code>CFLAGS</code> and triggers a rebuild when they change.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Idea: write CFLAGS to a file; include that file in every <code>.o</code>'s prereq list; regenerate the file only if its contents differ from the current CFLAGS.</p>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS_STAMP := build/.cflags
+
+# Regenerate the stamp file only if CFLAGS changed.
+$(shell mkdir -p build; \
+        new='$(CFLAGS)'; \
+        old="$$(cat $(CFLAGS_STAMP) 2&gt;/dev/null)"; \
+        [ "$$new" = "$$old" ] || printf '%s' "$$new" &gt; $(CFLAGS_STAMP))
+
+build/%.o: src/%.c $(CFLAGS_STAMP) | build
+	$(CC) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+<p>
+  Change <code>CFLAGS</code>, the <code>$(shell …)</code> at parse
+  time detects the difference, rewrites <code>build/.cflags</code>,
+  which becomes newer than the <code>.o</code>s, which triggers a full
+  rebuild. Change nothing, the stamp file isn't touched, mtimes stay
+  stable, no rebuild.
+</p>
+<p>
+  This is a simplified version of what
+  <a href="https://github.com/ninja-build/ninja">ninja</a> and most
+  serious build systems do with content hashing, without extra
+  machinery.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>-MMD -MP</code> + <code>-include $(DEP)</code> is the canonical auto-dependency pattern for C/C++.</li>
+  <li>Set up your build dir as an order-only prerequisite: <code>$(BLD_DIR)/%.o: src/%.c | $(BLD_DIR)</code>.</li>
+  <li>Data pipelines are just as much Make's domain as C: list scripts as prerequisites, use <code>.DELETE_ON_ERROR</code>, get reproducible incremental builds for free.</li>
+  <li>LaTeX builds are expressible in Make; <code>latexmk</code> saves you from repeating runs.</li>
+  <li>Follow GNU install conventions: <code>prefix</code>, <code>bindir</code>, <code>DESTDIR</code>, <code>INSTALL</code>.</li>
+  <li>Version strings from <code>git describe</code> via <code>!=</code>.</li>
+  <li>The full reference template is a good starting point for any new C/C++ project.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="08-metaprogramming.html"><span class="lbl">← Prev</span><span class="ttl">Metaprogramming</span></a>
+  <a href="10-parallel-make.html" class="next"><span class="lbl">Next →</span><span class="ttl">Parallel Make</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

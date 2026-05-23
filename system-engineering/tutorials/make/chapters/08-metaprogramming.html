@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>8 · Metaprogramming — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 08</span>
+  Metaprogramming
+</h1>
+<p class="lede">
+  Conditionals, <code>include</code>, computed variable names,
+  <code>.SECONDEXPANSION</code>, and the art of writing Make that
+  writes Make. This is where Makefiles stop being configuration and
+  start being software.
+</p>
+
+<h2 id="conditionals">Conditional directives</h2>
+
+<p>
+  Make has four conditional directives: <code>ifeq</code>,
+  <code>ifneq</code>, <code>ifdef</code>, <code>ifndef</code>. They
+  work at <em>parse time</em> — they control which <em>rules and
+  variable assignments</em> exist, not what runs at build time.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>ifeq ($(CC),gcc)
+    CFLAGS += -Wall -Wextra -Wpedantic
+else
+    CFLAGS += -Wall
+endif
+
+ifdef DEBUG
+    CFLAGS += -g -O0
+else
+    CFLAGS += -O2
+endif
+
+ifneq ($(shell uname -s),Linux)
+    LDFLAGS += -framework CoreFoundation
+endif</code></pre>
+</div>
+
+<p>Syntax notes:</p>
+<ul>
+  <li><code>ifeq</code> and <code>ifneq</code> compare two strings. Two syntaxes: <code>ifeq (A,B)</code> or <code>ifeq "A" "B"</code>.</li>
+  <li><code>ifdef VAR</code> / <code>ifndef VAR</code> tests if a variable is <em>non-empty</em> (not merely "defined" — the name is misleading).</li>
+  <li>Use <code>else</code>, <code>else ifeq</code>, <code>else ifdef</code> for chains. Close with <code>endif</code>.</li>
+  <li>Indentation inside a conditional is optional and uses <strong>spaces, not tabs</strong>, because we're outside a recipe.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">Whitespace in <code>ifeq</code></div>
+<p>
+  <code>ifeq ($(A), $(B))</code> compares <code>$(A)</code> to
+  "<code> $(B)</code>" (note the leading space). Make's string
+  comparison is literal. Usually you want <code>ifeq ($(A),$(B))</code>
+  — no space after the comma. Or use <code>strip</code>:
+  <code>ifeq ($(strip $(A)),$(strip $(B)))</code>.
+</p>
+</div>
+
+<h2 id="parse-time">Parse time vs build time</h2>
+
+<p>This is the most important mental model to get right:</p>
+
+<ol>
+  <li><strong>Parse time.</strong> Make reads the Makefile, top to bottom. It expands variable references in rule headers (<code>target: prereq</code>), evaluates conditional directives, and builds an in-memory graph of rules and variables. Recipes are <em>not yet expanded</em> — they're stored as text.</li>
+  <li><strong>Build time.</strong> Make walks the graph and runs recipes. When a recipe is about to run, its text is expanded: automatic variables are bound, any <code>$(…)</code> is evaluated.</li>
+</ol>
+
+<p>The distinction matters because:</p>
+<ul>
+  <li><code>$(info)</code>, <code>$(warning)</code>, <code>$(error)</code> called at the top level fire at parse time.</li>
+  <li>Conditionals are evaluated once, at parse time. You can't have a rule that "becomes different" based on which target the user asked for.</li>
+  <li>The <code>MAKECMDGOALS</code> variable is set at parse time — you <em>can</em> key conditionals on it, though it's a slippery slope.</li>
+</ul>
+
+<h2 id="includes">The <code>include</code> directive</h2>
+
+<p>Split your Makefile into pieces:</p>
+<div class="code" data-lang="make">
+<pre><code>include config.mk
+include rules/compile.mk
+include rules/link.mk</code></pre>
+</div>
+
+<p>Each included file is processed as if typed in-place. They're cumulative — variables defined in one are visible in all later ones.</p>
+
+<p>Variants:</p>
+<ul>
+  <li><code>include</code> — error if file not found.</li>
+  <li><code>-include</code> or <code>sinclude</code> — silently skip missing files.</li>
+</ul>
+
+<p>The <code>-include</code> variant is how auto-dependency generation works (Chapter 9): you include <code>*.d</code> files even before they exist.</p>
+
+<p>Includes expand globs:</p>
+<div class="code" data-lang="make">
+<pre><code>-include $(wildcard build/*.d)</code></pre>
+</div>
+
+<h2 id="makefile-as-prereq">Makefiles can be prerequisites</h2>
+
+<p>Make can also build the Makefile itself. After reading a Makefile, Make checks if there's a rule to rebuild it. If so, and it's out of date, Make builds it and <strong>re-execs itself</strong> to re-read the updated Makefile.</p>
+
+<p>This is how <code>autoconf</code>/<code>configure</code> systems make "re-run configure if <code>configure.ac</code> changed":</p>
+
+<div class="code" data-lang="make">
+<pre><code>Makefile: Makefile.in config.status
+	./config.status $@</code></pre>
+</div>
+
+<p>It's also how auto-generated dependency files keep themselves current. It's rarely something you write by hand, but it's worth knowing Make <em>can</em> do it.</p>
+
+<h2 id="computed-names">Computed variable names</h2>
+
+<p>Make lets you compute a variable name at runtime using nested references:</p>
+
+<div class="code" data-lang="make">
+<pre><code>CFLAGS_release := -O2 -DNDEBUG
+CFLAGS_debug   := -O0 -g
+CFLAGS_profile := -O2 -pg
+
+BUILD ?= release
+CFLAGS := $(CFLAGS_$(BUILD))
+
+all:
+	@echo Using CFLAGS: $(CFLAGS)</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+Using CFLAGS: -O2 -DNDEBUG
+$ make BUILD=debug
+Using CFLAGS: -O0 -g
+$ make BUILD=profile
+Using CFLAGS: -O2 -pg</code></pre>
+</div>
+
+<p>
+  <code>$(CFLAGS_$(BUILD))</code> expands inner-first: <code>$(BUILD)</code>
+  → <code>release</code>, then <code>$(CFLAGS_release)</code>. This
+  pattern replaces chains of <code>ifeq</code>s with a single lookup —
+  much cleaner for "N configurations" problems.
+</p>
+
+<h2 id="secondexpansion"><code>.SECONDEXPANSION</code> — prereq late binding</h2>
+
+<p>
+  Normally, Make expands a rule's prerequisites <em>once</em>, at parse
+  time. That means:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>%.o: %.c $(HEADERS)       # HEADERS must be defined BEFORE this rule</code></pre>
+</div>
+
+<p>
+  If you need a prerequisite that depends on the <em>stem</em>
+  (<code>%</code>) or on <em>automatic variables</em>, regular pattern
+  rules can't help you. Enter <code>.SECONDEXPANSION</code>.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>.SECONDEXPANSION:
+
+DEPS_main  := main.h util.h
+DEPS_greet := greet.h
+
+%.o: %.c $$(DEPS_$$*)
+	$(CC) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+
+<p>Read carefully:</p>
+<ul>
+  <li><code>.SECONDEXPANSION:</code> enables a second pass for prerequisites.</li>
+  <li><code>$$</code> in a prerequisite means "don't expand me now — expand me in the second pass".</li>
+  <li>In the second pass, the automatic variable <code>$*</code> (the stem) is already bound, so <code>$(DEPS_$*)</code> becomes <code>$(DEPS_main)</code>, <code>$(DEPS_greet)</code>, etc. per target.</li>
+</ul>
+
+<p>So when Make builds <code>main.o</code>, the prerequisites are <code>main.c $(DEPS_main)</code> = <code>main.c main.h util.h</code>.</p>
+
+<div class="callout hood">
+<div class="callout-title">Why the <code>$$</code></div>
+<p>
+  Without <code>$$</code>, the first pass would try to expand
+  <code>$(DEPS_$*)</code> immediately — but <code>$*</code> isn't
+  defined outside a recipe, so the expansion would be empty, and you'd
+  get a rule with no extra prerequisites. The <code>$$</code>
+  postpones expansion: in the first pass <code>$$</code> becomes
+  <code>$</code>; in the second pass <code>$(DEPS_$*)</code> is finally
+  evaluated with <code>$*</code> bound.
+</p>
+</div>
+
+<p>You don't reach for <code>.SECONDEXPANSION</code> often. When you do, it's usually because:</p>
+<ul>
+  <li>Per-target header dependencies that vary per stem.</li>
+  <li>Generating rules where the prerequisites are a computed function of the target.</li>
+  <li>Very large Makefiles that replace hand-written dep lists with systematic ones.</li>
+</ul>
+
+<h2 id="eval-template">Rule generation with <code>eval</code> + <code>call</code></h2>
+
+<p>We saw this briefly in Chapter 6. Here's the full idiom.</p>
+
+<div class="code" data-lang="make">
+<pre><code># Template: given a list of sources, build a static library.
+# Usage: $(eval $(call make-lib, libname, src1.c src2.c src3.c))
+
+define make-lib
+$(1)_OBJ := $$(patsubst %.c,%.o,$(2))
+lib$(1).a: $$($(1)_OBJ)
+	ar crs $$@ $$^
+LIBRARIES += lib$(1).a
+endef
+
+$(eval $(call make-lib,math,fn.c add.c sub.c))
+$(eval $(call make-lib,io,  read.c write.c))
+
+.PHONY: libs
+libs: $(LIBRARIES)</code></pre>
+</div>
+
+<p>Mechanics:</p>
+<ol>
+  <li><code>$(call make-lib,math,fn.c add.c sub.c)</code> substitutes <code>$(1)</code>→<code>math</code>, <code>$(2)</code>→<code>fn.c add.c sub.c</code>, and single <code>$</code>s are resolved at call time.</li>
+  <li>Double <code>$$</code>s survive <code>call</code> as single <code>$</code>s — so <code>$$@</code> becomes <code>$@</code> in the generated text.</li>
+  <li><code>$(eval ...)</code> feeds the generated text back to Make as if it were typed into the Makefile.</li>
+</ol>
+
+<p>
+  This lets you declare many similar structures compactly. The Linux
+  kernel's build system uses variants of this idiom heavily.
+</p>
+
+<h2 id="dollar-rules">The $ counting rules</h2>
+
+<p>Nested expansion contexts change how many <code>$</code>s you need. A rough guide:</p>
+
+<table>
+<thead><tr><th>Context</th><th>Escape single $</th></tr></thead>
+<tbody>
+<tr><td>Top-level Makefile reference</td><td><code>$</code></td></tr>
+<tr><td>Inside a recipe (to reach the shell)</td><td><code>$$</code></td></tr>
+<tr><td>Inside a <code>define</code> that will be <code>call</code>ed</td><td><code>$$</code> (gives <code>$</code> after call)</td></tr>
+<tr><td>Inside a <code>define</code> <code>call</code>ed then <code>eval</code>ed</td><td><code>$$$$</code> (call strips one pair, eval strips another → recipe sees <code>$</code>, shell sees it)</td></tr>
+</tbody>
+</table>
+
+<p>
+  Yes it's painful. The trick is to debug with <code>$(info $(call …))</code>
+  — print the expanded text before handing it to <code>eval</code>,
+  verify it's the Makefile syntax you meant, then re-enable the eval.
+</p>
+
+<h2 id="override">Override directives</h2>
+
+<p>The <code>override</code> directive lets a Makefile win against command-line assignments:</p>
+<div class="code" data-lang="make">
+<pre><code>override CFLAGS += -Wall</code></pre>
+</div>
+<p>
+  Now <code>make CFLAGS=-O0</code> still gets
+  <code>CFLAGS = -O0 -Wall</code>. Use this for warnings you refuse to
+  let the user turn off, or for flags that are required for
+  correctness.
+</p>
+
+<p>The analogous directive for <code>define</code>:</p>
+<div class="code" data-lang="make">
+<pre><code>override define commit_msg
+release v1.0
+endef</code></pre>
+</div>
+
+<h2 id="unexport">Variable scoping directives</h2>
+
+<table>
+<thead><tr><th>Directive</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>export VAR</code></td><td>Export VAR to recipe environment.</td></tr>
+<tr><td><code>export VAR = val</code></td><td>Assign and export in one step.</td></tr>
+<tr><td><code>unexport VAR</code></td><td>Don't export VAR (even if it came in via environment).</td></tr>
+<tr><td><code>private VAR = val</code></td><td>VAR is set only for this target (no cascade to prereqs). Only valid in target-specific context.</td></tr>
+<tr><td><code>undefine VAR</code></td><td>Remove VAR entirely from Make's namespace (GNU Make 3.82+).</td></tr>
+</tbody>
+</table>
+
+<div class="code" data-lang="make">
+<pre><code>debug: private CFLAGS := -O0 -g   # don't cascade to prerequisites
+debug: hello</code></pre>
+</div>
+
+<h2 id="hands-on">Hands-on: multi-config build</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · build for debug/release with one Makefile</div>
+<div class="hands-on-body">
+<p>Create <code>multi.mk</code>:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">multi.mk</span></div>
+<pre><code>CONFIG ?= release
+
+CFLAGS_release := -O2 -DNDEBUG
+CFLAGS_debug   := -O0 -g -DDEBUG
+CFLAGS_asan    := -O1 -g -fsanitize=address
+LDFLAGS_asan   := -fsanitize=address
+
+CFLAGS  := $(CFLAGS_$(CONFIG))
+LDFLAGS := $(LDFLAGS_$(CONFIG))
+
+$(info Building with CONFIG=$(CONFIG))
+$(info CFLAGS  = $(CFLAGS))
+$(info LDFLAGS = $(LDFLAGS))
+
+all:
+	@echo "Done."</code></pre>
+</div>
+<p>Run it with each:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -f multi.mk
+Building with CONFIG=release
+CFLAGS  = -O2 -DNDEBUG
+LDFLAGS =
+Done.
+$ make -f multi.mk CONFIG=debug
+Building with CONFIG=debug
+CFLAGS  = -O0 -g -DDEBUG
+LDFLAGS =
+Done.
+$ make -f multi.mk CONFIG=asan
+Building with CONFIG=asan
+CFLAGS  = -O1 -g -fsanitize=address
+LDFLAGS = -fsanitize=address
+Done.
+$ make -f multi.mk CONFIG=weird
+Building with CONFIG=weird
+CFLAGS  =
+LDFLAGS =
+Done.</code></pre>
+</div>
+<p>
+  Notice how the computed-variable trick gave us four configurations
+  with no branching, at the cost of silent failure for unknown
+  configs. We can improve that:
+</p>
+<div class="code" data-lang="make">
+<pre><code>ifeq ($(origin CFLAGS_$(CONFIG)),undefined)
+$(error Unknown CONFIG=$(CONFIG); valid: release debug asan)
+endif</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">When does <code>ifeq</code> fire?</span>
+</div>
+<div class="exercise-body">
+<p>
+  Given this Makefile:
+</p>
+<div class="code" data-lang="make">
+<pre><code>X := a
+ifeq ($(X),a)
+    Y := yes
+else
+    Y := no
+endif
+X := b
+
+all: ; @echo Y is $(Y)</code></pre>
+</div>
+<p>What does it print, and why?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Prints <code>Y is yes</code>. The <code>ifeq</code> fires at parse
+  time, when <code>X</code> was still <code>a</code>. The subsequent
+  assignment <code>X := b</code> happens <em>after</em> the
+  <code>ifeq</code> has already been evaluated and the branch chosen.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">OS detection</span>
+</div>
+<div class="exercise-body">
+<p>
+  Write a Makefile that sets <code>LIBS := -lrt</code> on Linux,
+  <code>LIBS := -framework CoreFoundation</code> on macOS, and errors
+  out on anything else.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>UNAME := $(shell uname -s)
+
+ifeq ($(UNAME),Linux)
+    LIBS := -lrt
+else ifeq ($(UNAME),Darwin)
+    LIBS := -framework CoreFoundation
+else
+    $(error Unsupported OS: $(UNAME))
+endif
+
+all: ; @echo LIBS = $(LIBS)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Computed variables beat <code>ifeq</code> chains</span>
+</div>
+<div class="exercise-body">
+<p>Rewrite the following using computed variable names, no <code>ifeq</code>:</p>
+<div class="code" data-lang="make">
+<pre><code>ifeq ($(ARCH),x86_64)
+    TRIPLE := x86_64-linux-gnu
+else ifeq ($(ARCH),arm64)
+    TRIPLE := aarch64-linux-gnu
+else ifeq ($(ARCH),riscv)
+    TRIPLE := riscv64-linux-gnu
+endif</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>TRIPLE_x86_64 := x86_64-linux-gnu
+TRIPLE_arm64  := aarch64-linux-gnu
+TRIPLE_riscv  := riscv64-linux-gnu
+
+TRIPLE := $(TRIPLE_$(ARCH))
+
+ifeq ($(TRIPLE),)
+$(error Unknown ARCH=$(ARCH))
+endif</code></pre>
+</div>
+<p>Scales linearly with new architectures. Adding one doesn't touch the lookup logic.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Per-target header deps with <code>.SECONDEXPANSION</code></span>
+</div>
+<div class="exercise-body">
+<p>You have <code>main.c</code> (depends on <code>main.h</code> and <code>util.h</code>), <code>greet.c</code> (depends on <code>greet.h</code>), and <code>util.c</code> (depends on <code>util.h</code>). Write a <em>single</em> pattern rule that compiles each to a <code>.o</code> with the right per-file prerequisites.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>.SECONDEXPANSION:
+
+DEPS_main  := main.h util.h
+DEPS_greet := greet.h
+DEPS_util  := util.h
+
+%.o: %.c $$(DEPS_$$*)
+	$(CC) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+<p>
+  Writing and maintaining per-target DEPS lists by hand is tedious and
+  error-prone. Chapter 9 shows auto-dependency generation — which does
+  this automatically from the compiler's output, and is almost always
+  what you want in real projects. But this exercise shows the core
+  mechanic.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Generating many tiny rules</span>
+</div>
+<div class="exercise-body">
+<p>
+  Your project has a list of commands:
+  <code>CMDS := init run deploy rollback</code>. For each, write a
+  phony rule <code>cmd-NAME</code> that simply runs the shell script
+  <code>scripts/NAME.sh</code>. Use <code>foreach</code> + <code>eval</code>
+  to generate the rules from the list.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>CMDS := init run deploy rollback
+
+define cmd_rule
+.PHONY: cmd-$(1)
+cmd-$(1):
+	bash scripts/$(1).sh
+endef
+
+$(foreach c,$(CMDS),$(eval $(call cmd_rule,$(c))))</code></pre>
+</div>
+<p>Verify:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -n cmd-deploy
+bash scripts/deploy.sh
+$ make -n cmd-rollback
+bash scripts/rollback.sh</code></pre>
+</div>
+<p>This is a pattern you'll see constantly in mature Makefiles.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Debugging a template</span>
+</div>
+<div class="exercise-body">
+<p>A colleague's template produces broken Makefile text. They ask for help. The template:</p>
+<div class="code" data-lang="make">
+<pre><code>define build_tool
+bin/$(1): tools/$(1).c
+	$(CC) $(CFLAGS) $&lt; -o $@
+endef
+
+$(foreach t,foo bar,$(eval $(call build_tool,$(t))))</code></pre>
+</div>
+<p>When they run <code>make bin/foo</code>, they get an error like "<code>*** recipe commences before first target</code>". Why, and how do you fix it?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  The <code>$&lt;</code> and <code>$@</code> inside the template
+  expand at <code>call</code> time (when we're still in the top-level
+  Make parse). At that point there's no target, and they produce junk
+  that ends up in the rule text. The fix: double them up so they
+  survive <code>call</code> and land in the generated rule as
+  <code>$&lt;</code> and <code>$@</code>:
+</p>
+<div class="code" data-lang="make">
+<pre><code>define build_tool
+bin/$(1): tools/$(1).c
+	$$(CC) $$(CFLAGS) $$&lt; -o $$@
+endef</code></pre>
+</div>
+<p>
+  Also double <code>$(CC)</code> and <code>$(CFLAGS)</code> — not for
+  correctness (they'd expand to empty at call time if undefined,
+  and to the final value if set), but to be consistent and to
+  defer to build-time expansion.
+</p>
+<p>
+  Debugging trick: replace <code>$(eval $(call …))</code> with
+  <code>$(info $(call …))</code> to print the generated text, inspect
+  it, then re-enable <code>eval</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.7</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Split a Makefile</span>
+</div>
+<div class="exercise-body">
+<p>
+  Refactor this flat Makefile into three files: <code>Makefile</code>
+  (entry point, targets), <code>config.mk</code> (tool variables),
+  and <code>deps.mk</code> (derived file lists).
+</p>
+<div class="code" data-lang="make">
+<pre><code>CC      := clang
+CFLAGS  := -O2 -Wall
+LDFLAGS := -flto
+
+SRC := $(wildcard src/*.c)
+OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
+
+all: build/hello
+
+build/hello: $(OBJ)
+	$(CC) $(LDFLAGS) $^ -o $@
+
+build/%.o: src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+clean: ; rm -rf build
+.PHONY: all clean</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">config.mk</span></div>
+<pre><code>CC      := clang
+CFLAGS  := -O2 -Wall
+LDFLAGS := -flto</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">deps.mk</span></div>
+<pre><code>SRC := $(wildcard src/*.c)
+OBJ := $(patsubst src/%.c,build/%.o,$(SRC))</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>include config.mk
+include deps.mk
+
+all: build/hello
+
+build/hello: $(OBJ)
+	$(CC) $(LDFLAGS) $^ -o $@
+
+build/%.o: src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+clean: ; rm -rf build
+.PHONY: all clean</code></pre>
+</div>
+<p>
+  The split lets config be tweaked by users (often the only file a
+  packager or OS vendor has to edit) while rules stay untouched.
+  Real projects often ship a sample <code>config.mk.sample</code> and
+  ask users to copy it and edit.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>ifeq / ifneq / ifdef / ifndef</code> + <code>else</code> + <code>endif</code> for parse-time branching.</li>
+  <li>Conditionals evaluate once at parse time. Mind the whitespace around commas in <code>ifeq</code>.</li>
+  <li><code>include FILE</code>, <code>-include FILE</code> (silent-miss), and <code>sinclude</code>. Globs allowed.</li>
+  <li>Computed variable names: <code>$(FOO_$(X))</code> — lets you replace ifeq chains with a lookup.</li>
+  <li><code>.SECONDEXPANSION:</code> enables a second pass for prerequisites; use <code>$$</code> to defer expansion.</li>
+  <li><code>define … endef</code> + <code>$(call name,a,b)</code> + <code>$(eval …)</code> = rule generation. Mind the <code>$</code> counts.</li>
+  <li><code>override</code> forces Makefile-side values to win over command-line. Use sparingly.</li>
+  <li><code>export</code>, <code>unexport</code>, <code>private</code>, <code>undefine</code> fine-tune variable scope and exportability.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="07-phony-and-special.html"><span class="lbl">← Prev</span><span class="ttl">Phony &amp; Special Targets</span></a>
+  <a href="09-real-projects.html" class="next"><span class="lbl">Next →</span><span class="ttl">Real Projects</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

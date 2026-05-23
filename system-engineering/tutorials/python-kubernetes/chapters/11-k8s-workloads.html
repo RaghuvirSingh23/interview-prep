@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>9 · Workloads — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 09</span>
+  Workloads — StatefulSet, DaemonSet, Job, CronJob
+</h1>
+<p class="lede">
+  Deployment is for stateless apps. The other workload types handle
+  databases (StatefulSet), per-node agents (DaemonSet), one-off tasks
+  (Job), and scheduled tasks (CronJob). Pick the right one and you
+  inherit the right behaviour for free.
+</p>
+
+<h2 id="picking">Decision tree</h2>
+
+<div class="code" data-lang="text">
+<pre><code>Is it a long-running app?
+├── Stateless, identical replicas?         → Deployment
+├── Stateful, stable identity per pod?     → StatefulSet
+└── One copy per node (e.g., log shipper)? → DaemonSet
+
+Is it a finite task?
+├── One-shot?              → Job
+└── On a schedule?         → CronJob</code></pre>
+</div>
+
+<h2 id="statefulset">StatefulSet</h2>
+
+<p>For workloads where each pod needs:</p>
+<ul>
+  <li>A <strong>stable name</strong> — <code>db-0</code>, <code>db-1</code>, <code>db-2</code> rather than random hashes.</li>
+  <li>A <strong>stable network identity</strong> — a DNS name that follows the pod across restarts.</li>
+  <li>A <strong>stable persistent volume</strong> — when <code>db-0</code> is rescheduled, it gets the same disk.</li>
+  <li><strong>Ordered rollouts</strong> — start <code>db-0</code> first, wait for ready, then <code>db-1</code>, etc.</li>
+</ul>
+
+<p>Classic uses: databases (PostgreSQL, MongoDB, Cassandra), message brokers (Kafka, RabbitMQ), distributed caches (Redis Cluster).</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: v1
+kind: Service
+metadata: { name: db }
+spec:
+  clusterIP: None                    # headless — DNS gives Pod IPs directly
+  selector: { app: db }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: db }
+spec:
+  serviceName: db                    # the headless Service above
+  replicas: 3
+  selector: { matchLabels: { app: db } }
+  template:
+    metadata: { labels: { app: db } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports: [{ containerPort: 5432 }]
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-secret, key: password } }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:              # one PVC per pod, auto-created
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: standard
+        resources:
+          requests: { storage: 20Gi }</code></pre>
+</div>
+
+<p>What you get:</p>
+<ul>
+  <li>Pod names: <code>db-0</code>, <code>db-1</code>, <code>db-2</code>.</li>
+  <li>Stable DNS: <code>db-0.db.default.svc.cluster.local</code>, etc.</li>
+  <li>Each pod gets its own PVC: <code>data-db-0</code>, <code>data-db-1</code>, <code>data-db-2</code>. Reschedule <code>db-1</code> to a different node — same PVC, same data.</li>
+  <li>Rollout order: <code>db-2</code> updated first, then <code>db-1</code>, then <code>db-0</code>. Reverse for scale-down.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">StatefulSet doesn't make your app stateful — your app already is</div>
+<p>StatefulSet provides the <em>infrastructure</em> for stable identities and storage. The app still has to do the hard parts: replication, leader election, consistency, recovery from a member dying. K8s won't make Postgres into a HA cluster on its own — you need an operator (CloudNativePG, Zalando) or self-managed config.</p>
+</div>
+
+<h2 id="daemonset">DaemonSet</h2>
+
+<p>"Run one copy of this Pod on every node (or every node matching a selector)." For things tied to the node itself.</p>
+
+<p>Classic uses: log shippers (Fluent Bit, Vector), metrics agents (node-exporter), CSI drivers, kube-proxy itself.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+spec:
+  selector: { matchLabels: { app: node-exporter } }
+  template:
+    metadata: { labels: { app: node-exporter } }
+    spec:
+      hostNetwork: true            # share node's network namespace
+      hostPID: true                # see node's processes
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists         # tolerate any taint, including control-plane
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.0
+          ports: [{ containerPort: 9100, hostPort: 9100 }]
+          volumeMounts:
+            - { name: proc, mountPath: /host/proc, readOnly: true }
+            - { name: sys,  mountPath: /host/sys,  readOnly: true }
+          args: ["--path.procfs=/host/proc", "--path.sysfs=/host/sys"]
+      volumes:
+        - { name: proc, hostPath: { path: /proc } }
+        - { name: sys,  hostPath: { path: /sys  } }</code></pre>
+</div>
+
+<p>Notes:</p>
+<ul>
+  <li>Add new node → DaemonSet controller creates a Pod on it automatically.</li>
+  <li><code>tolerations</code> let it run on tainted nodes (control plane, GPU, special pools). Without them you'd skip those.</li>
+  <li><code>hostNetwork</code>, <code>hostPID</code>, <code>hostPath</code> are powerful — and dangerous. DaemonSets are usually privileged; lock them down with PodSecurity standards (Chapter 11).</li>
+  <li>Use <code>nodeSelector</code> or <code>affinity</code> to scope to subset of nodes.</li>
+</ul>
+
+<h2 id="job">Job</h2>
+
+<p>Run a Pod (or several) until <strong>completion</strong>. Successful exit → done. Non-zero exit → restarted, up to a limit. Use for batch tasks, migrations, image builds, one-shot maintenance.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: batch/v1
+kind: Job
+metadata: { name: db-migrate }
+spec:
+  backoffLimit: 4                # retry up to 4 times on failure
+  activeDeadlineSeconds: 600     # kill if running longer than 10 min total
+  ttlSecondsAfterFinished: 86400 # auto-clean after a day
+  template:
+    spec:
+      restartPolicy: Never        # or OnFailure
+      containers:
+        - name: migrate
+          image: my-app:1.2.3
+          command: ["python", "-m", "myapp.migrations"]
+          env:
+            - name: DB_URL
+              valueFrom: { secretKeyRef: { name: db-creds, key: url } }</code></pre>
+</div>
+
+<p><code>restartPolicy</code> for Job pods is either <code>OnFailure</code> (kubelet restarts the container) or <code>Never</code> (failed pod is replaced by Job). Most use <code>Never</code> + <code>backoffLimit</code> for predictable behaviour.</p>
+
+<h4>Parallel Jobs</h4>
+
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  parallelism: 5                 # up to 5 pods concurrently
+  completions: 20                # job is done when 20 succeed total
+  template: ...</code></pre>
+</div>
+
+<p>Used for "queue worker" patterns — 20 tasks to do, 5 workers in parallel. Each pod claims a piece of work via shared state (a queue, a database).</p>
+
+<p>For <strong>indexed</strong> work — pod 0 handles shard 0, pod 1 handles shard 1, etc. — set <code>completionMode: Indexed</code>:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  completionMode: Indexed
+  parallelism: 4
+  completions: 4
+  template:
+    spec:
+      containers:
+        - name: shard
+          image: my-batch:1.0
+          env:
+            - name: SHARD_INDEX
+              valueFrom: { fieldRef: { fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index'] } }</code></pre>
+</div>
+
+<h2 id="cronjob">CronJob</h2>
+
+<p>"Create a Job on a schedule." A wrapper around Job with cron-style timing.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: batch/v1
+kind: CronJob
+metadata: { name: nightly-promote }
+spec:
+  schedule: "0 2 * * *"                  # 02:00 every day
+  timeZone: "Etc/UTC"                    # 1.27+, otherwise the controller's TZ
+  concurrencyPolicy: Forbid              # don't run a new Job if previous is still running
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit:     3
+  startingDeadlineSeconds: 600           # if missed by &gt;10 min, skip
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: promoter
+          containers:
+            - name: promote
+              image: registry.example.com/promote:1.0.0
+              args: ["--from=dev", "--to=staging"]
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits:   { cpu: 500m, memory: 512Mi }</code></pre>
+</div>
+
+<h4>concurrencyPolicy</h4>
+<table>
+<thead><tr><th>Value</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>Allow</code> (default)</td><td>Run the new Job even if the previous is still running.</td></tr>
+<tr><td><code>Forbid</code></td><td>Skip the new Job; old run keeps going.</td></tr>
+<tr><td><code>Replace</code></td><td>Kill the old Job, start the new one.</td></tr>
+</tbody>
+</table>
+
+<p>For idempotent jobs that take less than the schedule interval, <code>Allow</code> is fine. For jobs that mutate shared state, use <code>Forbid</code>. <code>Replace</code> is for "always run the latest version" — useful if your old job is stuck.</p>
+
+<div class="callout pitfall">
+<div class="callout-title">CronJob is not your friend for second-precision schedules</div>
+<p>The controller polls every 10 s. Schedules are evaluated at minute granularity. If you need precise timing or sub-minute frequencies, use a Deployment with an internal scheduler, or a real workflow engine (Argo Workflows, Tekton).</p>
+</div>
+
+<h2 id="completing">Cleanup with TTL</h2>
+
+<p>Without <code>ttlSecondsAfterFinished</code>, completed Jobs (and their pods) stick around forever. They show in <code>kubectl get jobs</code>, eat etcd storage, and clutter dashboards. Always set TTL.</p>
+
+<h2 id="hands-on">Hands-on: a useful CronJob</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · pruner that runs every hour</div>
+<div class="hands-on-body">
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: batch/v1
+kind: CronJob
+metadata: { name: prune-old-builds, namespace: ci }
+spec:
+  schedule: "17 * * * *"             # every hour at :17 (avoid :00 herd)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: ci-pruner
+          containers:
+            - name: pruner
+              image: alpine:3.19
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  echo "pruning artifacts older than 30 days"
+                  find /var/cache/builds -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
+                  echo "done"
+              volumeMounts:
+                - { name: cache, mountPath: /var/cache/builds }
+          volumes:
+            - name: cache
+              persistentVolumeClaim:
+                claimName: ci-build-cache</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl apply -f cronjob.yaml
+$ kubectl -n ci get cronjob
+NAME              SCHEDULE      SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+prune-old-builds  17 * * * *    False     0        4m12s           1h
+
+# Run once on demand
+$ kubectl -n ci create job --from=cronjob/prune-old-builds prune-now
+$ kubectl -n ci get jobs
+$ kubectl -n ci logs job/prune-now</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="ephemeral-debug">Ephemeral debug containers</h2>
+
+<p>Modern K8s (1.25+) has <code>kubectl debug</code> to attach a debug container into a running Pod — without modifying the manifest.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl debug -it pod/web-abc123 --image=nicolaka/netshoot --target=web
+# now in a shell with curl, dig, tcpdump, ss, etc., sharing the Pod's network namespace</code></pre>
+</div>
+
+<p>Massive quality-of-life win when production pods don't have <code>curl</code> installed (which they shouldn't, for security).</p>
+
+<h2 id="pod-lifecycle">Pod lifecycle</h2>
+
+<p>Phases you'll see in <code>kubectl get pod</code>:</p>
+<ul>
+  <li><code>Pending</code> — accepted, not scheduled or images downloading.</li>
+  <li><code>Running</code> — at least one container is running.</li>
+  <li><code>Succeeded</code> — all containers exited 0; pod won't restart (Jobs).</li>
+  <li><code>Failed</code> — at least one container exited non-zero.</li>
+  <li><code>Unknown</code> — kubelet can't be reached.</li>
+</ul>
+
+<p>And container statuses inside: <code>Waiting</code>, <code>Running</code>, <code>Terminated</code>. Each with a reason like <code>ImagePullBackOff</code>, <code>CrashLoopBackOff</code>, <code>OOMKilled</code>.</p>
+
+<h2 id="restart-policy">restartPolicy</h2>
+<table>
+<tr><td><code>Always</code></td><td>Default for Deployment/StatefulSet pods. Kubelet restarts containers that exit, regardless of exit code.</td></tr>
+<tr><td><code>OnFailure</code></td><td>For Jobs. Restart on non-zero exit; success → stop.</td></tr>
+<tr><td><code>Never</code></td><td>For Jobs. No restart; failed pod is replaced by Job controller.</td></tr>
+</table>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Pick the workload</span>
+</div>
+<div class="exercise-body">
+<p>For each, name the workload type:</p>
+<ol type="a">
+  <li>3 stateless API servers fronted by a Service.</li>
+  <li>A Postgres cluster with stable hostnames and persistent storage.</li>
+  <li>A log forwarder running on every worker node.</li>
+  <li>"Apply DB migration" — runs once per release.</li>
+  <li>Nightly backup at 03:00.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>(a) Deployment. (b) StatefulSet. (c) DaemonSet. (d) Job. (e) CronJob.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Skip if running</span>
+</div>
+<div class="exercise-body">
+<p>Your CronJob takes ~10 minutes; schedule is every 5. New runs pile up. Fix.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid    # skip if previous still running</code></pre>
+</div>
+<p>Or change the schedule to be ≥ runtime. Or split the work into smaller chunks. <code>Forbid</code> is the cheap fix.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Sharded batch</span>
+</div>
+<div class="exercise-body">
+<p>You have 100 build artifacts to scan; each scan takes 5 min. Use an indexed Job to scan them in parallel with 10 workers.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  completionMode: Indexed
+  completions: 100
+  parallelism: 10
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: scanner
+          image: my-scanner:1.0
+          env:
+            - name: SHARD
+              valueFrom: { fieldRef: { fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index'] } }
+          command: ["scanner", "--index=$(SHARD)", "--total=100"]</code></pre>
+</div>
+<p>The scanner reads <code>$SHARD</code> as its index (0–99) and grabs the matching artifact. K8s ensures each index runs at most once.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">DaemonSet on tainted nodes</span>
+</div>
+<div class="exercise-body">
+<p>You add GPU nodes with a taint <code>nvidia.com/gpu=true:NoSchedule</code>. Your log shipper DaemonSet skips them. Why, and how do you fix it without changing the taint?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Pods only land on tainted nodes if they tolerate the taint. The DaemonSet doesn't, so it skips GPU nodes — losing logs from your most expensive workloads.</p>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  template:
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        # or, blanket:
+        - operator: Exists
+          effect: NoSchedule</code></pre>
+</div>
+<p>The blanket form covers any future special-purpose taints too. Common pattern for monitoring/logging DaemonSets.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">StatefulSet pod identity</span>
+</div>
+<div class="exercise-body">
+<p>You have a 3-pod StatefulSet <code>db</code>. From a Pod inside the cluster, how do you reach <code>db-1</code> specifically? What happens if it's rescheduled to another node?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Address: <code>db-1.db.&lt;namespace&gt;.svc.cluster.local</code> (where <code>db</code> is the headless Service's name and <code>&lt;namespace&gt;</code> is its namespace).</p>
+<p>If <code>db-1</code> is rescheduled (node dies, drain, etc.), the new Pod has the same name and DNS name; the Pod IP changes but DNS resolves to the new IP. Its PVC follows it (provided the storage class supports cross-AZ / cross-node mounting). Clients that addressed <code>db-1</code> by stable name keep working.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Deployment for stateless replicas; StatefulSet for stable per-pod identity + storage; DaemonSet for one-per-node; Job for run-to-completion; CronJob for scheduled Jobs.</li>
+  <li>StatefulSet provides infrastructure for state, not statefulness itself — your app/operator does the hard parts.</li>
+  <li>DaemonSets often need <code>tolerations</code> to cover tainted nodes.</li>
+  <li>Job's <code>restartPolicy</code>: <code>Never</code> + <code>backoffLimit</code> is the predictable default.</li>
+  <li><code>parallelism</code> and <code>completions</code> drive parallel batch; <code>completionMode: Indexed</code> for shard-by-index work.</li>
+  <li>CronJob: <code>concurrencyPolicy: Forbid</code> for non-overlapping mutation; always set <code>ttlSecondsAfterFinished</code>.</li>
+  <li><code>kubectl debug</code> for ephemeral troubleshooting containers.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="10-k8s-core-resources.html"><span class="lbl">← Prev</span><span class="ttl">Core Resources</span></a>
+  <a href="12-k8s-networking-storage.html" class="next"><span class="lbl">Next →</span><span class="ttl">Networking &amp; Storage</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

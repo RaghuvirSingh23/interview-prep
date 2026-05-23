@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CI/CD — A Deep Dive · Jenkins · GitLab · GitHub Actions</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="chapters/01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="chapters/02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="chapters/03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="chapters/04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="chapters/05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="chapters/06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="chapters/07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="chapters/08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="chapters/09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="chapters/10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="chapters/11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="chapters/12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="chapters/13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="chapters/14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="exercises.html">All Exercises</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<section class="hero">
+  <h1>
+    <span class="chap-num">A Deep Dive</span>
+    CI/CD, three ways.
+  </h1>
+  <p class="lede">
+    Jenkins, GitLab CI, and GitHub Actions. The three pipeline tools
+    you're most likely to meet — and they don't agree on much. This
+    tutorial starts with the concepts that all three share, then
+    dissects each in its own idiom, then pits them against each other
+    on the same real project. By the end you'll read any pipeline file
+    in the wild and know what it's doing.
+  </p>
+  <div class="hero-meta">
+    <span><strong>14</strong> chapters</span>
+    <span><strong>3</strong> tools</span>
+    <span><strong>80+</strong> exercises</span>
+    <span><strong>50</strong> interview Qs</span>
+  </div>
+</section>
+
+<h2 id="how-to-use">How to use this tutorial</h2>
+
+<p>
+  You'll learn by doing, not just reading. Every chapter contains:
+</p>
+<ul>
+  <li><strong>Concept prose</strong> — the <em>why</em> behind the feature.</li>
+  <li><strong>Annotated pipeline snippets</strong> — <code>Jenkinsfile</code>, <code>.gitlab-ci.yml</code>, and <code>workflow.yml</code> examples with copy buttons.</li>
+  <li><strong>Hands-on blocks</strong> — real commands to type, with expected output.</li>
+  <li><strong>Pitfalls</strong> — the traps that eat afternoons.</li>
+  <li><strong>Exercises</strong> with collapsible solutions. Don't peek.</li>
+</ul>
+
+<div class="callout tip">
+<div class="callout-title">Prerequisites</div>
+<ul>
+<li>Git fundamentals (branches, commits, pushes).</li>
+<li>Comfort with YAML. (If not, we'll catch you up.)</li>
+<li>Shell basics — you should read <code>curl | bash</code> and feel nothing.</li>
+<li>Docker basics for most hands-on work. Install Docker Desktop or colima if you haven't.</li>
+<li>A GitHub account (free tier is enough) for the GitHub Actions chapters.</li>
+<li>A GitLab account on gitlab.com (free) for the GitLab CI chapters.</li>
+<li>Docker-based Jenkins for local Jenkins work — we walk you through it.</li>
+</ul>
+</div>
+
+<h2 id="what-you-will-learn">What you will learn</h2>
+
+<ul>
+  <li>Read and write pipelines fluently in all three tools.</li>
+  <li>Think in pipelines: stages, jobs, artifacts, caches, triggers — and when each matters.</li>
+  <li>Set up Jenkins agents, GitLab runners, and GitHub runners — self-hosted and managed.</li>
+  <li>Securely handle secrets across all three, including OIDC-based cloud auth that eliminates long-lived credentials.</li>
+  <li>Build a real release pipeline: lint, test, build, scan, package, publish, deploy — three times, once per tool.</li>
+  <li>Answer interview questions about CI/CD with confidence — the Big 50 are in Chapter 13.</li>
+</ul>
+
+<h2 id="contents">Table of contents</h2>
+
+<div class="toc-grid">
+  <a href="chapters/01-cicd-fundamentals.html" class="toc-card">
+    <span class="num">01</span><h3>CI/CD Fundamentals</h3>
+    <p>What Continuous Integration and Continuous Delivery actually mean. Origins, core practices, why every serious team uses them.</p>
+  </a>
+  <a href="chapters/02-pipeline-thinking.html" class="toc-card">
+    <span class="num">02</span><h3>Pipeline Thinking</h3>
+    <p>The tool-agnostic mental model. Jobs, stages, artifacts, caches, triggers, environments — and the dependency graph that ties them.</p>
+  </a>
+  <a href="chapters/03-jenkins-intro.html" class="toc-card">
+    <span class="num">03</span><h3>Jenkins — Architecture</h3>
+    <p>Controller/Agent model, installation, first job, the plugin ecosystem that made Jenkins both beloved and infamous.</p>
+  </a>
+  <a href="chapters/04-jenkins-pipelines.html" class="toc-card">
+    <span class="num">04</span><h3>Jenkins — Pipelines</h3>
+    <p>Freestyle → Pipeline. Scripted vs Declarative. <code>Jenkinsfile</code>, nodes, steps, and the Groovy DSL.</p>
+  </a>
+  <a href="chapters/05-jenkins-declarative.html" class="toc-card">
+    <span class="num">05</span><h3>Jenkins — Declarative DSL</h3>
+    <p>Every block of a Declarative <code>Jenkinsfile</code>: <code>pipeline</code>, <code>stages</code>, <code>post</code>, <code>when</code>, <code>parallel</code>, <code>matrix</code>, <code>options</code>.</p>
+  </a>
+  <a href="chapters/06-jenkins-advanced.html" class="toc-card">
+    <span class="num">06</span><h3>Jenkins — Advanced</h3>
+    <p>Shared libraries, credentials, multibranch, Blue Ocean, RBAC, JCasC, and running Jenkins like an adult.</p>
+  </a>
+  <a href="chapters/07-gitlab-intro.html" class="toc-card">
+    <span class="num">07</span><h3>GitLab CI — Fundamentals</h3>
+    <p><code>.gitlab-ci.yml</code> structure, stages, jobs, runners, artifacts, first pipeline.</p>
+  </a>
+  <a href="chapters/08-gitlab-advanced.html" class="toc-card">
+    <span class="num">08</span><h3>GitLab CI — Advanced</h3>
+    <p><code>rules</code>, <code>needs</code> &amp; DAG, <code>include</code>, <code>extends</code>, matrices, environments, multi-project pipelines.</p>
+  </a>
+  <a href="chapters/09-gha-intro.html" class="toc-card">
+    <span class="num">09</span><h3>GitHub Actions — Fundamentals</h3>
+    <p>Workflows, jobs, steps, actions. The marketplace. GitHub-hosted vs self-hosted runners.</p>
+  </a>
+  <a href="chapters/10-gha-advanced.html" class="toc-card">
+    <span class="num">10</span><h3>GitHub Actions — Advanced</h3>
+    <p>Reusable workflows, composite actions, matrix strategy, environments, concurrency, OIDC to AWS/GCP.</p>
+  </a>
+  <a href="chapters/11-security.html" class="toc-card">
+    <span class="num">11</span><h3>Security &amp; Secrets</h3>
+    <p>Least privilege for pipelines. OIDC to the cloud. Secret scanning. SBOMs, signing, supply chain, SLSA.</p>
+  </a>
+  <a href="chapters/12-comparison.html" class="toc-card">
+    <span class="num">12</span><h3>Head-to-head Comparison</h3>
+    <p>Feature-by-feature matrix. Performance, cost, ops burden. A decision tree for picking one.</p>
+  </a>
+  <a href="chapters/13-50-questions.html" class="toc-card">
+    <span class="num">13</span><h3>The 50 Questions</h3>
+    <p>Fifty interview and real-world questions about CI/CD. Answered with code snippets in all three tools where it matters.</p>
+  </a>
+  <a href="chapters/14-capstone.html" class="toc-card">
+    <span class="num">14</span><h3>Capstone Project</h3>
+    <p>The same real release pipeline, built three times — once in each tool. Compare line for line.</p>
+  </a>
+</div>
+
+<div class="callout history">
+<div class="callout-title">What this tutorial is not</div>
+<p>
+  This is not an admin manual for any one tool. For operational detail
+  (tuning Jenkins for 10k jobs; running GitLab self-hosted; debugging
+  GHA runner networking), the official docs are exhaustive and we link
+  to them. This tutorial teaches <em>how to think about pipelines</em>
+  — the concepts that let you reach for the right feature in any of
+  the three tools, read their docs efficiently, and diagnose problems
+  with understanding rather than by cargo-cult.
+</p>
+</div>
+
+<p style="text-align: center; margin-top: 60px;">
+  <a href="chapters/01-cicd-fundamentals.html" style="font-size: 20px;">→ Begin: Chapter 1 — CI/CD Fundamentals</a>
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

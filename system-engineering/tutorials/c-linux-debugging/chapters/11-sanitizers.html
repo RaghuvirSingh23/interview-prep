@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · Sanitizers &amp; static analysis</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 11</span>
+  Sanitizers &amp; static analysis
+</h1>
+<p class="lede">
+  Sanitizers are runtime instrumentation that turns "subtle UB" into
+  "loud and immediate" — at the cost of a slowdown. Static analysers
+  catch issues without running anything. Together they catch most of
+  the bugs that GDB exists to find. Use both, religiously, in CI.
+</p>
+
+<h2 id="overview">The toolbox at a glance</h2>
+
+<table>
+<thead><tr><th>Tool</th><th>What it catches</th><th>Cost</th></tr></thead>
+<tbody>
+<tr><td><strong>AddressSanitizer (ASan)</strong></td><td>Out-of-bounds, use-after-free, double-free, leaks</td><td>~2× CPU, ~3× memory</td></tr>
+<tr><td><strong>UndefinedBehaviorSanitizer (UBSan)</strong></td><td>Signed overflow, shift past width, null deref, alignment, type confusion</td><td>~1.2× CPU</td></tr>
+<tr><td><strong>ThreadSanitizer (TSan)</strong></td><td>Data races, deadlock potential</td><td>~5–15× CPU, large memory</td></tr>
+<tr><td><strong>MemorySanitizer (MSan)</strong></td><td>Reads of uninitialised memory</td><td>~3× CPU; clang-only</td></tr>
+<tr><td><strong>LeakSanitizer (LSan)</strong></td><td>Memory leaks at exit</td><td>Cheap (built into ASan)</td></tr>
+<tr><td><strong>valgrind / memcheck</strong></td><td>Like ASan + uninit-reads, but with more false positives</td><td>~20–50× CPU; emulates everything</td></tr>
+<tr><td><strong>helgrind / drd</strong> (valgrind)</td><td>Race detection, alternative to TSan</td><td>~50× CPU</td></tr>
+<tr><td><strong>clang-tidy</strong></td><td>Static checks: bugs, modernization, performance, style</td><td>None at runtime; build-time</td></tr>
+<tr><td><strong>scan-build / clang static analyzer</strong></td><td>Path-sensitive analysis: null derefs, leaks</td><td>Build-time, slow</td></tr>
+<tr><td><strong>cppcheck</strong></td><td>Lighter static analysis; C-friendly</td><td>Fast</td></tr>
+<tr><td><strong>Coverity</strong></td><td>Commercial; deeper analysis; common in regulated industries</td><td>Slow; expensive</td></tr>
+</tbody>
+</table>
+
+<p>Day-to-day discipline:</p>
+<ul>
+  <li>Dev/CI builds: <code>-fsanitize=address,undefined</code> by default.</li>
+  <li>Threading-heavy CI: a separate <code>-fsanitize=thread</code> build.</li>
+  <li>Pre-commit / CI lint: <code>clang-tidy</code> with a chosen check set.</li>
+  <li>Production: <em>none</em> of these. Sanitizers expose your binary's address layout — security risk.</li>
+</ul>
+
+<h2 id="asan">AddressSanitizer — the workhorse</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -O1 -g -fsanitize=address -fno-omit-frame-pointer prog.c -o prog
+$ ./prog
+=================================================================
+==12345==ERROR: AddressSanitizer: heap-use-after-free on address 0x... at pc 0x... bp 0x... sp 0x...
+READ of size 4 at 0x... thread T0
+    #0 0x... in main prog.c:8
+    ...
+0x... is located 0 bytes inside of 4-byte region [0x...,0x...)
+freed by thread T0 here:
+    #0 free
+    #1 main prog.c:7
+previously allocated by thread T0 here:
+    #0 malloc
+    #1 main prog.c:5
+</code></pre>
+</div>
+
+<p>What ASan catches:</p>
+<ul>
+  <li>Heap buffer overflow / underflow</li>
+  <li>Stack buffer overflow / underflow</li>
+  <li>Global buffer overflow / underflow</li>
+  <li>Use after free</li>
+  <li>Use after return (with <code>-fsanitize-address-use-after-return</code>)</li>
+  <li>Use after scope (with <code>-fsanitize-address-use-after-scope</code>)</li>
+  <li>Double free / wild free</li>
+  <li>Memory leaks (LeakSanitizer, on exit)</li>
+</ul>
+
+<p>Mechanism: ASan replaces <code>malloc</code>/<code>free</code> with versions that pad allocations with red zones and quarantine freed memory. Loads/stores are instrumented to check shadow memory (1 byte per 8 program bytes encoding "valid"/"poisoned"). Out-of-bounds touch a red zone → report.</p>
+
+<h4>ASAN_OPTIONS</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ASAN_OPTIONS=detect_leaks=1:halt_on_error=0:abort_on_error=1:print_stats=1 ./prog
+</code></pre>
+</div>
+
+<p>Common options:</p>
+<table>
+<tr><td><code>halt_on_error=0</code></td><td>Continue after each report; useful in test runs that expose multiple issues.</td></tr>
+<tr><td><code>abort_on_error=1</code></td><td>Drop a core for GDB post-mortem.</td></tr>
+<tr><td><code>detect_leaks=0/1</code></td><td>Toggle LSan.</td></tr>
+<tr><td><code>print_stats=1</code></td><td>Memory statistics on exit.</td></tr>
+<tr><td><code>fast_unwind_on_malloc=0</code></td><td>More accurate alloc stacks; slower.</td></tr>
+<tr><td><code>strict_string_checks=1</code></td><td>Catch <code>strlen</code> etc. reading beyond a string.</td></tr>
+</table>
+
+<h2 id="ubsan">UBSan — undefined-behaviour catcher</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -O1 -g -fsanitize=undefined prog.c -o prog
+$ ./prog
+prog.c:5:9: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
+</code></pre>
+</div>
+
+<p>UBSan groups into many sub-sanitizers; commonly enabled together via <code>-fsanitize=undefined</code>:</p>
+<ul>
+  <li><code>signed-integer-overflow</code></li>
+  <li><code>shift</code> (bad shift amounts)</li>
+  <li><code>integer-divide-by-zero</code></li>
+  <li><code>float-divide-by-zero</code></li>
+  <li><code>null</code> (NULL deref)</li>
+  <li><code>alignment</code></li>
+  <li><code>bounds</code> (where compiler can prove an array's size)</li>
+  <li><code>vptr</code> (calling a virtual function on a freed/wrong-typed object)</li>
+  <li><code>return</code> (missing return on non-void function)</li>
+  <li><code>vla-bound</code></li>
+</ul>
+
+<p><code>-fno-sanitize-recover</code> turns reports into hard aborts (default is "report and continue"). Useful in CI to fail fast.</p>
+
+<p>UBSan is cheap and catches a huge category of "compiles fine, breaks under <code>-O2</code> with a different compiler". Always on in dev.</p>
+
+<h2 id="tsan">ThreadSanitizer — race detection</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ c++ -O1 -g -fsanitize=thread race.cpp -o race
+$ ./race
+WARNING: ThreadSanitizer: data race (pid=12345)
+  Write of size 4 at 0x... by thread T1:
+    #0 worker race.cpp:10
+  Previous read of size 4 at 0x... by thread T2:
+    #0 reader race.cpp:18
+  Location is global 'counter' of size 4
+</code></pre>
+</div>
+
+<p>Cost: ~10× slowdown, ~5–10× memory. Enable in dedicated CI builds.</p>
+
+<p>What TSan catches:</p>
+<ul>
+  <li>Concurrent unsynchronised accesses to the same memory.</li>
+  <li>Misuse of synchronisation primitives (e.g., unlock-without-lock).</li>
+  <li>Some atomic-misordering bugs.</li>
+</ul>
+
+<p>What it doesn't catch:</p>
+<ul>
+  <li>Logical races over data that is correctly synchronised but the algorithm is wrong.</li>
+  <li>Races involving custom atomics (inline asm, etc.) not annotated.</li>
+  <li>Some intra-process races involving signals.</li>
+</ul>
+
+<p>Run your tests under TSan often. Every report is real.</p>
+
+<h2 id="msan">MemorySanitizer — uninitialised memory</h2>
+
+<p>MSan tracks every byte's "initialisedness" through registers and memory. Reading something never written is a report. Catches the classic "stack variable used before assignment", "<code>malloc</code> + read uninit", "padding read".</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ clang++ -O1 -g -fsanitize=memory -fno-omit-frame-pointer prog.cc -o prog
+$ ./prog
+==12345==WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 0x... in main prog.cc:5
+</code></pre>
+</div>
+
+<p>The catch: MSan needs all dependencies (libstdc++, libc) instrumented too. That's painful — typically requires building a special version of libc++. Less commonly run than ASan; very valuable on the right project. Clang only.</p>
+
+<h2 id="combining">Can I run them together?</h2>
+
+<table>
+<tr><td>ASan + UBSan</td><td>Yes — common combo.</td></tr>
+<tr><td>ASan + TSan</td><td>No — incompatible.</td></tr>
+<tr><td>ASan + MSan</td><td>No.</td></tr>
+<tr><td>TSan + UBSan</td><td>Yes.</td></tr>
+<tr><td>MSan + UBSan</td><td>Yes.</td></tr>
+</table>
+
+<p>Strategy: maintain three CI builds — (ASan+UBSan), (TSan+UBSan), and a regular optimised build. Run all three. Slow tests should run under at least the optimised build; fast unit tests under all three.</p>
+
+<h2 id="valgrind">valgrind — when sanitizers don't apply</h2>
+
+<p>valgrind runs your program in a CPU emulator (Valgrind's "core") and checks every memory access. <strong>Pros:</strong> works on unmodified binaries, catches the same things ASan+MSan do, no recompilation. <strong>Cons:</strong> 20–50× slower, can have false positives on optimised stdlib code, doesn't always understand modern things like AVX-512 immediately.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ valgrind --leak-check=full --show-leak-kinds=all ./prog
+==12345== Memcheck, a memory error detector
+==12345== Invalid read of size 4
+==12345==    at 0x... main (prog.c:8)
+==12345==  Address ... is 0 bytes after a block of size 16 alloc'd
+==12345==    at 0x... malloc
+==12345==    by 0x... main (prog.c:5)
+==12345==
+==12345== HEAP SUMMARY:
+==12345==     definitely lost: 16 bytes in 1 blocks
+==12345==     indirectly lost: 0 bytes
+==12345==     possibly lost:   0 bytes
+</code></pre>
+</div>
+
+<p>Other valgrind tools:</p>
+<ul>
+  <li><strong>helgrind</strong> — race detector. Slower than TSan but works without recompiling.</li>
+  <li><strong>drd</strong> — race detector with different heuristics.</li>
+  <li><strong>cachegrind</strong> — cache simulation; useful for "would a different layout help?"</li>
+  <li><strong>callgrind</strong> — call graph + cost; visualised with KCachegrind.</li>
+  <li><strong>massif</strong> — heap profiler (memory usage over time).</li>
+</ul>
+
+<p>Use ASan/TSan when you can recompile. Use valgrind when you can't (vendor binaries, obscure platforms).</p>
+
+<h2 id="static">Static analysis</h2>
+
+<h4>clang-tidy</h4>
+
+<p>The standard linter for modern C++. Plug-in checks; configurable per project.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ clang-tidy main.cpp -- -std=c++20 -I./include
+main.cpp:8:5: warning: do not use pointer arithmetic
+main.cpp:14:9: warning: variable 'count' is uninitialized when used here
+
+# With a config file:
+$ cat .clang-tidy
+---
+Checks: '
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers
+'
+WarningsAsErrors: 'bugprone-*,cert-*'
+
+# Run across the whole project (with compile_commands.json from CMake):
+$ run-clang-tidy -j 8
+</code></pre>
+</div>
+
+<p>Powerful checks:</p>
+<ul>
+  <li><strong>bugprone-*</strong> — likely-bug patterns: misplaced widening, branch-clone, unchecked optional access.</li>
+  <li><strong>cert-*</strong> — CERT-C/C++ secure coding rules.</li>
+  <li><strong>cppcoreguidelines-*</strong> — Stroustrup/Sutter Core Guidelines (RAII, init-everywhere, no narrowing).</li>
+  <li><strong>modernize-*</strong> — auto-fix to modern C++ idioms (NULL → nullptr, raw loops → ranges).</li>
+  <li><strong>performance-*</strong> — unnecessary copies, missed moves, inefficient string usage.</li>
+</ul>
+
+<p>Use <code>--fix</code> for auto-applicable fixes. Wire into CI; treat warnings as errors for a curated subset.</p>
+
+<h4>scan-build / clang static analyzer</h4>
+
+<p>Path-sensitive analysis: traces actual control flow to find bugs reachable on some path. Slower than clang-tidy but catches different things — null derefs, leaks, uninitialised values across multiple functions.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ scan-build make
+scan-build: 4 bugs found.
+scan-build: Run 'scan-view /tmp/scan-build-...' to examine bug reports.
+$ scan-view /tmp/scan-build-...           # opens HTML report in browser
+</code></pre>
+</div>
+
+<h4>cppcheck</h4>
+
+<p>Lighter, faster, broader-targeted than clang-tidy. Especially useful for legacy C codebases. Less smart but no compile-database setup needed.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cppcheck --enable=all --inconclusive --std=c11 src/
+$ cppcheck --enable=all --xml --xml-version=2 src/ 2&gt; cppcheck.xml
+</code></pre>
+</div>
+
+<h4>iwyu — Include-What-You-Use</h4>
+
+<p>Suggests minimal includes — speeds up build, reduces accidental dependency. Imperfect but useful periodically.</p>
+
+<h2 id="ci">CI integration</h2>
+
+<p>A typical professional setup:</p>
+
+<table>
+<thead><tr><th>Build</th><th>Flags</th><th>Tests run</th></tr></thead>
+<tbody>
+<tr><td>release</td><td><code>-O2 -g -DNDEBUG</code></td><td>full suite + benchmarks</td></tr>
+<tr><td>asan-ubsan</td><td><code>-O1 -g -fsanitize=address,undefined</code></td><td>full suite</td></tr>
+<tr><td>tsan-ubsan</td><td><code>-O1 -g -fsanitize=thread,undefined</code></td><td>concurrency tests</td></tr>
+<tr><td>fuzz</td><td><code>-O1 -g -fsanitize=address,fuzzer</code></td><td>libFuzzer corpus</td></tr>
+<tr><td>tidy</td><td>build w/ <code>compile_commands.json</code></td><td>run-clang-tidy on diff</td></tr>
+</tbody>
+</table>
+
+<p>Block PRs on sanitizer failures. Surface clang-tidy diff-only warnings in PR comments. Run cppcheck nightly on the whole tree.</p>
+
+<h2 id="fuzz">Fuzzing — bonus topic</h2>
+
+<p>libFuzzer is built into clang and integrates with sanitizers. Write a target that takes <code>(data, size)</code> and runs your code; the fuzzer mutates inputs and finds crashes.</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>// fuzz_target.cpp
+#include &lt;cstdint&gt;
+#include &lt;cstddef&gt;
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    parse_packet(data, size);    // your parser
+    return 0;
+}
+</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ clang++ -O1 -g -fsanitize=address,fuzzer fuzz_target.cpp parser.cpp -o fuzz
+$ mkdir corpus seeds
+$ cp some_real_inputs/* seeds/
+$ ./fuzz corpus seeds -max_total_time=300        # 5 minutes
+</code></pre>
+</div>
+
+<p>Found inputs are saved as <code>crash-*</code> files; reproduce with <code>./fuzz crash-deadbeef</code>. OSS-Fuzz runs continuous fuzzing for major projects; Google Project Zero builds careers on fuzzing-discovered CVEs.</p>
+
+<h2 id="hands-on">Hands-on: build a sanitizer-enabled CI matrix</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · CMake + sanitizers</div>
+<div class="hands-on-body">
+<div class="code" data-lang="text">
+<pre><code>option(SANITIZE "Sanitizer to use" "")
+if(SANITIZE STREQUAL "asan")
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+elseif(SANITIZE STREQUAL "tsan")
+    add_compile_options(-fsanitize=thread,undefined)
+    add_link_options(-fsanitize=thread,undefined)
+elseif(SANITIZE STREQUAL "msan")
+    add_compile_options(-fsanitize=memory -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=memory)
+endif()
+</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cmake -S . -B build/asan -DSANITIZE=asan -DCMAKE_BUILD_TYPE=Debug
+$ cmake -S . -B build/tsan -DSANITIZE=tsan -DCMAKE_BUILD_TYPE=Debug
+$ cmake --build build/asan
+$ ctest --test-dir build/asan
+</code></pre>
+</div>
+<p>Now your CI matrix has three jobs: regular, ASan+UBSan, TSan+UBSan. Each runs the same tests. Most bugs you'd otherwise debug for hours fail loudly in one of them.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Pick the sanitizer</span>
+</div>
+<div class="exercise-body">
+<p>Pick the right tool for each:</p>
+<ol type="a">
+<li>Code reads beyond the end of a stack array.</li>
+<li>A counter increment loses values when run with 4 threads.</li>
+<li><code>(int)signed_max + 1</code> evaluates to a small negative.</li>
+<li>A struct's padding bytes are read in <code>memcmp</code>.</li>
+<li>Memory leaks of 12 bytes per request.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li>ASan — stack-buffer-overflow.</li>
+<li>TSan — data race on the counter.</li>
+<li>UBSan — signed-integer-overflow.</li>
+<li>MSan — use-of-uninitialized-value (or initialise the struct with <code>{}</code>).</li>
+<li>LSan (built into ASan) — leak report at exit.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">ASan slowdown</span>
+</div>
+<div class="exercise-body">
+<p>Why is ASan only ~2× slower than baseline, while valgrind is 20–50×?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>ASan is compile-time instrumentation: every load/store gets a few extra instructions to consult shadow memory. The CPU runs natively; just more instructions per access. valgrind runs your code in a CPU emulator and re-checks all of memory through a software MMU — every access is interpreted. Native instrumentation always beats emulation for cost.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why both ASan and UBSan in CI?</span>
+</div>
+<div class="exercise-body">
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>They catch different bugs:</p>
+<ul>
+<li>ASan: out-of-bounds, use-after-free, leaks. Memory-shaped issues.</li>
+<li>UBSan: signed overflow, shift past width, alignment, null deref via UB inference, divide-by-zero. Compiler-language-rules issues.</li>
+</ul>
+<p>An overflow that doesn't access memory won't trip ASan. An out-of-bounds read won't trip UBSan unless the compiler can prove the bounds (rare). Both are cheap to enable; together they catch most C/C++ classics.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Fix flake with TSan</span>
+</div>
+<div class="exercise-body">
+<p>A test fails on CI ~1 time in 50, never reproduces locally. Suspected race. How do you find it?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>Build with <code>-fsanitize=thread,undefined</code>.</li>
+<li>Run the test in a loop locally: <code>for i in $(seq 1 200); do ./test || break; done</code>. Many races reproduce reliably under TSan because each unsynchronised access is checked.</li>
+<li>If still elusive, run with <code>TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1</code> for richer reports.</li>
+<li>Consider <code>rr</code> (chapter 10) — record one failure, replay deterministically.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Suppress a known false positive</span>
+</div>
+<div class="exercise-body">
+<p>ASan reports a leak in a third-party library you can't fix. How do you keep CI green?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Use a suppression file. Create <code>asan.supp</code>:</p>
+<div class="code" data-lang="text">
+<pre><code>leak:libthird_party.so
+leak:third_party_init
+</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ LSAN_OPTIONS=suppressions=$(pwd)/asan.supp ./test
+</code></pre>
+</div>
+<p>Same for TSan (<code>TSAN_OPTIONS=suppressions=...</code>) and UBSan. Document <em>why</em> each suppression exists and review periodically — third parties fix bugs too.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>ASan + UBSan: cheap, always-on in dev. They catch the bulk of C/C++ classics.</li>
+  <li>TSan: separate CI build for concurrency. Every report is real.</li>
+  <li>MSan: clang-only, requires instrumented stdlib; valuable when you can pay the setup cost.</li>
+  <li>valgrind: when you can't recompile or for tools beyond memcheck (cachegrind, massif).</li>
+  <li>clang-tidy + scan-build for static analysis; cppcheck for cheap C linting; treat curated checks as errors.</li>
+  <li>Fuzzing with libFuzzer + ASan finds bugs your tests miss.</li>
+  <li>Three CI builds: release, ASan+UBSan, TSan+UBSan. Do this and most "production-only bugs" become "caught at PR".</li>
+</ul>
+
+<div class="page-nav">
+  <a href="10-gdb.html"><span class="lbl">← Prev</span><span class="ttl">GDB deep dive</span></a>
+  <a href="12-kernel-adjacent.html" class="next"><span class="lbl">Next →</span><span class="ttl">Kernel-adjacent debug</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

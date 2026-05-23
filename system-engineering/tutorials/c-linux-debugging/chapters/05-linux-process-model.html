@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5 · Linux process model</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 05</span>
+  Linux process model
+</h1>
+<p class="lede">
+  Process creation, file descriptors, signals, pipes, exit semantics,
+  zombies, and the bits of <code>/proc</code> you'll <em>cat</em> at
+  3 AM. The Linux kernel exposes a small, opinionated API; once you
+  know the verbs everything else clicks.
+</p>
+
+<h2 id="syscall">Syscalls vs libc</h2>
+
+<p>"Linux APIs" really means three layers:</p>
+<ol>
+  <li>The <strong>syscall</strong> — the kernel entry point. Numbered (e.g. <code>SYS_open = 2</code>); invoked via <code>syscall</code> instruction with arguments in registers. Documented in <code>man 2</code>.</li>
+  <li>The <strong>libc wrapper</strong> — a thin C function (<code>open</code>) that prepares args and traps into the kernel. <code>man 2 open</code> documents both.</li>
+  <li>Higher-level <strong>libc</strong> — <code>fopen</code>, <code>printf</code>, etc. Built on top. <code>man 3</code>.</li>
+</ol>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ man 2 open      # syscall
+$ man 3 fopen     # higher-level
+$ strace ./my_prog 2&gt;&amp;1 | head -30   # see all syscalls a program makes
+</code></pre>
+</div>
+
+<h2 id="fork-exec">fork + exec — how programs spawn programs</h2>
+
+<p>Linux has no "spawn this program" syscall. Instead it uses two primitives:</p>
+
+<ul>
+  <li><strong><code>fork()</code></strong> — clone the current process. The child is a copy of the parent at this point: same memory (copy-on-write), same fds, same everything. <code>fork</code> returns 0 in the child, the child's PID in the parent, -1 on error.</li>
+  <li><strong><code>execve()</code></strong> (and the <code>exec*</code> family) — replace the current process image with another program. Same PID, same fds, but new code, new memory.</li>
+</ul>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/types.h&gt;
+#include &lt;sys/wait.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+int main(void) {
+    pid_t pid = fork();
+    if (pid &lt; 0) { perror("fork"); exit(1); }
+
+    if (pid == 0) {
+        /* child */
+        char *args[] = { "/bin/echo", "hello, from", "child", NULL };
+        execv(args[0], args);
+        perror("execv");           /* only reached on failure */
+        _exit(127);
+    }
+
+    /* parent */
+    int status;
+    waitpid(pid, &amp;status, 0);
+    if (WIFEXITED(status))
+        printf("child exited %d\n", WEXITSTATUS(status));
+    return 0;
+}
+</code></pre>
+</div>
+
+<p>The mental model: a shell pipeline like <code>ls | grep foo</code> is the shell calling <code>fork</code> twice, setting up a pipe between the children, then <code>exec</code>'ing <code>ls</code> in one and <code>grep</code> in the other.</p>
+
+<h4>posix_spawn — when you don't want fork</h4>
+<p>For "fork + exec without doing anything in between", <code>posix_spawn</code> is more efficient (especially in low-memory or many-threads cases — fork's copy-on-write is cheap but not free). Most of the time, fork+exec is fine.</p>
+
+<h2 id="exit">Exit semantics</h2>
+
+<table>
+<tr><td><code>exit(int)</code></td><td>libc. Runs <code>atexit</code> handlers, flushes stdio, then calls <code>_exit</code>.</td></tr>
+<tr><td><code>_exit(int)</code> / <code>_Exit</code></td><td>Skips atexit handlers; doesn't flush. Use after fork in the child if exec fails.</td></tr>
+<tr><td>Returning from <code>main</code></td><td>Equivalent to <code>exit(rc)</code>.</td></tr>
+<tr><td><code>abort()</code></td><td>Raises SIGABRT — uncatchable by default; usually drops a core.</td></tr>
+</table>
+
+<p>Exit code conventions: <strong>0 = success, non-zero = failure</strong>. <code>2</code> is conventional for misuse / config error. <code>>= 128</code> sometimes means "killed by signal N - 128" — but only by some shells.</p>
+
+<h2 id="zombies">Zombies and waitpid</h2>
+
+<p>When a child exits, the kernel keeps a tiny record (PID, exit status) until the parent calls <code>wait()</code> or <code>waitpid()</code>. Until then the child is a <strong>zombie</strong> — visible in <code>ps</code> with state <code>Z</code>, no resources except the entry.</p>
+
+<p>If the parent never reaps, zombies pile up. Eventually you can't fork.</p>
+
+<p>Three idioms:</p>
+<ol>
+  <li><strong>Reap synchronously</strong> with <code>waitpid(pid, &amp;status, 0)</code>.</li>
+  <li><strong>Reap asynchronously</strong> in a SIGCHLD handler. Loop: <code>while (waitpid(-1, &amp;status, WNOHANG) &gt; 0) { ... }</code>.</li>
+  <li><strong>"Don't care"</strong>: <code>signal(SIGCHLD, SIG_IGN)</code> on Linux makes the kernel auto-reap. POSIX-portable: set <code>SA_NOCLDWAIT</code>.</li>
+</ol>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;signal.h&gt;
+#include &lt;sys/wait.h&gt;
+
+static void on_sigchld(int sig) {
+    (void)sig;
+    int saved = errno;
+    while (waitpid(-1, NULL, WNOHANG) &gt; 0) { /* reap them all */ }
+    errno = saved;
+}
+
+void install_reaper(void) {
+    struct sigaction sa = { .sa_handler = on_sigchld, .sa_flags = SA_NOCLDSTOP | SA_RESTART };
+    sigemptyset(&amp;sa.sa_mask);
+    sigaction(SIGCHLD, &amp;sa, NULL);
+}
+</code></pre>
+</div>
+
+<p><strong>Orphans</strong> — children whose parent died — are inherited by PID 1 (init / systemd). It always reaps. So orphan zombies don't accumulate.</p>
+
+<h2 id="pid">PID, PPID, PGID, SID</h2>
+
+<table>
+<tr><td><strong>PID</strong></td><td>Process ID — unique per process while alive</td></tr>
+<tr><td><strong>PPID</strong></td><td>Parent PID — who fork()ed me; reset to 1 if parent dies first</td></tr>
+<tr><td><strong>PGID</strong></td><td>Process group ID — used for shell job control; <code>kill -9 -PGID</code> kills the group</td></tr>
+<tr><td><strong>SID</strong></td><td>Session ID — typically the shell that owns the terminal</td></tr>
+<tr><td><strong>TID</strong></td><td>Thread ID — same as PID for the main thread; different per thread</td></tr>
+</table>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ps -eo pid,ppid,pgid,sid,comm | head
+   PID   PPID   PGID    SID COMMAND
+     1      0      1      1 systemd
+   932    928    932    932 bash
+  4321    932   4321    932 my_prog
+</code></pre>
+</div>
+
+<h2 id="signals">Signals — the asynchronous interrupt</h2>
+
+<p>A signal is a notification delivered to a process; default handlers usually terminate. The big ones:</p>
+
+<table>
+<thead><tr><th>Signal</th><th>Default</th><th>Use</th></tr></thead>
+<tbody>
+<tr><td><code>SIGTERM</code> (15)</td><td>terminate</td><td>polite "please exit"</td></tr>
+<tr><td><code>SIGINT</code> (2)</td>  <td>terminate</td><td>Ctrl-C</td></tr>
+<tr><td><code>SIGKILL</code> (9)</td> <td>terminate</td><td>uncatchable, immediate</td></tr>
+<tr><td><code>SIGSTOP</code> (19)</td><td>stop</td>     <td>uncatchable; pauses process (Ctrl-Z is SIGTSTP, catchable)</td></tr>
+<tr><td><code>SIGCONT</code> (18)</td><td>continue</td> <td>resume a stopped process</td></tr>
+<tr><td><code>SIGSEGV</code> (11)</td><td>core dump</td><td>invalid memory access</td></tr>
+<tr><td><code>SIGBUS</code> (7)</td>  <td>core dump</td><td>misalignment / bad mmap access</td></tr>
+<tr><td><code>SIGFPE</code> (8)</td>  <td>core dump</td><td>integer divide by zero</td></tr>
+<tr><td><code>SIGABRT</code> (6)</td> <td>core dump</td><td><code>abort()</code>, assertion failure</td></tr>
+<tr><td><code>SIGPIPE</code> (13)</td><td>terminate</td><td>write to pipe with no readers</td></tr>
+<tr><td><code>SIGCHLD</code> (17)</td><td>ignore</td>   <td>child exited</td></tr>
+<tr><td><code>SIGUSR1</code>, <code>SIGUSR2</code></td><td>terminate</td><td>application-defined</td></tr>
+<tr><td><code>SIGHUP</code> (1)</td>  <td>terminate</td><td>"reload config" by convention; sent on terminal disconnect</td></tr>
+</tbody>
+</table>
+
+<h4>Handling a signal — the right way</h4>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;signal.h&gt;
+
+static volatile sig_atomic_t stop_flag = 0;
+
+static void on_term(int sig) {
+    (void)sig;
+    stop_flag = 1;          /* set a flag; do NOT do real work in handlers */
+}
+
+int main(void) {
+    struct sigaction sa = { .sa_handler = on_term, .sa_flags = SA_RESTART };
+    sigemptyset(&amp;sa.sa_mask);
+    sigaction(SIGTERM, &amp;sa, NULL);
+    sigaction(SIGINT,  &amp;sa, NULL);
+
+    while (!stop_flag) {
+        /* main loop */
+    }
+    return 0;
+}
+</code></pre>
+</div>
+
+<p>The rules of signal handlers:</p>
+<ol>
+  <li><strong>Only call async-signal-safe functions</strong> from the handler. <code>printf</code>, <code>malloc</code>, <code>fprintf</code> are NOT safe. <code>write</code>, <code>_exit</code>, <code>signal</code>, <code>kill</code> are.</li>
+  <li><strong>Use <code>volatile sig_atomic_t</code></strong> for flags read by main code.</li>
+  <li><strong>Prefer <code>sigaction</code> over <code>signal</code></strong> — <code>signal</code>'s semantics differ between BSD and System V; <code>sigaction</code> is unambiguous.</li>
+  <li><strong><code>SA_RESTART</code></strong> auto-resumes interruptible syscalls (most read/write); without it, syscalls return -1 with <code>EINTR</code> and you must retry yourself.</li>
+</ol>
+
+<div class="callout pitfall">
+<div class="callout-title">printf in a signal handler</div>
+<p>It looks like it works. Sometimes. Then under load, your program hangs because the handler interrupted libc inside its stdio lock and the handler tried to grab the same lock — deadlock. Don't.</p>
+</div>
+
+<h4>Sending signals</h4>
+
+<div class="code" data-lang="c">
+<pre><code>kill(pid, SIGTERM);             /* one process */
+kill(0,   SIGTERM);             /* whole process group */
+kill(-1,  SIGTERM);             /* all processes you can signal — careful! */
+raise(SIGUSR1);                 /* send to self */
+pthread_kill(thr, SIGUSR1);     /* signal a specific thread */
+</code></pre>
+</div>
+
+<h4>signalfd — signals as file descriptors</h4>
+
+<p>The modern Linux way: deliver signals on a file descriptor you read with <code>poll/epoll</code>. No async surprises, no async-signal-safety to worry about.</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/signalfd.h&gt;
+sigset_t mask;
+sigemptyset(&amp;mask);
+sigaddset(&amp;mask, SIGTERM);
+sigaddset(&amp;mask, SIGINT);
+sigprocmask(SIG_BLOCK, &amp;mask, NULL);   /* block normal delivery */
+
+int sfd = signalfd(-1, &amp;mask, SFD_CLOEXEC | SFD_NONBLOCK);
+/* read structs from sfd in your event loop; no async handlers needed */
+</code></pre>
+</div>
+
+<h2 id="fds">File descriptors</h2>
+
+<p>A file descriptor is a small non-negative integer the kernel uses as an index into the process's "fd table". Each entry refers to a file description (an open kernel object).</p>
+
+<div class="code" data-lang="text">
+<pre><code>process A's fd table          system-wide open file table
+  0  ──────►  open file: /dev/tty (read), pos=0
+  1  ──────►  open file: /dev/tty (write), pos=…
+  2  ──────►  open file: /dev/tty (write), pos=…
+  3  ──────►  open file: /tmp/log (rw),  pos=24
+  4  ─┐
+  5  ─┴─────► (same open file: dup'd)
+</code></pre>
+</div>
+
+<p>Standard fds:</p>
+<table>
+<tr><td>0 — stdin</td><td>conventionally readable</td></tr>
+<tr><td>1 — stdout</td><td>conventionally writable; program output</td></tr>
+<tr><td>2 — stderr</td><td>conventionally writable; diagnostics, never buffered like stdout</td></tr>
+</table>
+
+<p>Operations:</p>
+<ul>
+  <li><code>open</code>, <code>close</code>, <code>read</code>, <code>write</code>, <code>lseek</code></li>
+  <li><code>dup(fd)</code>, <code>dup2(old, new)</code> — duplicate; <code>dup2</code> is how shells redirect</li>
+  <li><code>fcntl(fd, F_SETFD, FD_CLOEXEC)</code> — close on exec, important for security</li>
+  <li><code>fcntl(fd, F_SETFL, O_NONBLOCK)</code> — make I/O non-blocking</li>
+</ul>
+
+<div class="code" data-lang="c">
+<pre><code>/* Redirect stdout to a file in this process: */
+int fd = open("/tmp/out.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+dup2(fd, 1);              /* stdout now points to /tmp/out.log */
+close(fd);
+puts("hello");            /* goes to the file */
+</code></pre>
+</div>
+
+<h4>O_CLOEXEC and the security angle</h4>
+
+<p>By default, fds are inherited across <code>exec</code>. If your daemon opens <code>/etc/secret</code>, then forks and execs <code>/usr/bin/cat /etc/passwd</code>, the child inherits the secret fd. <strong>Always pass <code>O_CLOEXEC</code></strong> to <code>open</code>, <code>socket</code>, <code>pipe2</code>, <code>accept4</code>:</p>
+
+<div class="code" data-lang="c">
+<pre><code>int fd = open("/etc/secret", O_RDONLY | O_CLOEXEC);
+</code></pre>
+</div>
+
+<h2 id="pipes">Pipes</h2>
+
+<div class="code" data-lang="c">
+<pre><code>int p[2];
+pipe2(p, O_CLOEXEC);              /* p[0] read end, p[1] write end */
+pid_t pid = fork();
+
+if (pid == 0) {                   /* child: write to pipe */
+    close(p[0]);
+    dup2(p[1], STDOUT_FILENO);    /* stdout is now the pipe */
+    close(p[1]);
+    execlp("ls", "ls", NULL);
+    _exit(127);
+}
+/* parent: read from pipe */
+close(p[1]);
+char buf[4096];
+ssize_t n;
+while ((n = read(p[0], buf, sizeof buf)) &gt; 0)
+    write(1, buf, n);
+close(p[0]);
+waitpid(pid, NULL, 0);
+</code></pre>
+</div>
+
+<p>This is exactly what the shell does for <code>ls | grep</code>. Two side notes:</p>
+<ul>
+  <li>If you write to a pipe with no readers, you get <code>SIGPIPE</code>; the default kills you. Servers should ignore it: <code>signal(SIGPIPE, SIG_IGN)</code> or use <code>send(... MSG_NOSIGNAL)</code>.</li>
+  <li>The read side returning 0 means EOF — all writers closed.</li>
+</ul>
+
+<h2 id="env">Environment</h2>
+
+<p>The environment is a NUL-terminated array of <code>KEY=value</code> strings inherited across exec.</p>
+
+<div class="code" data-lang="c">
+<pre><code>char *home = getenv("HOME");
+setenv("MY_VAR", "value", /*overwrite=*/1);
+unsetenv("OLD_VAR");
+
+extern char **environ;
+for (char **e = environ; *e; e++) puts(*e);
+</code></pre>
+</div>
+
+<p>Note: <code>setenv</code>/<code>getenv</code> are not thread-safe in glibc — use them at startup only or guard with a mutex. <code>execvpe</code>/<code>execve</code> let you set the child's env explicitly, which is cleaner.</p>
+
+<h2 id="proc">/proc — the kernel's UI</h2>
+
+<p>Linux exposes runtime info through the virtual filesystem at <code>/proc</code>. Some entries you'll <code>cat</code> often:</p>
+
+<table>
+<thead><tr><th>Path</th><th>What</th></tr></thead>
+<tbody>
+<tr><td><code>/proc/[pid]/status</code></td>     <td>State, threads, memory, parent — human-readable</td></tr>
+<tr><td><code>/proc/[pid]/stat</code></td>       <td>Same data, machine-readable; <code>ps</code> reads this</td></tr>
+<tr><td><code>/proc/[pid]/maps</code></td>       <td>Memory map (segments, libs, stacks)</td></tr>
+<tr><td><code>/proc/[pid]/fd/</code></td>        <td>Symlinks to every open fd — extremely useful</td></tr>
+<tr><td><code>/proc/[pid]/cmdline</code></td>    <td>Argv, NUL-separated</td></tr>
+<tr><td><code>/proc/[pid]/environ</code></td>    <td>Environment, NUL-separated</td></tr>
+<tr><td><code>/proc/[pid]/cwd</code></td>        <td>Symlink to working directory</td></tr>
+<tr><td><code>/proc/[pid]/exe</code></td>        <td>Symlink to binary</td></tr>
+<tr><td><code>/proc/[pid]/limits</code></td>     <td>Resource limits</td></tr>
+<tr><td><code>/proc/[pid]/stack</code></td>      <td>Kernel stack</td></tr>
+<tr><td><code>/proc/[pid]/task/[tid]/</code></td><td>Per-thread version of all the above</td></tr>
+<tr><td><code>/proc/cpuinfo</code></td>          <td>CPU model, flags, count</td></tr>
+<tr><td><code>/proc/meminfo</code></td>          <td>System memory stats</td></tr>
+<tr><td><code>/proc/diskstats</code></td>        <td>Disk I/O counters</td></tr>
+<tr><td><code>/proc/net/tcp</code></td>          <td>All TCP sockets (cat to see what netstat shows)</td></tr>
+<tr><td><code>/proc/sys/...</code></td>          <td>Kernel tunables (read/write — like <code>sysctl</code>)</td></tr>
+</tbody>
+</table>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ pidof my_prog
+4321
+$ ls -l /proc/4321/fd
+lr-x------ 1 user user 64 ... 0 -&gt; /dev/null
+lrwx------ 1 user user 64 ... 1 -&gt; pipe:[12345]
+lrwx------ 1 user user 64 ... 2 -&gt; pipe:[12346]
+lr-x------ 1 user user 64 ... 3 -&gt; /etc/myapp/config.yaml
+
+$ cat /proc/4321/maps | head
+55a3f...  r-xp 00000000 fd:00 ...   /usr/local/bin/my_prog
+55a3f...  r--p 00010000 fd:00 ...   /usr/local/bin/my_prog
+7f80b...  r-xp 00000000 fd:00 ...   /lib/x86_64-linux-gnu/libc-2.36.so
+...
+</code></pre>
+</div>
+
+<p>If a process is leaking fds, <code>ls /proc/PID/fd | wc -l</code> grows. If a process is "stuck", <code>cat /proc/PID/stack</code> shows where in the kernel it's blocked.</p>
+
+<h2 id="resource-limits">Resource limits</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ulimit -a                        # current limits in this shell
+core file size          (blocks, -c) 0      # disabled — change to "unlimited" to get core dumps
+data seg size           (kbytes, -d) unlimited
+file size               (blocks, -f) unlimited
+open files                      (-n) 1024
+stack size              (kbytes, -s) 8192
+max user processes              (-u) 7868
+
+$ ulimit -c unlimited              # enable core dumps
+$ ulimit -n 65536                  # raise fd limit
+</code></pre>
+</div>
+
+<p>Programmatically: <code>getrlimit</code> / <code>setrlimit</code>. Servers often raise their fd limit (<code>RLIMIT_NOFILE</code>) at startup.</p>
+
+<h2 id="hands-on">Hands-on: trace a fork-exec</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · strace tells the story</div>
+<div class="hands-on-body">
+<div class="code terminal" data-lang="sh">
+<pre><code>$ strace -f -e trace=clone,execve,exit_group -- bash -c 'echo hi | wc -c'
+clone(...) = 12345                       # bash forks
+strace: Process 12345 attached
+[pid 12345] execve("/usr/bin/echo", ["echo", "hi"], ...) = 0
+[pid 12345] exit_group(0) = ?
+[pid 12345] +++ exited with 0 +++
+clone(...) = 12346                       # bash forks again
+[pid 12346] execve("/usr/bin/wc", ["wc", "-c"], ...) = 0
+[pid 12346] exit_group(0) = ?
+[pid 12346] +++ exited with 0 +++
+3
+</code></pre>
+</div>
+<p>Read top-down: bash clones, child execs <code>echo</code>, exits. Bash clones again, child execs <code>wc</code>, exits. The pipeline is set up between them via <code>pipe</code> + <code>dup2</code> calls before <code>execve</code> (filtered out for clarity).</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Why _exit after exec?</span>
+</div>
+<div class="exercise-body">
+<p>In the fork-exec example, the child calls <code>_exit(127)</code> if exec fails — not <code>exit</code>. Why?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>exit</code> runs <code>atexit</code> handlers and flushes stdio. The child's stdio buffers are copies of the parent's; flushing them double-prints output the parent already buffered. <code>_exit</code> bypasses both. Always <code>_exit</code> on the post-fork failure path.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Process is stuck — what now?</span>
+</div>
+<div class="exercise-body">
+<p>A long-running daemon hasn't responded to clients for an hour. You can't restart it (it has live state). What's your diagnostic order using only stock Linux tools?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><code>ps -p $PID -o stat,wchan</code> — what state and where in the kernel.</li>
+<li><code>cat /proc/$PID/stack</code> (root) — kernel stack to see what it's blocked on.</li>
+<li><code>ls /proc/$PID/fd | wc -l</code> + <code>ls -l /proc/$PID/fd | tail</code> — fd leak?</li>
+<li><code>cat /proc/$PID/status</code> — threads, memory, signals queued.</li>
+<li><code>strace -p $PID -f -tt -T</code> — live syscall trace; stop after a sample.</li>
+<li><code>gdb -p $PID</code> + <code>thread apply all bt</code> — userspace backtrace per thread.</li>
+<li>If safe: <code>kill -USR1 $PID</code> to dump state if your daemon supports it.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">SIGPIPE in a server</span>
+</div>
+<div class="exercise-body">
+<p>You wrote a TCP server. Your tests work. In production, the server randomly dies after running fine for 30 minutes. <code>dmesg</code> says nothing. What's likely?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>A client closed its end of the socket; you called <code>write</code>; the kernel sent <code>SIGPIPE</code>; default action is termination. Fix one of:</p>
+<ul>
+<li><code>signal(SIGPIPE, SIG_IGN)</code> at startup. <code>write</code> then returns <code>-1</code> with <code>errno=EPIPE</code>.</li>
+<li>Use <code>send(fd, buf, n, MSG_NOSIGNAL)</code> instead of <code>write</code>.</li>
+<li>Set <code>SO_NOSIGPIPE</code> per-socket on BSD/macOS.</li>
+</ul>
+<p>Verify by enabling core dumps (<code>ulimit -c unlimited</code>) and reproducing — you'd see SIGPIPE in the core's signal info.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Child zombie hunt</span>
+</div>
+<div class="exercise-body">
+<p>A daemon spawns 1 helper per minute. After a day, <code>ps</code> shows hundreds of <code>&lt;defunct&gt;</code> processes with the daemon as parent. What's wrong, and what are two fixes?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Daemon isn't reaping. Two fixes:</p>
+<ol>
+<li>Install a SIGCHLD handler that loops <code>waitpid(-1, NULL, WNOHANG)</code>.</li>
+<li>If the daemon doesn't care about exit status: <code>signal(SIGCHLD, SIG_IGN);</code> on Linux this makes the kernel auto-reap. POSIX-portable equivalent: <code>sigaction</code> with <code>sa_flags=SA_NOCLDWAIT</code>.</li>
+</ol>
+<p>Bonus fix: spawn helpers via <code>fork() + fork() + exit()</code> double-fork pattern, so the helper is reparented to init, which always reaps. Used by <code>nohup</code> and old daemons.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">FD leak across exec</span>
+</div>
+<div class="exercise-body">
+<p>Your service opens <code>/etc/db_password</code> at startup, then <code>fork+exec</code>s a child to run a customer-supplied script. The customer can read the password from the script. How? Fix?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>FDs are inherited across exec by default. Inside the script, <code>cat /proc/self/fd/N</code> for each open fd reads the file the parent opened — including the password file.</p>
+<p>Fixes (use all three for defence in depth):</p>
+<ol>
+<li>Open with <code>O_CLOEXEC</code>: <code>open(path, O_RDONLY | O_CLOEXEC)</code>.</li>
+<li>Or after open, <code>fcntl(fd, F_SETFD, FD_CLOEXEC)</code>.</li>
+<li>Or in the child between fork and exec, manually close fds &gt; 2: <code>for (int i = 3; i &lt; sysconf(_SC_OPEN_MAX); i++) close(i);</code>. Better with Linux 5.9's <code>close_range(3, ~0u, 0)</code>.</li>
+</ol>
+<p>The <code>O_CLOEXEC</code> default-by-construction is the safe one — the audit trail in code review is "this is a hot path; should it be CLOEXEC?" not "did we remember to <code>fcntl</code>?".</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>fork+exec is the universal "spawn" idiom; the child inherits memory (CoW) and fds.</li>
+  <li>Always reap children — synchronously, via SIGCHLD handler, or by ignoring SIGCHLD on Linux.</li>
+  <li>Signals: use <code>sigaction</code>, set a flag, do work in main loop. Handlers must be async-signal-safe.</li>
+  <li>FDs inherited across exec by default — use <code>O_CLOEXEC</code> on every <code>open</code>/<code>socket</code>/<code>pipe2</code>/<code>accept4</code>.</li>
+  <li><code>/proc/[pid]/{fd,maps,stack,status}</code> are your "what is this process doing" toolkit.</li>
+  <li>Ignore SIGPIPE in network servers, or use <code>MSG_NOSIGNAL</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="04-build-and-link.html"><span class="lbl">← Prev</span><span class="ttl">Build &amp; link</span></a>
+  <a href="06-files-and-io.html" class="next"><span class="lbl">Next →</span><span class="ttl">Files &amp; I/O</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

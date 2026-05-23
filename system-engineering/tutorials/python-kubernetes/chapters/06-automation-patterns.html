@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>6 · Automation Patterns — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 06</span>
+  Automation Patterns
+</h1>
+<p class="lede">
+  The patterns that turn a one-off script into something you'd run
+  a thousand times unattended. Idempotency, retries with jitter,
+  locks, atomic writes, structured logging, observability, signals,
+  webhooks, scheduling. The discipline that separates "automation"
+  from "scripts that work on Tuesdays".
+</p>
+
+<h2 id="idempotency">Idempotency — the most important property</h2>
+
+<p>An operation is <strong>idempotent</strong> if running it N times has the same effect as running it once. This is what lets you safely retry, what makes "did the job actually run?" answerable from the final state alone, and what enables every reliability pattern that follows.</p>
+
+<div class="code" data-lang="python">
+<pre><code># NOT idempotent — appends each call
+def add_user(name):
+    with open("users.txt", "a") as f:
+        f.write(name + "\n")
+
+# Idempotent — checks first, ensures end state
+def add_user(name):
+    users = set(read_users())
+    if name in users:
+        return False                           # already there
+    users.add(name)
+    atomic_write_users(users)
+    return True
+
+# Idempotent — desired-state pattern
+def ensure_promoted(artifact, channel):
+    current = registry.get_channel(artifact)
+    if current == channel:
+        log.info("already at %s, no-op", channel)
+        return
+    registry.move(artifact, channel)</code></pre>
+</div>
+
+<p>The right mental shift: write functions that <em>express the desired end state</em> ("this should exist", "this should be at channel X"), not the action ("create this", "move this"). Run twice → second run is a no-op. Run on a partially-completed previous run → it converges.</p>
+
+<p>This is exactly how Kubernetes works (Chapter 7). Internalise it now.</p>
+
+<h2 id="retries">Retries with backoff and jitter</h2>
+
+<p>Transient failures are inevitable in distributed systems. The good retry has three properties: <strong>exponential backoff</strong> (each attempt waits longer), <strong>jitter</strong> (avoid thundering herds), <strong>cap</strong> (don't retry forever).</p>
+
+<div class="code" data-lang="python">
+<pre><code>import random, time, logging
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+log = logging.getLogger(__name__)
+
+def retry(
+    fn: Callable[[], T],
+    *,
+    attempts: int = 5,
+    base: float = 0.5,
+    cap: float = 30.0,
+    exceptions: tuple = (Exception,),
+) -&gt; T:
+    """Run fn() with exponential backoff + jitter. Returns its result, raises on final failure."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except exceptions as e:
+            if attempt == attempts:
+                raise
+            delay = min(cap, base * 2 ** (attempt - 1))
+            delay *= random.uniform(0.5, 1.5)               # ±50% jitter
+            log.warning("attempt %d/%d failed (%s), sleeping %.2fs",
+                        attempt, attempts, e, delay)
+            time.sleep(delay)
+    raise RuntimeError("unreachable")</code></pre>
+</div>
+
+<p>Or use the <code>tenacity</code> library — battle-tested, decorator-style:</p>
+
+<div class="code" data-lang="python">
+<pre><code>from tenacity import retry, stop_after_attempt, wait_random_exponential, retry_if_exception_type
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_random_exponential(multiplier=0.5, max=30),
+    retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+    reraise=True,
+)
+def fetch_artifact(name: str) -&gt; bytes:
+    return registry.download(name)</code></pre>
+</div>
+
+<p>Don't blanket-retry every exception. Retry only "this might succeed if we try again": network errors, 5xx, 429. Don't retry: 4xx, validation errors, "key not found" — they'll fail the same way.</p>
+
+<h2 id="circuit-breaker">Circuit breakers — when retries make things worse</h2>
+
+<p>Retrying a downstream that's already overloaded prolongs the outage. A circuit breaker stops calling for a cooldown period after consecutive failures.</p>
+
+<div class="code" data-lang="python">
+<pre><code>from dataclasses import dataclass, field
+import time
+
+@dataclass
+class Breaker:
+    threshold: int = 5
+    cooldown_s: float = 60.0
+    failures: int = 0
+    open_until: float = 0.0
+
+    def call(self, fn, *args, **kwargs):
+        now = time.monotonic()
+        if now &lt; self.open_until:
+            raise RuntimeError("circuit open")
+        try:
+            r = fn(*args, **kwargs)
+            self.failures = 0                  # success resets
+            return r
+        except Exception:
+            self.failures += 1
+            if self.failures &gt;= self.threshold:
+                self.open_until = now + self.cooldown_s
+                log.error("circuit opened for %.0fs", self.cooldown_s)
+            raise
+
+breaker = Breaker(threshold=5, cooldown_s=60)
+result = breaker.call(do_thing)</code></pre>
+</div>
+
+<p>For real services, use <code>pybreaker</code> or build into your HTTP client. The pattern is: protect a downstream by occasionally letting requests through to test for recovery rather than hammering forever.</p>
+
+<h2 id="locks">Locks — never run two of me at once</h2>
+
+<p>If your script is on a cron and an earlier run is still running, a second run can race. Solve with a <strong>file lock</strong>:</p>
+
+<div class="code" data-lang="python">
+<pre><code>import fcntl, sys, contextlib
+from pathlib import Path
+
+@contextlib.contextmanager
+def file_lock(path: Path):
+    """Block until exclusive lock is held, release on exit."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)        # blocks
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+# Non-blocking variant — fail fast if another run is in flight
+@contextlib.contextmanager
+def file_lock_nb(path: Path):
+    f = open(path, "a+")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("already running; exiting", file=sys.stderr)
+            raise SystemExit(0)
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN); f.close()
+
+# Usage
+with file_lock_nb(Path("/var/lock/promote.lock")):
+    do_the_work()</code></pre>
+</div>
+
+<p>Cross-machine? Use Redis (<code>redis-py</code> + <code>SETNX</code> with TTL) or a distributed lock service. For a single host, <code>flock</code> is iron-clad.</p>
+
+<h2 id="atomic">Atomic writes — recap</h2>
+
+<p>Already covered in Chapter 2 — write to <code>file.tmp</code>, fsync, <code>os.replace</code>. Repeated here because it's load-bearing for everything else: state files, manifests, lock-handoffs.</p>
+
+<h2 id="logging">Structured logging</h2>
+
+<p>For automation, JSON-shaped logs win because they're machine-parseable, ship cleanly to log aggregators, and let you query "all promote jobs to release in the last 7 days" with regular tools.</p>
+
+<div class="code" data-lang="python">
+<pre><code>import logging, json, time, contextvars
+from typing import Any
+
+# Per-task context — survives across function calls without threading args through
+ctx_request_id: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+ctx_artifact:   contextvars.ContextVar[str] = contextvars.ContextVar("artifact",   default="-")
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        d = {
+            "ts":         time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)),
+            "level":      record.levelname,
+            "logger":     record.name,
+            "msg":        record.getMessage(),
+            "request_id": ctx_request_id.get(),
+            "artifact":   ctx_artifact.get(),
+        }
+        if record.exc_info:
+            d["exc"] = self.formatException(record.exc_info)
+        return json.dumps(d, separators=(',', ':'))
+
+# Usage
+log = logging.getLogger(__name__)
+ctx_request_id.set("abc123")
+ctx_artifact.set("firmware-1.0.img")
+log.info("promoting", extra={"channel": "release"})
+# {"ts":"2026-04-23T10:30:00","level":"INFO",...,"msg":"promoting","request_id":"abc123","artifact":"firmware-1.0.img"}</code></pre>
+</div>
+
+<p><strong>Context vars</strong> let you stick a <code>request_id</code> at the top of a job and have every log line include it without ever passing it as an argument. They're also async-safe, unlike threadlocals.</p>
+
+<p>Or use <code>structlog</code>, which handles context propagation, key-value formatting, and pretty dev output vs JSON prod output natively.</p>
+
+<h2 id="signals">Signals and graceful shutdown</h2>
+
+<p>Long-running automation needs to handle <code>SIGTERM</code> gracefully — Kubernetes sends it before <code>SIGKILL</code>; Jenkins sends it on cancellation; CI systems send it on timeouts.</p>
+
+<div class="code" data-lang="python">
+<pre><code>import signal, threading
+
+stopping = threading.Event()
+
+def _on_term(signum, frame):
+    log.info("got signal %d, finishing current item then exiting", signum)
+    stopping.set()
+
+signal.signal(signal.SIGTERM, _on_term)
+signal.signal(signal.SIGINT,  _on_term)
+
+while not stopping.is_set():
+    item = queue.get(timeout=1)
+    process(item)                              # finishes current work
+    if stopping.is_set():
+        break
+log.info("clean shutdown")</code></pre>
+</div>
+
+<p>The pattern: catch the signal, set a flag, finish the current logical unit of work, exit cleanly. Don't <code>sys.exit()</code> from the handler — it can interrupt midway through a write or a network call.</p>
+
+<h2 id="webhooks">Receiving webhooks safely</h2>
+
+<p>Already covered in Chapter 3, but the safety checklist deserves repeating:</p>
+
+<ol>
+  <li><strong>Verify HMAC signature</strong> with <code>hmac.compare_digest</code> (timing-safe).</li>
+  <li><strong>Reject unknown event types</strong> instead of best-effort processing.</li>
+  <li><strong>Return 200 quickly</strong>, queue the work; webhook senders retry on slow responses.</li>
+  <li><strong>Idempotency</strong> via the event's stable ID — process events only once even if delivered twice.</li>
+  <li><strong>Reject untrusted senders</strong> by source IP allowlist or mTLS where possible.</li>
+</ol>
+
+<div class="code" data-lang="python">
+<pre><code>from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
+import hmac, hashlib, os, json, time
+
+app = FastAPI()
+SECRET = os.environ["WEBHOOK_SECRET"].encode()
+seen: dict[str, float] = {}                    # in production: Redis with TTL
+
+@app.post("/webhook")
+async def webhook(req, bg: BackgroundTasks,
+                  x_signature: str = Header(...), x_event_id: str = Header(...)):
+    body = await req.body()
+    expected = "sha256=" + hmac.new(SECRET, body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, x_signature):
+        raise HTTPException(403, "bad signature")
+    # Dedupe (cheap in-memory; replace for HA)
+    now = time.time()
+    for k, t in list(seen.items()):
+        if now - t &gt; 86400: del seen[k]
+    if x_event_id in seen:
+        return {"ok": True, "dedup": True}
+    seen[x_event_id] = now
+
+    payload = json.loads(body)
+    bg.add_task(process_event, payload)        # respond 200 fast
+    return {"ok": True}</code></pre>
+</div>
+
+<h2 id="cron">Cron — when to use what</h2>
+
+<table>
+<thead><tr><th>Need</th><th>Tool</th></tr></thead>
+<tbody>
+<tr><td>"Every 5 minutes on this host"</td><td>OS cron / systemd timer</td></tr>
+<tr><td>"Every night at 02:00 in some cluster"</td><td>K8s CronJob (Chapter 9)</td></tr>
+<tr><td>"Run X times after Y, but only if Z"</td><td>An orchestrator: Airflow, Dagster, Prefect, Temporal</td></tr>
+<tr><td>"Triggered by event"</td><td>A queue + worker — SQS, NATS, Redis Streams</td></tr>
+</tbody>
+</table>
+
+<h4>systemd timer — better than crontab</h4>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">ini</span><span class="title">/etc/systemd/system/promote.service</span></div>
+<pre><code>[Unit]
+Description=Promote artifacts to staging
+
+[Service]
+Type=oneshot
+User=ci
+ExecStart=/usr/local/bin/promote run-staging
+StandardOutput=journal
+StandardError=journal</code></pre>
+</div>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">ini</span><span class="title">/etc/systemd/system/promote.timer</span></div>
+<pre><code>[Unit]
+Description=Run promote every 15 min
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target</code></pre>
+</div>
+
+<p><code>RandomizedDelaySec</code> is the jitter — without it, every machine using this timer starts at exactly :00, :15, :30, :45 and hammers your downstreams.</p>
+
+<h2 id="observability">Observability</h2>
+
+<p>Three pillars: logs, metrics, traces. For automation, logs are the headliner; metrics matter when you run the same script thousands of times.</p>
+
+<h4>Metrics with Prometheus</h4>
+
+<div class="code" data-lang="python">
+<pre><code>from prometheus_client import Counter, Histogram, start_http_server
+
+PROMOTIONS    = Counter("promote_total", "promotions", ["channel", "result"])
+PROMOTE_TIME  = Histogram("promote_duration_seconds", "duration", ["channel"])
+
+start_http_server(9100)             # /metrics on :9100
+
+def promote(artifact, channel):
+    with PROMOTE_TIME.labels(channel).time():
+        try:
+            do_promote(artifact, channel)
+            PROMOTIONS.labels(channel, "ok").inc()
+        except Exception:
+            PROMOTIONS.labels(channel, "fail").inc()
+            raise</code></pre>
+</div>
+
+<p>Prometheus scrapes <code>:9100/metrics</code>. You get a counter of promotions per channel, a histogram of latencies. Alert on rates and percentiles.</p>
+
+<p>For short-lived jobs (cron-style), use the Pushgateway: the job pushes its final metrics to a long-running aggregator before exiting.</p>
+
+<h2 id="testing-automation">Testing automation</h2>
+
+<p>Three test layers:</p>
+
+<ol>
+  <li><strong>Unit tests</strong> — pure functions (validation, parsing, computation). Fast, no I/O.</li>
+  <li><strong>Integration tests</strong> — talk to a real Postgres / fake Artifactory in a Docker container, started by your test setup. <code>testcontainers</code> is excellent for this.</li>
+  <li><strong>End-to-end / smoke</strong> — run the actual CLI against a staging environment. Slower; gates releases.</li>
+</ol>
+
+<div class="code" data-lang="python">
+<pre><code>from testcontainers.postgres import PostgresContainer
+
+def test_db_migration():
+    with PostgresContainer("postgres:16") as pg:
+        url = pg.get_connection_url()
+        run_migrations(url)
+        with psycopg.connect(url) as conn:
+            cur = conn.execute("SELECT 1 FROM users LIMIT 1")
+            assert cur.fetchone() is not None</code></pre>
+</div>
+
+<h2 id="dry-run">--dry-run as a first-class feature</h2>
+
+<p>Every automation that mutates state should support <code>--dry-run</code>: print what would happen, change nothing. Saves you the day a config typo would have nuked production.</p>
+
+<div class="code" data-lang="python">
+<pre><code>def promote(artifact: str, src: str, dst: str, *, dry_run: bool = False):
+    log.info("promote %s: %s → %s%s",
+             artifact, src, dst, " (dry-run)" if dry_run else "")
+    if dry_run:
+        return
+    registry.move(artifact, src, dst)</code></pre>
+</div>
+
+<p>Bonus: have CI run integration tests in dry-run mode against production credentials, so you catch "I would have deleted the wrong thing" before it happens.</p>
+
+<h2 id="config-changes">Configuration changes — review-driven, not eyeball-driven</h2>
+
+<p>Patterns that scale to a team:</p>
+
+<ul>
+  <li><strong>GitOps for everything</strong>: cron schedules, secrets references, channel rules, all in git, all reviewed.</li>
+  <li><strong>Don't make state changes from a CLI on a laptop</strong>. Make them via a CI job triggered by a merged PR. Audit log = git log.</li>
+  <li><strong>Break-glass procedures</strong> for incidents — explicit, audited, time-bounded.</li>
+</ul>
+
+<h2 id="hands-on">Hands-on: a robust promotion job</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · all the patterns in one script</div>
+<div class="hands-on-body">
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">scripts/promote.py</span></div>
+<pre><code>#!/usr/bin/env python3
+"""Idempotent promotion with retries, locking, structured logs, metrics, dry-run."""
+from __future__ import annotations
+import argparse, fcntl, hmac, json, logging, os, signal, sys, time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Callable, TypeVar
+import requests
+
+log = logging.getLogger("promote")
+T = TypeVar("T")
+
+# ----- patterns -----------------------------------------------------------
+def configure_logging(level: str = "INFO"):
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter('{"ts":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}'))
+    logging.basicConfig(level=level, handlers=[h])
+
+@contextmanager
+def file_lock_nb(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log.info("another instance running, exiting"); raise SystemExit(0)
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN); f.close()
+
+def retry(fn: Callable[[], T], *, attempts=5, base=0.5, cap=30.0,
+          exc=(requests.RequestException,)) -&gt; T:
+    import random
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except exc as e:
+            if i == attempts: raise
+            d = min(cap, base * 2 ** (i - 1)) * random.uniform(0.5, 1.5)
+            log.warning("attempt %d failed (%s); sleep %.2fs", i, e, d)
+            time.sleep(d)
+    raise RuntimeError("unreachable")
+
+# ----- domain --------------------------------------------------------------
+def already_promoted(client, artifact, channel) -&gt; bool:
+    info = retry(lambda: client.get_artifact(artifact))
+    return info.get("channel") == channel
+
+def promote(client, artifact: str, src: str, dst: str, *, dry_run: bool):
+    if already_promoted(client, artifact, dst):
+        log.info("idempotent no-op: %s already at %s", artifact, dst); return
+
+    log.info("promoting %s: %s -&gt; %s%s",
+             artifact, src, dst, " (dry-run)" if dry_run else "")
+    if dry_run: return
+
+    retry(lambda: client.move(artifact, src, dst))
+    log.info("promoted ok")
+
+# ----- entry --------------------------------------------------------------
+def main(argv=None) -&gt; int:
+    p = argparse.ArgumentParser()
+    p.add_argument("artifact")
+    p.add_argument("--from", dest="src", required=True)
+    p.add_argument("--to",   dest="dst", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    args = p.parse_args(argv)
+
+    configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+
+    client = make_client(os.environ["NEXUS_URL"], os.environ["NEXUS_TOKEN"])
+    with file_lock_nb(Path(f"/var/lock/promote-{args.artifact}.lock")):
+        try:
+            promote(client, args.artifact, args.src, args.dst, dry_run=args.dry_run)
+            return 0
+        except requests.HTTPError as e:
+            log.error("HTTP %s: %s", e.response.status_code, e.response.text[:200])
+            return 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())</code></pre>
+</div>
+<p>It's all here: idempotency check before action, retry with jitter, file lock to prevent overlap, JSON logs, signal handler, env-based config, --dry-run, distinct exit codes. About 80 lines.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Make it idempotent</span>
+</div>
+<div class="exercise-body">
+<p>Refactor:</p>
+<div class="code" data-lang="python">
+<pre><code>def add_label(repo, label):
+    requests.post(f"{API}/repos/{repo}/labels", json={"name": label}, headers=AUTH)</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>def add_label(repo, label):
+    r = requests.get(f"{API}/repos/{repo}/labels/{label}", headers=AUTH)
+    if r.status_code == 200:
+        return False                       # already there
+    r.raise_for_status() if r.status_code != 404 else None
+    requests.post(f"{API}/repos/{repo}/labels", json={"name": label}, headers=AUTH).raise_for_status()
+    return True</code></pre>
+</div>
+<p>Or use the API's idempotent variant if it has one — many do, just look. Some APIs will return 422 "already exists" on POST; treating that as success is also valid.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Single-instance lock</span>
+</div>
+<div class="exercise-body">
+<p>Wrap a long-running script so a second invocation exits 0 immediately rather than blocking. Demonstrate by running it twice in two terminals.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>file_lock_nb</code> from above. The non-blocking flag <code>LOCK_NB</code> raises <code>BlockingIOError</code> immediately rather than waiting; we catch it and exit gracefully.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Jitter math</span>
+</div>
+<div class="exercise-body">
+<p>Compute the wait sequence for <code>base=0.5</code>, <code>cap=30</code>, 6 attempts, jitter ±50%. Why is jitter important?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Without jitter: 0.5, 1, 2, 4, 8, 16. With jitter, each multiplied by a random factor in [0.5, 1.5]: e.g. 0.32, 1.20, 1.78, 4.40, 6.10, 21.0.</p>
+<p>If 100 clients all hit the same downstream and all retry without jitter, they crash into the server at the same instant on every attempt — a thundering herd. Jitter spreads the load and lets the server actually recover.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Graceful shutdown</span>
+</div>
+<div class="exercise-body">
+<p>Write a worker loop that processes items from a queue but, on SIGTERM, finishes the current item, flushes a final metric, then exits with code 0. Demonstrate it doesn't drop work.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import signal, queue, threading, time
+
+stop = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_: stop.set())
+signal.signal(signal.SIGINT,  lambda *_: stop.set())
+
+q: queue.Queue[str] = queue.Queue()
+
+def worker():
+    while True:
+        try:
+            item = q.get(timeout=0.5)
+        except queue.Empty:
+            if stop.is_set(): break
+            continue
+        process(item); q.task_done()
+        if stop.is_set(): break
+    flush_metrics()
+    log.info("clean exit")
+
+worker()</code></pre>
+</div>
+<p>Key idea: signal sets a flag; loop checks it at safe boundaries (between items), never mid-item.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Webhook with idempotency</span>
+</div>
+<div class="exercise-body">
+<p>Extend the FastAPI webhook handler to dedupe events using their <code>id</code> field, persisted to disk so dedup survives restarts. Handle the dedup-store growing forever.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Use a SQLite database with a TTL'd table:</p>
+<div class="code" data-lang="python">
+<pre><code>import sqlite3, time
+
+DB = sqlite3.connect("/var/lib/webhook/seen.db", check_same_thread=False)
+DB.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, ts INTEGER)")
+
+def seen_already(event_id: str, ttl: int = 7 * 24 * 3600) -&gt; bool:
+    now = int(time.time())
+    DB.execute("DELETE FROM seen WHERE ts &lt; ?", (now - ttl,))   # GC
+    cur = DB.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (event_id, now))
+    DB.commit()
+    return cur.rowcount == 0          # 0 means it was already there</code></pre>
+</div>
+<p>SQLite gives ACID guarantees on a single host. For multi-host, use Redis with <code>SETNX</code> + TTL.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Idempotency is the foundation. Write functions that express end state, not actions.</li>
+  <li>Retries with exponential backoff <em>and</em> jitter; cap attempts; only retry transient errors.</li>
+  <li>Circuit breakers prevent retry storms during downstream outages.</li>
+  <li>File locks (<code>fcntl.flock</code>) for single-host single-instance; Redis or a real lock service for cross-host.</li>
+  <li>Atomic writes for state files (Chapter 2 idiom).</li>
+  <li>Structured (JSON) logs with context vars for trace IDs.</li>
+  <li>Trap SIGTERM, set a flag, finish current work, exit 0.</li>
+  <li>Webhooks: verify HMAC, dedupe by event ID, return 200 fast.</li>
+  <li>Metrics for any automation that runs &gt;100 times/day.</li>
+  <li><code>--dry-run</code> for everything that mutates state. Always.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="05-clis-and-packaging.html"><span class="lbl">← Prev</span><span class="ttl">CLIs &amp; Packaging</span></a>
+  <a href="07-docker-fundamentals.html" class="next"><span class="lbl">Next →</span><span class="ttl">Docker — Fundamentals</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

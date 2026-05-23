@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · The 50 Questions — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 13</span>
+  The 50 Questions
+</h1>
+<p class="lede">
+  Fifty questions you'll be asked across Python, automation, and
+  Kubernetes — interviews, design reviews, on-call investigations.
+  Concise answers; snippets where the right answer is code.
+</p>
+
+<h2 id="python">Python (15)</h2>
+
+<div class="qa">
+<div class="qa-q" id="q1">List vs tuple — when to use each?</div>
+<p>Tuple for fixed-shape records (return values from functions, dict keys); list for collections you'll grow or mutate. Tuples are hashable, lists aren't. Performance is similar; the real difference is intent.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q2">Difference between <code>is</code> and <code>==</code>?</div>
+<p><code>is</code> tests identity (same object in memory); <code>==</code> tests equality (same value, via <code>__eq__</code>). Always use <code>==</code> for value comparisons. Use <code>is</code> for <code>None</code>, <code>True</code>, <code>False</code> — those are singletons.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q3">Why is <code>def f(x=[])</code> a bug?</div>
+<p>The default <code>[]</code> is created once, at function-definition time, and shared across all calls that don't pass <code>x</code>. Mutating it leaks state between calls. Use <code>def f(x=None): if x is None: x = []</code>, or <code>field(default_factory=list)</code> in dataclasses.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q4">What's the GIL?</div>
+<p>The Global Interpreter Lock — a mutex around the CPython interpreter that allows only one thread to execute Python bytecode at a time. Threads are great for I/O-bound work (network, disk) because the GIL is released during blocking calls. They're useless for CPU-bound work — use <code>multiprocessing</code> or async I/O instead. Python 3.13+ has experimental no-GIL builds.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q5">When do you use <code>asyncio</code> vs threads vs processes?</div>
+<p>Async for I/O-bound, fan-out-many tasks (HTTP fan-out, websockets, event loops). Threads for I/O-bound where the libraries are blocking and rewriting them is too much. Processes for CPU-bound work — multiprocessing.Pool or <code>concurrent.futures.ProcessPoolExecutor</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q6">Why <code>__slots__</code>?</div>
+<p>Tells Python "this class has exactly these attributes" — saves memory by skipping the per-instance <code>__dict__</code>, and makes attribute access faster. Use for classes you'll instantiate millions of times. Modern alternative: <code>@dataclass(slots=True)</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q7">Difference between a generator and an iterator?</div>
+<p>An iterator is any object with <code>__iter__</code> + <code>__next__</code>. A generator is the special case produced by a function with <code>yield</code> — Python writes the iterator boilerplate for you. Generator expressions <code>(x*x for x in xs)</code> are inline generators.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q8">What does <code>@property</code> do?</div>
+<p>Turns a method into a read-only attribute. <code>foo.area</code> instead of <code>foo.area()</code>. Pair with a <code>@area.setter</code> if you need writes. Useful for computed values that look like attributes from the outside.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q9">EAFP vs LBYL?</div>
+<p>"Easier to ask forgiveness than permission" (try/except) vs "Look before you leap" (if-checks). Pythonic style is EAFP — try the operation, handle the exception. Avoids race conditions: <code>if path.exists(): open(path)</code> can fail if the file's deleted in between.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q10">What's a context manager and how do you write one?</div>
+<p>An object usable in <code>with</code>. Two ways: implement <code>__enter__</code> + <code>__exit__</code>, or decorate a generator function with <code>@contextlib.contextmanager</code> using <code>yield</code> for the boundary.</p>
+<div class="code" data-lang="python">
+<pre><code>@contextmanager
+def cd(path):
+    prev = Path.cwd(); os.chdir(path)
+    try: yield path
+    finally: os.chdir(prev)</code></pre>
+</div>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q11">How do you handle CPython's lack of true threading without GIL?</div>
+<p>For I/O: threads or asyncio (GIL releases during I/O). For CPU: multiprocessing, or call into native code (NumPy, Polars, Rust extensions like <code>orjson</code>, <code>pydantic-core</code>) which release the GIL. For massively parallel CPU work, ship to a real worker queue (Celery, RQ, Dask) or rewrite hot paths in Rust/C.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q12">What's the difference between <code>copy</code> and <code>deepcopy</code>?</div>
+<p><code>copy.copy(x)</code> creates a new top-level container; nested objects are shared by reference. <code>copy.deepcopy(x)</code> recursively copies everything. Default is shallow, which is usually what you want — deepcopy is expensive and surprising.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q13">Why pin dependencies?</div>
+<p>So your environment is reproducible — same code, same deps, same runtime, same behaviour. Without pinning, a transitive dep can release a bad version overnight and break Tuesday's deploy. Lockfiles with hashes (uv, pip-tools) are the right answer.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q14">How do you debug a hanging Python process?</div>
+<p>Send it SIGUSR1 if it has a faulthandler. Otherwise: <code>py-spy dump --pid &lt;pid&gt;</code> shows the current stack trace of every thread without stopping the process. Or attach with <code>gdb</code> + the Python helpers. <code>py-spy</code> is the modern winner.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q15">What's <code>__init_subclass__</code> and when is it useful?</div>
+<p>A hook that runs when a subclass is defined. Lets a base class register or validate subclasses without a metaclass. Useful for plugin patterns: every subclass auto-registers in a registry. Cleaner than metaclasses for the 90% case.</p>
+</div>
+
+<h2 id="automation">Automation (10)</h2>
+
+<div class="qa">
+<div class="qa-q" id="q16">Define idempotency in one sentence.</div>
+<p>An operation is idempotent if running it twice has the same effect as running it once.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q17">Why retry with jitter?</div>
+<p>Without jitter, simultaneous failures cause clients to retry in lockstep, hammering downstreams at every backoff boundary. Jitter spreads retries randomly, letting servers actually recover.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q18">Why never use <code>shell=True</code> with user-controlled input?</div>
+<p>The shell parses the command line — semicolons, pipes, backticks, redirects all execute. <code>filename = "x; rm -rf $HOME"</code> via <code>shell=True</code> runs both. The list form goes straight to <code>execve</code>; the entire argument is opaque data.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q19">How do atomic writes work?</div>
+<p>Write to a temp file in the same directory, fsync, then <code>os.replace</code> to the final name. POSIX guarantees rename is atomic; the final file either contains the new data or doesn't exist. Survives crashes, signals, and OOMs without leaving partial files.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q20">How do you prevent two cron runs overlapping?</div>
+<p>File lock with <code>fcntl.flock</code> in non-blocking mode (<code>LOCK_NB</code>). Second invocation gets <code>BlockingIOError</code>, exits 0 silently. For multi-host: Redis with <code>SETNX</code> + TTL, or a real lock service.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q21">What's a circuit breaker?</div>
+<p>A wrapper that stops calling a downstream after consecutive failures, for a cooldown period. Lets the downstream recover instead of being hammered by retries. Half-open state occasionally lets one request through to test recovery.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q22">Webhook security — minimum checklist?</div>
+<p>(1) Verify HMAC signature with <code>hmac.compare_digest</code>. (2) Reject unknown event types. (3) Dedupe by event ID. (4) Reply 200 fast, queue the work. (5) IP allowlist if the sender publishes IPs.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q23">Why log to stderr, not stdout?</div>
+<p>Stdout is reserved for program output; mixing logs with output breaks shell pipelines. Stderr is for diagnostics. Conventionally, redirect just stdout (<code>cmd &gt; result.txt</code>) and you still see logs on the terminal.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q24">What does graceful shutdown mean?</div>
+<p>Catch SIGTERM, set a "stopping" flag, finish the current logical unit of work (don't interrupt mid-write), flush metrics/logs, exit 0. K8s sends SIGTERM before SIGKILL; honoring it prevents data loss.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q25">Why <code>--dry-run</code> on every state-mutating CLI?</div>
+<p>So a typo or misconfig prints what <em>would</em> happen rather than doing it. Saves you from "oh, that wasn't the staging cluster, it was prod". CI can run integration tests in dry-run mode against production credentials and catch problems before they happen.</p>
+</div>
+
+<h2 id="k8s">Kubernetes (20)</h2>
+
+<div class="qa">
+<div class="qa-q" id="q26">What is Kubernetes in one sentence?</div>
+<p>A database (etcd) of desired state, plus a set of controllers that reconcile actual state to match.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q27">spec vs status?</div>
+<p><code>spec</code> is what the user wants. <code>status</code> is what controllers have done. You write spec; you read status to see whether the system has caught up.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q28">Pod vs Deployment vs ReplicaSet — relationships?</div>
+<p>You write a Deployment. The Deployment controller creates a ReplicaSet matching its template. The ReplicaSet controller creates Pods matching its template. Pods run containers. Update the Deployment template → new ReplicaSet → rolling replacement.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q29">When do I use a StatefulSet vs Deployment?</div>
+<p>StatefulSet when each pod needs a stable name, stable network identity, or its own persistent volume — typically databases and stateful brokers. Deployment for everything stateless.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q30">readiness vs liveness probe?</div>
+<p>Readiness gates traffic — failing means "remove from Service endpoints, don't kill". Liveness gates restarts — failing means "kill and restart". Different thresholds, often different paths.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q31">Why often skip CPU limits but always set memory limits?</div>
+<p>CPU is compressible — exceeding the cap means throttling, which is fine. Cgroup CPU throttling at fractional limits causes severe latency spikes. Memory isn't compressible — exceeding the cap = OOMKill. Cap memory; let CPU stretch.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q32">How do I make ConfigMap changes trigger a rollout?</div>
+<p>Annotate the Pod template with a checksum of the ConfigMap content. Helm: <code>checksum/config: {{ include … | sha256sum }}</code>. Plain manifests: compute SHA in your CI and patch in. The annotation change → template hash change → new ReplicaSet → rolling restart.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q33">What's RWO and what does it mean for replicas?</div>
+<p>ReadWriteOnce: only one node can attach the volume at a time. A Deployment with replicas &gt; 1 sharing one PVC is broken — second pod fails to attach. Use a StatefulSet with per-pod PVCs, or RWX storage if shared writes are essential.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q34">What does NetworkPolicy do?</div>
+<p>Pod-level firewalling. Without one, all pods can reach all pods. With <em>any</em> NetworkPolicy targeting a pod, all other traffic is denied — explicit-allow model. Use a "default-deny-all" baseline plus per-app allow rules.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q35">Why prefer Ingress over LoadBalancer per service?</div>
+<p>Cost: cloud LBs are ~$25/mo each. One Ingress fronts many services through one LB. Plus centralised TLS, redirects, rate-limit, auth.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q36">What does <code>kubectl explain pod.spec.containers</code> do?</div>
+<p>Prints the OpenAPI documentation for every field of <code>pod.spec.containers</code>, sourced from the live API server. The schema travels with your cluster version. Whenever you forget a field, this is the answer.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q37">Pod's QoS class — how is it determined?</div>
+<p><strong>Guaranteed</strong>: every container has CPU and memory limits == requests. <strong>Burstable</strong>: at least one container has requests &lt; limits, or only requests set. <strong>BestEffort</strong>: no requests or limits anywhere. Eviction order under node pressure: BestEffort → Burstable → Guaranteed.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q38">What's <code>terminationGracePeriodSeconds</code>?</div>
+<p>How long kubelet waits between sending SIGTERM and SIGKILL. Default 30s. For graceful drains, set to comfortably more than your shutdown takes (DB connection close, in-flight request finish). Pair with a <code>preStop</code> sleep to give kube-proxy time to drop the pod from EndpointSlice before SIGTERM.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q39">When do I need a sidecar?</div>
+<p>When two processes have to share a Pod's lifecycle and (typically) a volume. Classic uses: log shippers, service-mesh proxies (Envoy/Istio), TLS terminators, secret refreshers. K8s 1.29+ has formal sidecar support via <code>initContainers[].restartPolicy: Always</code>, fixing lifecycle ordering.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q40">DaemonSet — when?</div>
+<p>"One pod per node" — log forwarders, metrics agents, CSI drivers, kube-proxy. Add tolerations to land on tainted nodes (control-plane, GPU).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q41">CronJob concurrency — what's <code>Forbid</code>?</div>
+<p>If the previous Job is still running when the next schedule fires, skip the new one. Use for non-overlapping jobs that mutate shared state. Default <code>Allow</code> can pile up runs if the job runs longer than its schedule interval.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q42">RBAC — Role vs ClusterRole?</div>
+<p>Role: namespaced — applies only within one namespace. ClusterRole: cluster-wide — for cluster-level resources (nodes, namespaces) or to be reusable across namespaces. Bind ClusterRoles via RoleBinding to scope them to one namespace.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q43">What's a controller, in one sentence?</div>
+<p>A program that watches the API server for resources of some kind and takes actions to make actual state match desired state.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q44">When write an operator?</div>
+<p>When your domain has a noun that needs declarative API + non-trivial reconciliation across multiple K8s resources. Don't write one when a Helm chart + a CronJob solves it.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q45">What's GitOps and why?</div>
+<p>Git as the source of truth for cluster state; a controller (Argo CD, Flux) reconciles cluster to git. Benefits: full audit log = git log, code review on every change, drift detection, easy rollback. Trade-off: emergency manual fixes have to be either disciplined or temporarily allowed.</p>
+</div>
+
+<h2 id="ops">Ops &amp; production (5)</h2>
+
+<div class="qa">
+<div class="qa-q" id="q46">My pod is in <code>CrashLoopBackOff</code>. What's the diagnostic order?</div>
+<p>(1) <code>kubectl describe pod X</code> — check Events for image-pull issues, resource issues, init-container failures. (2) <code>kubectl logs X --previous</code> — last container's stdout/stderr. (3) <code>kubectl logs X -c &lt;name&gt;</code> if multi-container. (4) <code>kubectl debug -it pod/X --image=busybox --target=name</code> for an interactive shell. (5) Check probes — too aggressive liveness restarts pods that were just slow to start.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q47">Pod is <code>Pending</code> forever. Why?</div>
+<p>Most common: no node has enough resources for the pod's requests. <code>kubectl describe pod</code> → Events show "FailedScheduling" with the reason ("Insufficient cpu", "0/3 nodes are available: 3 node(s) had untolerated taint"). Other causes: PVC stuck waiting for a PV, image pull credentials missing, scheduler stuck.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q48">Service has endpoints but pods aren't getting traffic — why?</div>
+<p>Likely the EndpointSlice doesn't actually include them. Check <code>kubectl get endpointslice -l kubernetes.io/service-name=mysvc</code>. If empty: readiness probe failing, label mismatch between Pod and Service selector, or pods in wrong namespace. If non-empty but specific pods missing: those pods aren't ready.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q49">My HPA isn't scaling — what to check?</div>
+<p>(1) <code>kubectl get hpa</code> — check the <code>TARGETS</code> column. <code>&lt;unknown&gt;/70%</code> means metrics-server can't read pod metrics. (2) Pods need <code>resources.requests.cpu</code> set; HPA computes utilisation against requests. (3) Check <code>metrics-server</code> is installed and healthy. (4) Stabilization window: HPA waits before scaling down to avoid flapping.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q50">How do I cap blast radius for a misbehaving namespace?</div>
+<p>Layer: ResourceQuota (caps total CPU/memory/pod count), LimitRange (default + max per pod), NetworkPolicy (deny cross-namespace by default), Pod Security Admission set to <code>restricted</code>, RBAC scoped to the namespace, separate ServiceAccount per workload. The combination means a buggy or hostile namespace can't starve neighbours, escalate privilege, or talk to other apps.</p>
+</div>
+
+<hr>
+
+<h2 id="bonus">Bonus — ten more that come up</h2>
+
+<div class="qa">
+<div class="qa-q" id="q51">Why use uv over pip?</div>
+<p>10-100× faster installs, built-in venv management, replaces pip-tools for lockfiles, single static binary. The 2026 default for new Python projects. Same install commands, much faster.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q52">What's Pydantic v2?</div>
+<p>The most-used data validation library in Python. v2 rewrote the core in Rust; ~5–50× faster than v1. Use it for parsing untrusted input, settings management (via <code>pydantic-settings</code>), and FastAPI request/response shapes.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q53">When use threads vs processes vs async in Python?</div>
+<p>I/O-bound, lots of concurrency: async (asyncio + httpx). I/O-bound, blocking libraries: threads. CPU-bound: multiprocessing or external workers. Mostly: pick async unless something specifically forces a thread/process.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q54">How does kubectl auth work?</div>
+<p>Reads <code>~/.kube/config</code> for the current context's user, which has either client cert/key, a bearer token, or an exec plugin (<code>aws eks get-token</code>, <code>gke-gcloud-auth-plugin</code>) that produces a token at request time. The API server validates and applies RBAC.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q55">What's a DaemonSet for storage drivers?</div>
+<p>CSI drivers run as DaemonSets on every node — they need to handle volume mount/unmount calls from kubelet, which run locally. Same for kube-proxy and CNI agents.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q56">How do you migrate a Deployment to a StatefulSet without downtime?</div>
+<p>Hard — they have different naming and Pod identity semantics. Practical approaches: (a) deploy the StatefulSet alongside, switch the Service selector once it's ready, delete the Deployment; (b) for stateful apps, accept a maintenance window because the data needs to be moved into the StatefulSet's PVCs anyway.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q57">What's <code>kubectl rollout undo</code>?</div>
+<p>Reverts a Deployment (or DaemonSet, StatefulSet) to its previous ReplicaSet — i.e. previous template. Equivalent to <code>kubectl rollout undo deploy/X --to-revision=N</code>. History limit set by <code>spec.revisionHistoryLimit</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q58">What is HPA stabilisation window?</div>
+<p>The minimum interval before a scaling decision is reversed. Without it, replicas would flap up/down on metric noise. Default 5m on scale-down, 0 on scale-up; tune via <code>spec.behavior</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q59">Best way to inject secrets in 2026?</div>
+<p>For cloud creds: IRSA (AWS) or Workload Identity (GCP/Azure) — no Secret on disk at all. For everything else: External Secrets Operator pulling from Vault/AWS SM. Plain K8s Secrets are last resort, encrypted at rest, with strict RBAC.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q60">What does <code>kubectl debug</code> do?</div>
+<p>Attaches an ephemeral debug container to a running Pod (sharing its network/PID namespace as configured), without modifying the Pod manifest. Lets you bring debugging tools (curl, dig, tcpdump) into a slim production image without baking them in. Critical for "I can't repro it locally" investigations.</p>
+</div>
+
+<div class="page-nav">
+  <a href="15-jenkins-on-k8s.html"><span class="lbl">← Prev</span><span class="ttl">Jenkins on Kubernetes</span></a>
+  <a href="17-capstone.html" class="next"><span class="lbl">Next →</span><span class="ttl">Capstone Project</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

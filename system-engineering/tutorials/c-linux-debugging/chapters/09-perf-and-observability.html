@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>9 · Performance &amp; observability</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 09</span>
+  Performance &amp; observability
+</h1>
+<p class="lede">
+  When your program is slow, "guess and rebuild" is the worst
+  strategy. This chapter is the toolkit for finding out why:
+  <code>time</code>, <code>strace</code>, <code>ltrace</code>,
+  <code>perf</code>, <code>bpftrace</code>, flamegraphs, and the cache
+  effects that explain a 10× slowdown nobody else can see.
+</p>
+
+<h2 id="time">First, time it properly</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ time ./prog
+real    0m4.523s    # wall-clock
+user    0m4.012s    # CPU time in userspace
+sys     0m0.498s    # CPU time in kernel
+
+$ /usr/bin/time -v ./prog
+        Maximum resident set size (kbytes): 124528
+        Major page faults:           7
+        Minor page faults:           28391
+        Voluntary context switches:  1207
+        Involuntary context switches: 412
+        Page size (bytes):           4096
+        ...
+</code></pre>
+</div>
+
+<p>What the numbers mean:</p>
+<ul>
+  <li><strong>real &gt; user + sys:</strong> blocked on I/O, waiting on locks, or mostly idle.</li>
+  <li><strong>user &gt;&gt; sys:</strong> CPU-bound in userspace. Profile with <code>perf</code>.</li>
+  <li><strong>sys &gt; user:</strong> too many syscalls, kernel work. <code>strace</code> / <code>perf top -t kernel</code>.</li>
+  <li><strong>real &gt;&gt; user + sys:</strong> waiting. Disk, network, lock contention. <code>perf record -e sched:sched_switch</code> or <code>off-cpu</code> profiling.</li>
+</ul>
+
+<p>Always benchmark with the production-shaped optimisation level (<code>-O2</code> at minimum). Code under <code>-O0</code> is a different program.</p>
+
+<h2 id="strace">strace — see every syscall</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ strace ./prog                              # everything
+$ strace -c ./prog                           # summary at end (counts, time)
+$ strace -p 1234                             # attach to running PID
+$ strace -f -p 1234                          # follow forks/threads
+$ strace -e trace=openat,read,write ./prog   # filter
+$ strace -e trace=network ./prog             # network syscalls only
+$ strace -tt -T ./prog                       # timestamps + duration per call
+$ strace -y ./prog                           # show file paths next to fd numbers
+$ strace -k ./prog                           # userspace stack on each call (slow but informative)
+</code></pre>
+</div>
+
+<p>What strace is good for:</p>
+<ul>
+  <li>"What file/socket is this thing actually opening?" — answers most "config not picking up" mysteries.</li>
+  <li>"Why is it slow?" — <code>strace -c</code> shows where time goes by syscall.</li>
+  <li>"What's it waiting on?" — attach to a stuck process; the last call shown is what it's blocked in.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">strace slows the program down — a lot</div>
+<p>Each syscall trapped through ptrace has overhead. A program doing 100k syscalls/sec runs at 5–10× the time. For just-curious investigations that's fine; for performance work, prefer <code>perf trace</code> or eBPF-based tools.</p>
+</div>
+
+<h2 id="ltrace">ltrace — library calls</h2>
+
+<p><code>ltrace</code> traces calls into shared libraries: <code>malloc</code>, <code>printf</code>, your own <code>libfoo.so</code> calls. Useful when the bug is in a library boundary, less common than strace.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ltrace -e malloc+free ./prog
+malloc(8) = 0x55e3...
+free(0x55e3...)
+...
+</code></pre>
+</div>
+
+<h2 id="perf">perf — the everything tool</h2>
+
+<p><code>perf</code> is the Linux profiler. CPU profiling, hardware counters, tracepoints, USDT — all in one binary.</p>
+
+<h4>perf top — what's running right now</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ perf top                                   # interactive, system-wide
+$ perf top -p 1234                            # one process
+$ perf top -e cycles,cache-misses             # specific events
+</code></pre>
+</div>
+
+<p>Refreshes every second; sorted by sample count. The hottest function shows at the top. Press <kbd>e</kbd> to drill in.</p>
+
+<h4>perf stat — counters and ratios</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ perf stat ./prog
+ Performance counter stats for './prog':
+          1234.56 msec task-clock                #    0.987 CPUs utilized
+              512      context-switches          #    0.415 K/sec
+                3      cpu-migrations            #    0.002 K/sec
+            8,234      page-faults               #    0.007 M/sec
+   12,345,678,901      cycles                    #    9.999 GHz
+    8,888,888,888      instructions              #    0.72  insn per cycle
+    1,000,000,000      branches                  #  810.000 M/sec
+       12,345,678      branch-misses             #    1.23% of all branches
+
+$ perf stat -e cache-misses,cache-references ./prog
+$ perf stat -e L1-dcache-load-misses,LLC-load-misses,branch-misses ./prog
+$ perf stat -e instructions,cycles -- ls    # IPC for one command
+</code></pre>
+</div>
+
+<p>The two numbers most informative when starting:</p>
+<ul>
+  <li><strong>IPC (instructions per cycle):</strong> &lt; 0.5 means stalled (memory, branches). &gt; 2 means doing real work.</li>
+  <li><strong>Cache miss rate:</strong> high LLC-load-misses → memory bandwidth or working set too large. Re-layout structures, blocking algorithms, prefetch hints.</li>
+</ul>
+
+<h4>perf record + perf report — flamegraph-able profiles</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ perf record -F 99 -g ./prog                # 99 Hz sample, with call graph
+$ perf record -F 99 -g -p 1234 -- sleep 30   # 30 s sample of running PID
+$ perf report                                # interactive TUI
+$ perf report --stdio | head -50              # text dump
+</code></pre>
+</div>
+
+<p>Build with <code>-fno-omit-frame-pointer -g</code> for accurate call graphs (default frame-pointer omission breaks unwinding). For C++ with broken stacks, try <code>--call-graph=dwarf,16384</code> (uses DWARF unwinder, slower but accurate).</p>
+
+<h4>Flamegraphs</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ git clone https://github.com/brendangregg/FlameGraph
+$ perf record -F 99 -g -- ./prog
+$ perf script | ./FlameGraph/stackcollapse-perf.pl &gt; out.folded
+$ ./FlameGraph/flamegraph.pl out.folded &gt; flame.svg
+$ open flame.svg                              # or just open in browser
+</code></pre>
+</div>
+
+<p>Flamegraphs are the canonical way to share "what's hot". Wide bars = many samples there. Read top-down; the top is what was running when sampled, the rest is the stack.</p>
+
+<h2 id="bpftrace">bpftrace — eBPF for humans</h2>
+
+<p><code>bpftrace</code> is awk-for-the-kernel. One-liners that would otherwise need a 200-line C eBPF program.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Count opens system-wide
+$ sudo bpftrace -e 'tracepoint:syscalls:sys_enter_openat { @[comm] = count(); }'
+
+# Histogram of read sizes for a PID
+$ sudo bpftrace -e 'tracepoint:syscalls:sys_enter_read /pid == 1234/ { @ = hist(args-&gt;count); }'
+
+# Trace every malloc &gt; 1 MB in your binary
+$ sudo bpftrace -e 'uprobe:/path/to/prog:malloc /arg0 &gt; 1024*1024/ { printf("%d bytes from %s\n", arg0, ustack); }'
+
+# Latency of a function (entry/exit)
+$ sudo bpftrace -e '
+    uprobe:/path/to/prog:do_request { @start[tid] = nsecs; }
+    uretprobe:/path/to/prog:do_request /@start[tid]/ {
+        @latency = hist(nsecs - @start[tid]); delete(@start[tid]);
+    }'
+</code></pre>
+</div>
+
+<p>Power moves:</p>
+<ul>
+  <li><strong>USDT probes</strong> — your binary defines static tracepoints (e.g. <code>request_start</code>, <code>request_end</code>) with one macro; production-safe; no overhead when not enabled.</li>
+  <li><strong>Latency histograms</strong> — <code>hist()</code> in bpftrace gives log2 buckets; great for tail-latency hunts.</li>
+  <li><strong>System-wide visibility</strong> — kernel + userspace, all processes.</li>
+</ul>
+
+<p>Brendan Gregg's "BPF Performance Tools" book is the reference. Most distros ship <code>bcc-tools</code> with ready-made scripts: <code>opensnoop</code>, <code>execsnoop</code>, <code>biolatency</code>, <code>tcpconnect</code>, etc.</p>
+
+<h2 id="cache">Cache effects, the under-appreciated bottleneck</h2>
+
+<p>Modern CPUs run at 3–5 GHz. Main memory latency is ~100 ns. That's 300–500 cycles for a missed load — the CPU stalls waiting. Cache hits at L1 are 4 cycles, L2 ~12, L3 ~40.</p>
+
+<p>The math: a tight loop doing <code>x = a[i]; y = b[i*1024]</code> will be dominated by the b accesses if they don't fit in cache. The same loop with <code>y = b[i]</code> (cache-friendly) can be 10–50× faster on the same hardware.</p>
+
+<h4>Patterns to know</h4>
+
+<ul>
+  <li><strong>Array-of-Structs vs Struct-of-Arrays.</strong> AoS is what you write; SoA is what makes vectorising compilers and caches happy. Worth it for hot loops.</li>
+  <li><strong>Sequential access</strong> beats random by 10–100×. Hardware prefetchers love stride-N reads.</li>
+  <li><strong>Working-set size:</strong> if your hot data fits in L2 (~256 KB), you're golden. If it spills to LLC (MB), you're memory-bound.</li>
+  <li><strong>False sharing</strong> — covered in chapter 7.</li>
+  <li><strong>Branch prediction.</strong> A <code>if (likely)</code> in a loop costs ~0 cycles when predicted right; a misprediction costs 15–20.</li>
+</ul>
+
+<h4>Measure with perf</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ perf stat -e cycles,instructions,L1-dcache-load-misses,LLC-load-misses,branch-misses ./prog
+
+# What lines are causing cache misses?
+$ perf record -e cache-misses -g ./prog
+$ perf report
+
+# Top-down analysis (Intel) — shows whether stalls are frontend, backend, retiring, etc.
+$ perf stat -M Frontend_Bound,Backend_Bound,Retiring,Bad_Speculation ./prog
+</code></pre>
+</div>
+
+<h2 id="alloc">Allocator behaviour</h2>
+
+<p><code>malloc</code> is fast for small allocations and slow for large or fragmented ones. To investigate:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Replace allocator at LD_PRELOAD time
+$ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so ./prog
+$ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so ./prog
+
+# heaptrack — flamegraph of allocations
+$ heaptrack ./prog
+$ heaptrack_gui heaptrack.prog.12345.gz
+
+# massif (valgrind) — heap usage over time
+$ valgrind --tool=massif ./prog
+$ ms_print massif.out.12345 | less
+</code></pre>
+</div>
+
+<p>For high-throughput servers, jemalloc or tcmalloc usually win 10–30% over glibc's ptmalloc. Always benchmark with your workload.</p>
+
+<h2 id="latency">Latency vs throughput</h2>
+
+<p>The two numbers usually trade off:</p>
+<ul>
+  <li><strong>Throughput</strong> — work done per unit time. Maximise with batching, parallelism, kernel-bypass (DPDK, io_uring) for extreme cases.</li>
+  <li><strong>Latency</strong> — time per individual op. Minimise with smaller queues, less batching, less context switching, locking out noisy neighbours.</li>
+</ul>
+
+<p>Real systems care about percentile latency, not average. p50 is fine and almost meaningless. p99 / p99.9 / p99.99 is what users feel. Coordination omission (sender waits for slow receiver) destroys naive benchmark numbers — use a constant-rate load generator like <code>wrk2</code>, not a "blast as fast as possible" one.</p>
+
+<h2 id="dtrace-procps">Quick procmon</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ top                                           # the classic
+$ htop                                          # better top
+$ pidstat -p 1234 -t 1                          # per-thread CPU
+$ pidstat -d 1                                  # disk I/O per process
+
+$ vmstat 1                                      # 1-sec system stats
+$ iostat -xz 1                                  # per-disk I/O stats
+$ mpstat -P ALL 1                               # per-CPU utilisation
+$ sar -n DEV 1                                  # network throughput
+
+$ pmap -X 1234                                  # detailed memory map of a process
+$ ipcs                                          # SysV IPC objects (semaphores, shm, queues)
+$ lsof -p 1234                                  # all open files for a PID
+</code></pre>
+</div>
+
+<p>Memorise enough that "is the box overloaded?" is a 30-second answer. <code>top</code> + <code>iostat -xz 1</code> + <code>vmstat 1</code> tells you CPU, disk, and memory pressure in three commands.</p>
+
+<h2 id="trace-analysis">Trace analysis</h2>
+
+<p>For complex multi-component systems, modern observability uses traces:</p>
+<ul>
+  <li><strong>strace -tt -T</strong> for one process.</li>
+  <li><strong>perf script</strong> for sampled CPU profiles.</li>
+  <li><strong>OpenTelemetry</strong> + Jaeger/Tempo/Zipkin for distributed traces.</li>
+  <li><strong>perf-tools</strong> + <code>trace-cmd</code> + KernelShark for kernel-level visualisation.</li>
+</ul>
+
+<h2 id="benchmark-pitfalls">Benchmarking — the pitfalls</h2>
+
+<ol>
+  <li><strong>CPU frequency scaling.</strong> Pin to "performance" governor: <code>sudo cpupower frequency-set -g performance</code>. Otherwise the kernel ramps up/down and your numbers wobble.</li>
+  <li><strong>Cold caches.</strong> The first run is slower. Warm up, then measure.</li>
+  <li><strong>Process pinning.</strong> <code>taskset -c 2 ./bench</code> to pin to a specific core; avoids scheduler noise.</li>
+  <li><strong>Other workloads.</strong> Disable nodaemons, disconnect from network if possible.</li>
+  <li><strong>One run isn't enough.</strong> Run 10+, take median; report variance.</li>
+  <li><strong>Don't measure debug builds.</strong> <code>-O2</code> minimum; LTO and PGO change real numbers.</li>
+  <li><strong>Compiler optimisations may eliminate your benchmark.</strong> Sink results into a <code>volatile</code> or pass to a function the compiler can't see, or use Google Benchmark's <code>DoNotOptimize</code>.</li>
+</ol>
+
+<h2 id="hands-on">Hands-on: a flamegraph in 60 seconds</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · profile, render, read</div>
+<div class="hands-on-body">
+<div class="code terminal" data-lang="sh">
+<pre><code>$ # Compile with frame pointers and debug info
+$ cc -O2 -g -fno-omit-frame-pointer prog.c -o prog
+
+$ # Sample 99 Hz with call graphs
+$ perf record -F 99 -g ./prog
+
+$ # Render
+$ perf script | ./FlameGraph/stackcollapse-perf.pl | ./FlameGraph/flamegraph.pl &gt; flame.svg
+$ xdg-open flame.svg
+</code></pre>
+</div>
+<p>Read the flamegraph: bars wider than ~10% of the chart are worth investigating. Drill into them by clicking. The leaf functions are where time is actually spent; the stacks above show <em>which path</em> got there.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Read time output</span>
+</div>
+<div class="exercise-body">
+<p>You see <code>real 10s, user 2s, sys 0.3s</code>. What's the program doing for the missing ~7.7 seconds?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Waiting. Possibilities: blocked on I/O (disk, network), sleeping (<code>sleep</code>, <code>select</code> timeouts), waiting on a lock or condition variable, blocked on stdin. Investigate with <code>strace -p</code> while it's running, or <code>perf record -e sched:sched_switch -g</code> for an off-CPU profile.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Low IPC, what's wrong?</span>
+</div>
+<div class="exercise-body">
+<p><code>perf stat</code> shows IPC = 0.4 (instructions per cycle). What might cause that, and how do you tell which?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Low IPC means the CPU is stalling. Likely causes:</p>
+<ul>
+<li><strong>Cache misses</strong> — check <code>L1-dcache-load-misses</code>, <code>LLC-load-misses</code>. If LLC misses are high, you're memory-bound.</li>
+<li><strong>Branch mispredictions</strong> — check <code>branch-misses</code>. &gt; 5% is suspicious.</li>
+<li><strong>Pipeline frontend stalls</strong> — perf top-down (<code>perf stat -M Frontend_Bound</code>); often instruction cache or decode issues.</li>
+<li><strong>Long-latency instructions</strong> (sqrt, divide) in a tight loop.</li>
+</ul>
+<p>Top-down analysis (Intel TMA) is the systematic way to attribute stalls.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why my benchmark lies</span>
+</div>
+<div class="exercise-body">
+<p>Show three reasons a hand-rolled microbenchmark can be 10× off.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><strong>Compiler optimised it away.</strong> Result unused → loop deleted. Sink into <code>volatile</code> or use <code>DoNotOptimize</code>.</li>
+<li><strong>CPU frequency scaling.</strong> First run cold, others warmed up; or thermals throttle.</li>
+<li><strong>Cache state.</strong> Tight loop fits in L1; production data doesn't.</li>
+<li><strong>Branch prediction.</strong> Constant pattern in benchmark; varied input in prod.</li>
+<li><strong>Coordinated omission.</strong> "as fast as possible" misses queueing-time effects of fixed-rate load.</li>
+<li><strong>Unrealistic data.</strong> All-zeros vs random; sorted vs unsorted; aligned vs misaligned.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Off-CPU mystery</span>
+</div>
+<div class="exercise-body">
+<p>Your service uses 3% CPU but is missing its latency SLO. <code>perf top</code> shows nothing hot. What kind of profile do you need, and how?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>An <strong>off-CPU profile</strong> — what's the program <em>blocked</em> on, weighted by time. <code>perf record -e sched:sched_switch -e sched:sched_wakeup -g</code> captures context switches; combine with userspace stack to flamegraph "wait time". Or use bpftrace's offcputime tool / bcc's <code>offcputime</code>.</p>
+<p>Common findings: lock contention, waiting on a slow downstream, blocking I/O on what looked like cached data, scheduler delays from CPU pinning conflicts.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Histograms over time</span>
+</div>
+<div class="exercise-body">
+<p>Write a bpftrace script that prints a histogram of read() return sizes for one process, refreshed every 5 seconds.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ sudo bpftrace -e '
+    tracepoint:syscalls:sys_exit_read /pid == 1234 &amp;&amp; args-&gt;ret &gt; 0/ {
+        @sizes = hist(args-&gt;ret);
+    }
+    interval:s:5 {
+        print(@sizes);
+        clear(@sizes);
+    }'
+</code></pre>
+</div>
+<p>Useful for spotting "everyone's doing 1-byte reads" patterns or buffer-size mismatches.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>time</code> first; <code>real</code> vs <code>user+sys</code> tells you CPU vs wait.</li>
+  <li><code>strace</code> for "what is it doing"; <code>strace -c</code> for syscall-level summary.</li>
+  <li><code>perf stat</code> for counters and IPC; <code>perf record</code>/<code>report</code> for sampled profiles; flamegraphs for sharing.</li>
+  <li><code>bpftrace</code> + bcc tools for kernel and userspace tracing without writing C.</li>
+  <li>Cache effects matter — measure miss rates with <code>perf stat -e ...-misses</code>.</li>
+  <li>Benchmark with optimised builds, fixed CPU governor, pinned cores, and ten runs.</li>
+  <li>Real users care about p99/p99.9 latency, not average. Use rate-controlled load generators.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="08-ipc-and-sockets.html"><span class="lbl">← Prev</span><span class="ttl">IPC &amp; sockets</span></a>
+  <a href="10-gdb.html" class="next"><span class="lbl">Next →</span><span class="ttl">GDB deep dive</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

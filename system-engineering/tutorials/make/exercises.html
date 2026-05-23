@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>All Exercises — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="chapters/01-why-make.html">Why Make Exists</a></li>
+      <li><a href="chapters/02-hello-make.html">Hello, Make</a></li>
+      <li><a href="chapters/03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="chapters/04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="chapters/05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="chapters/06-functions.html">Functions</a></li>
+      <li><a href="chapters/07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="chapters/08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="chapters/09-real-projects.html">Real Projects</a></li>
+      <li><a href="chapters/10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="chapters/11-debugging.html">Debugging Make</a></li>
+      <li><a href="chapters/12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="chapters/13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="chapters/14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="exercises.html">All Exercises</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Index</span>
+  All Exercises
+</h1>
+<p class="lede">
+  Every exercise in the tutorial, indexed by chapter and difficulty,
+  with direct links. Use this as a checklist: did you actually do them?
+  Because <em>reading</em> Make exercises teaches nothing. Only typing
+  them does.
+</p>
+
+<h2 id="chapter-1">Chapter 1 — Why Make Exists</h2>
+<ul>
+  <li><a href="chapters/01-why-make.html#exercises">EX 1.1</a> <span class="exercise-diff easy">easy</span> — Draw the graph</li>
+  <li><a href="chapters/01-why-make.html#exercises">EX 1.2</a> <span class="exercise-diff easy">easy</span> — Shell script vs Makefile — wasted work</li>
+  <li><a href="chapters/01-why-make.html#exercises">EX 1.3</a> <span class="exercise-diff medium">medium</span> — Find where Make doesn't help</li>
+  <li><a href="chapters/01-why-make.html#exercises">EX 1.4</a> <span class="exercise-diff easy">easy</span> — Read the manual once</li>
+</ul>
+
+<h2 id="chapter-2">Chapter 2 — Hello, Make</h2>
+<ul>
+  <li><a href="chapters/02-hello-make.html#exercises">EX 2.1</a> <span class="exercise-diff easy">easy</span> — Deliberately break the tab rule</li>
+  <li><a href="chapters/02-hello-make.html#exercises">EX 2.2</a> <span class="exercise-diff easy">easy</span> — Change the default goal</li>
+  <li><a href="chapters/02-hello-make.html#exercises">EX 2.3</a> <span class="exercise-diff easy">easy</span> — Add a third source file</li>
+  <li><a href="chapters/02-hello-make.html#exercises">EX 2.4</a> <span class="exercise-diff medium">medium</span> — Dry-run and force-rebuild</li>
+  <li><a href="chapters/02-hello-make.html#exercises">EX 2.5</a> <span class="exercise-diff medium">medium</span> — Observe parallelism</li>
+  <li><a href="chapters/02-hello-make.html#exercises">EX 2.6</a> <span class="exercise-diff hard">hard</span> — What happens with a missing source?</li>
+</ul>
+
+<h2 id="chapter-3">Chapter 3 — Anatomy of a Rule</h2>
+<ul>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.1</a> <span class="exercise-diff easy">easy</span> — Identify the parts</li>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.2</a> <span class="exercise-diff medium">medium</span> — The subshell trap</li>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.3</a> <span class="exercise-diff medium">medium</span> — <code>$</code> vs <code>$$</code></li>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.4</a> <span class="exercise-diff easy">easy</span> — Quiet and ignore-error</li>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.5</a> <span class="exercise-diff hard">hard</span> — Write it with strict bash</li>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.6</a> <span class="exercise-diff medium">medium</span> — When does it run?</li>
+  <li><a href="chapters/03-anatomy-of-a-rule.html#exercises">EX 3.7</a> <span class="exercise-diff hard">hard</span> — Override the shell per-target</li>
+</ul>
+
+<h2 id="chapter-4">Chapter 4 — Variables</h2>
+<ul>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.1</a> <span class="exercise-diff easy">easy</span> — Predict the output</li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.2</a> <span class="exercise-diff easy">easy</span> — Which flavor for pkg-config?</li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.3</a> <span class="exercise-diff medium">medium</span> — Override behaviour</li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.4</a> <span class="exercise-diff medium">medium</span> — Target-specific cascading</li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.5</a> <span class="exercise-diff hard">hard</span> — The self-referencing trap</li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.6</a> <span class="exercise-diff medium">medium</span> — Reproduce flavor-preservation of <code>+=</code></li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.7</a> <span class="exercise-diff medium">medium</span> — Export discipline</li>
+  <li><a href="chapters/04-variables.html#exercises">EX 4.8</a> <span class="exercise-diff hard">hard</span> — Build flags sniffing with <code>origin</code></li>
+</ul>
+
+<h2 id="chapter-5">Chapter 5 — Automatic Vars &amp; Pattern Rules</h2>
+<ul>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.1</a> <span class="exercise-diff easy">easy</span> — Identify each variable</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.2</a> <span class="exercise-diff easy">easy</span> — One-line Makefile</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.3</a> <span class="exercise-diff medium">medium</span> — Writing a pattern rule</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.4</a> <span class="exercise-diff medium">medium</span> — Outputs in a subdirectory</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.5</a> <span class="exercise-diff medium">medium</span> — Using <code>$?</code> cleverly</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.6</a> <span class="exercise-diff hard">hard</span> — Shadowing a built-in rule</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.7</a> <span class="exercise-diff medium">medium</span> — Static vs regular pattern — when?</li>
+  <li><a href="chapters/05-automatic-vars.html#exercises">EX 5.8</a> <span class="exercise-diff hard">hard</span> — Explore the built-in database</li>
+</ul>
+
+<h2 id="chapter-6">Chapter 6 — Functions</h2>
+<ul>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.1</a> <span class="exercise-diff easy">easy</span> — patsubst warmup</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.2</a> <span class="exercise-diff easy">easy</span> — Quiet by default</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.3</a> <span class="exercise-diff medium">medium</span> — Cross-product with foreach</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.4</a> <span class="exercise-diff medium">medium</span> — Mini-template engine</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.5</a> <span class="exercise-diff medium">medium</span> — Shell status check</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.6</a> <span class="exercise-diff hard">hard</span> — Assert non-empty</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.7</a> <span class="exercise-diff medium">medium</span> — strip vs :=</li>
+  <li><a href="chapters/06-functions.html#exercises">EX 6.8</a> <span class="exercise-diff hard">hard</span> — Generate rules from a list</li>
+</ul>
+
+<h2 id="chapter-7">Chapter 7 — Phony &amp; Special Targets</h2>
+<ul>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.1</a> <span class="exercise-diff easy">easy</span> — Why does this fail?</li>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.2</a> <span class="exercise-diff easy">easy</span> — Why always DELETE_ON_ERROR?</li>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.3</a> <span class="exercise-diff medium">medium</span> — Grouped vs shared</li>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.4</a> <span class="exercise-diff medium">medium</span> — Implement a <code>help</code> target</li>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.5</a> <span class="exercise-diff medium">medium</span> — Keeping intermediates</li>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.6</a> <span class="exercise-diff hard">hard</span> — Never parallelise tests</li>
+  <li><a href="chapters/07-phony-and-special.html#exercises">EX 7.7</a> <span class="exercise-diff hard">hard</span> — Investigate a real Makefile</li>
+</ul>
+
+<h2 id="chapter-8">Chapter 8 — Metaprogramming</h2>
+<ul>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.1</a> <span class="exercise-diff easy">easy</span> — When does <code>ifeq</code> fire?</li>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.2</a> <span class="exercise-diff easy">easy</span> — OS detection</li>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.3</a> <span class="exercise-diff medium">medium</span> — Computed variables beat ifeq chains</li>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.4</a> <span class="exercise-diff medium">medium</span> — Per-target header deps with <code>.SECONDEXPANSION</code></li>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.5</a> <span class="exercise-diff hard">hard</span> — Generating many tiny rules</li>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.6</a> <span class="exercise-diff hard">hard</span> — Debugging a template</li>
+  <li><a href="chapters/08-metaprogramming.html#exercises">EX 8.7</a> <span class="exercise-diff medium">medium</span> — Split a Makefile</li>
+</ul>
+
+<h2 id="chapter-9">Chapter 9 — Real Projects</h2>
+<ul>
+  <li><a href="chapters/09-real-projects.html#exercises">EX 9.1</a> <span class="exercise-diff medium">medium</span> — Verify auto-deps work</li>
+  <li><a href="chapters/09-real-projects.html#exercises">EX 9.2</a> <span class="exercise-diff medium">medium</span> — Deleting a header gracefully</li>
+  <li><a href="chapters/09-real-projects.html#exercises">EX 9.3</a> <span class="exercise-diff medium">medium</span> — Polyglot project</li>
+  <li><a href="chapters/09-real-projects.html#exercises">EX 9.4</a> <span class="exercise-diff hard">hard</span> — Out-of-tree build</li>
+  <li><a href="chapters/09-real-projects.html#exercises">EX 9.5</a> <span class="exercise-diff hard">hard</span> — A mini website</li>
+  <li><a href="chapters/09-real-projects.html#exercises">EX 9.6</a> <span class="exercise-diff hard">hard</span> — Handle the compile-flag-change problem</li>
+</ul>
+
+<h2 id="chapter-10">Chapter 10 — Parallel Make</h2>
+<ul>
+  <li><a href="chapters/10-parallel-make.html#exercises">EX 10.1</a> <span class="exercise-diff easy">easy</span> — Observe interleaving</li>
+  <li><a href="chapters/10-parallel-make.html#exercises">EX 10.2</a> <span class="exercise-diff medium">medium</span> — Spot the race</li>
+  <li><a href="chapters/10-parallel-make.html#exercises">EX 10.3</a> <span class="exercise-diff medium">medium</span> — Measure effective parallelism</li>
+  <li><a href="chapters/10-parallel-make.html#exercises">EX 10.4</a> <span class="exercise-diff hard">hard</span> — Sequential tests, parallel build</li>
+  <li><a href="chapters/10-parallel-make.html#exercises">EX 10.5</a> <span class="exercise-diff hard">hard</span> — What does MAKEFLAGS look like?</li>
+  <li><a href="chapters/10-parallel-make.html#exercises">EX 10.6</a> <span class="exercise-diff medium">medium</span> — Atomic writes</li>
+</ul>
+
+<h2 id="chapter-11">Chapter 11 — Debugging</h2>
+<ul>
+  <li><a href="chapters/11-debugging.html#exercises">EX 11.1</a> <span class="exercise-diff easy">easy</span> — print-%</li>
+  <li><a href="chapters/11-debugging.html#exercises">EX 11.2</a> <span class="exercise-diff medium">medium</span> — Explain this behavior</li>
+  <li><a href="chapters/11-debugging.html#exercises">EX 11.3</a> <span class="exercise-diff medium">medium</span> — Why didn't it rebuild?</li>
+  <li><a href="chapters/11-debugging.html#exercises">EX 11.4</a> <span class="exercise-diff medium">medium</span> — Parse-time vs build-time info</li>
+  <li><a href="chapters/11-debugging.html#exercises">EX 11.5</a> <span class="exercise-diff hard">hard</span> — Trace a rebuild decision</li>
+  <li><a href="chapters/11-debugging.html#exercises">EX 11.6</a> <span class="exercise-diff hard">hard</span> — Build a check-target</li>
+</ul>
+
+<h2 id="chapter-12">Chapter 12 — Recursive Make Considered Harmful</h2>
+<ul>
+  <li><a href="chapters/12-recursive-harmful.html#exercises">EX 12.1</a> <span class="exercise-diff easy">easy</span> — Identify Miller's problems</li>
+  <li><a href="chapters/12-recursive-harmful.html#exercises">EX 12.2</a> <span class="exercise-diff medium">medium</span> — The null-build test</li>
+  <li><a href="chapters/12-recursive-harmful.html#exercises">EX 12.3</a> <span class="exercise-diff medium">medium</span> — Stub Makefile for subdirectory entry</li>
+  <li><a href="chapters/12-recursive-harmful.html#exercises">EX 12.4</a> <span class="exercise-diff hard">hard</span> — Namespace discipline</li>
+  <li><a href="chapters/12-recursive-harmful.html#exercises">EX 12.5</a> <span class="exercise-diff hard">hard</span> — Read Miller's original paper</li>
+</ul>
+
+<h2 id="chapter-14">Chapter 14 — Capstone</h2>
+<ul>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.1</a> <span class="exercise-diff medium">medium</span> — Type it out</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.2</a> <span class="exercise-diff medium">medium</span> — Add the shared library</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.3</a> <span class="exercise-diff hard">hard</span> — Wire in pkg-config</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.4</a> <span class="exercise-diff hard">hard</span> — CI matrix</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.5</a> <span class="exercise-diff hard">hard</span> — Flag-change detection</li>
+</ul>
+
+<hr>
+
+<p style="text-align: center; color: var(--text-faint); font-family: var(--mono); font-size: 14px;">
+  80 exercises · 50 questions · 14 chapters
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

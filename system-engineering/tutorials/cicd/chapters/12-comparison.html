@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · Head-to-head Comparison — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 12</span>
+  Head-to-head Comparison
+</h1>
+<p class="lede">
+  Feature matrix, performance, cost, ops burden, and a decision tree
+  for picking one. We'll also translate the same operations
+  line-by-line across the three tools so you can see exactly how they
+  express the same ideas.
+</p>
+
+<h2 id="matrix">Feature matrix</h2>
+
+<table>
+<thead><tr><th>Feature</th><th>Jenkins</th><th>GitLab CI</th><th>GitHub Actions</th></tr></thead>
+<tbody>
+<tr><td>Pipeline language</td>            <td>Groovy (DSL)</td>               <td>YAML</td>                       <td>YAML</td></tr>
+<tr><td>Hosted option</td>                <td>No (self-hosted only)</td>       <td>Yes (gitlab.com) + self-hosted</td><td>Yes + self-hosted</td></tr>
+<tr><td>Pricing model</td>                <td>Infra costs only</td>           <td>Free + paid tiers + minutes</td><td>Free tier + minutes</td></tr>
+<tr><td>VCS coupling</td>                 <td>Any VCS</td>                     <td>Only GitLab repos</td>          <td>Only GitHub repos</td></tr>
+<tr><td>DAG scheduling</td>               <td>Yes (Scripted parallel, matrix)</td><td>Yes (<code>needs:</code>)</td><td>Yes (<code>needs:</code>)</td></tr>
+<tr><td>Matrix/parallel builds</td>       <td>Yes (<code>matrix</code> + <code>parallel</code>)</td><td>Yes (<code>parallel: matrix</code>)</td><td>Yes (<code>strategy.matrix</code>)</td></tr>
+<tr><td>Reusable logic</td>               <td>Shared Libraries (Groovy)</td>  <td><code>include</code>, <code>extends</code>, components</td><td>Reusable workflows, composite actions</td></tr>
+<tr><td>Third-party ecosystem</td>        <td>Plugins (1800+)</td>            <td>Templates + Components</td>     <td>Marketplace (tens of thousands)</td></tr>
+<tr><td>Docker-based jobs</td>            <td>Yes (plugin)</td>               <td>Default</td>                    <td>Yes (via <code>container:</code> or action)</td></tr>
+<tr><td>Kubernetes-native agents</td>     <td>Yes (plugin)</td>               <td>Yes (K8s executor)</td>         <td>Via ARC (self-hosted)</td></tr>
+<tr><td>Built-in container registry</td>  <td>No</td>                         <td>Yes (per-project)</td>          <td>Yes (GHCR)</td></tr>
+<tr><td>OIDC-to-cloud</td>                <td>Via plugins</td>                <td>Yes (<code>id_tokens</code>)</td><td>Yes (<code>id-token</code> permission)</td></tr>
+<tr><td>Deploy environments</td>          <td>Loose (plugin-based)</td>       <td>First-class</td>                <td>First-class</td></tr>
+<tr><td>Approval gates</td>               <td><code>input</code> step</td>    <td><code>when: manual</code></td>  <td>Environment required-reviewers</td></tr>
+<tr><td>Monorepo pipelines</td>           <td>Multibranch + shared libs</td>  <td>Dynamic child pipelines</td>    <td>Dynamic matrix from <code>needs</code></td></tr>
+<tr><td>Secrets: scope granularity</td>   <td>Global / Folder / User</td>     <td>Instance / Group / Project / Env</td><td>Repo / Env / Org</td></tr>
+<tr><td>Runs-on-your-laptop test</td>     <td>Jenkinsfile replay</td>         <td><code>gitlab-runner exec</code> (deprecated)</td><td><code>act</code></td></tr>
+<tr><td>Web UI polish</td>                <td>Functional; can install Blue Ocean</td><td>Excellent</td>           <td>Excellent</td></tr>
+<tr><td>Marketplace extensibility</td>    <td>Plugins (huge, uneven)</td>     <td>Components (small, growing)</td><td>Actions (massive, variable quality)</td></tr>
+<tr><td>Ops burden</td>                   <td>High</td>                       <td>Low (SaaS) / medium (self)</td><td>Low (SaaS)</td></tr>
+<tr><td>First-time setup</td>             <td>Hours–days</td>                 <td>Seconds (SaaS)</td>             <td>Seconds (SaaS)</td></tr>
+</tbody>
+</table>
+
+<h2 id="translation">Rosetta stone</h2>
+
+<p>The same operations, in all three. Keep this in your reference folder.</p>
+
+<h3 id="hello">A minimal "hello"</h3>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkins</span></div>
+<pre><code>pipeline {
+    agent any
+    stages {
+        stage('Hello') { steps { sh 'echo hello' } }
+    }
+}</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitLab CI</span></div>
+<pre><code>hello:
+  script: [echo hello]</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions</span></div>
+<pre><code>jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo hello }]</code></pre>
+</div>
+
+<h3 id="matrix-tsl">Matrix across Python versions</h3>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkins</span></div>
+<pre><code>matrix {
+    axes {
+        axis { name 'PY'; values '3.10', '3.11', '3.12' }
+    }
+    stages {
+        stage('test') {
+            agent { docker "python:${PY}" }
+            steps { sh 'pytest' }
+        }
+    }
+}</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitLab CI</span></div>
+<pre><code>test:
+  image: "python:$PY"
+  parallel:
+    matrix:
+      - PY: ["3.10", "3.11", "3.12"]
+  script: [pytest]</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions</span></div>
+<pre><code>jobs:
+  test:
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    runs-on: ubuntu-latest
+    container: "python:${{ matrix.python }}"
+    steps:
+      - uses: actions/checkout@v4
+      - run: pytest</code></pre>
+</div>
+
+<h3 id="artifact-tsl">Artifact between jobs</h3>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkins</span></div>
+<pre><code>stage('build') { steps { sh 'make dist'; stash name: 'dist', includes: 'dist/**' } }
+stage('deploy') { steps { unstash 'dist'; sh './deploy.sh dist/' } }</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitLab CI</span></div>
+<pre><code>build:  { script: [make dist], artifacts: { paths: [dist/] } }
+deploy: { needs: [build], script: ['./deploy.sh dist/'] }</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions</span></div>
+<pre><code>jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make dist
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist/ }
+      - run: ./deploy.sh dist/</code></pre>
+</div>
+
+<h3 id="cond-tsl">Run only on main</h3>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkins</span></div>
+<pre><code>stage('deploy') { when { branch 'main' }; steps { sh './deploy.sh' } }</code></pre>
+</div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitLab CI</span></div>
+<pre><code>deploy:
+  script: ['./deploy.sh']
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH</code></pre>
+</div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions</span></div>
+<pre><code>deploy:
+  if: github.ref == 'refs/heads/main'
+  steps: [{ run: ./deploy.sh }]</code></pre>
+</div>
+
+<h3 id="secret-tsl">Using a secret</h3>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkins</span></div>
+<pre><code>withCredentials([string(credentialsId: 'gh', variable: 'GH_TOKEN')]) {
+    sh 'curl -H "Authorization: token $GH_TOKEN" https://api.github.com/user'
+}</code></pre>
+</div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitLab CI</span></div>
+<pre><code>deploy:
+  script:
+    - curl -H "Authorization: token $GH_TOKEN" https://api.github.com/user
+  # GH_TOKEN comes from Settings → CI/CD → Variables (masked)</code></pre>
+</div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions</span></div>
+<pre><code>- env: { GH_TOKEN: "${{ secrets.GH_TOKEN }}" }
+  run: curl -H "Authorization: token $GH_TOKEN" https://api.github.com/user</code></pre>
+</div>
+
+<h2 id="perf">Performance characteristics</h2>
+
+<h4>Startup time per job</h4>
+<ul>
+  <li><strong>Jenkins</strong> — fast once controller is warm and agent is available; seconds. Agent startup (if ephemeral) adds 5–30s.</li>
+  <li><strong>GitLab CI</strong> — SaaS runners boot fresh per job; ~10–30s overhead. Self-hosted cached runners can be ~5s.</li>
+  <li><strong>GitHub Actions</strong> — hosted runners boot in ~15–30s. Self-hosted can be ~1s for warm runners; longer for ephemeral VMs.</li>
+</ul>
+
+<h4>Scheduling latency (time from trigger to first job running)</h4>
+<ul>
+  <li>Jenkins: seconds if controller not overloaded.</li>
+  <li>GitLab SaaS: 5–30s typically; can spike under load.</li>
+  <li>GHA: 5–60s typically; spikes during peak hours.</li>
+</ul>
+
+<h4>Throughput (jobs/hour)</h4>
+<p>
+  All three scale well with more runners. Bottleneck is usually
+  per-job overhead × concurrency limits. Buy more runner capacity if
+  queueing.
+</p>
+
+<h2 id="cost">Cost</h2>
+
+<p>Rough guidance — always check current pricing, this moves.</p>
+
+<ul>
+  <li><strong>Jenkins.</strong> Only infra cost. For small teams: one EC2 t3.medium controller + on-demand K8s agents ≈ $50–200/month. For large teams: dedicated ops headcount. Indirect cost of ops is usually the dominant cost.</li>
+  <li><strong>GitLab CI SaaS.</strong> Free tier: 400 CI/CD minutes/month on shared runners. Premium: 10,000 min. Self-hosted runners bypass the limit entirely — you pay for your own infra.</li>
+  <li><strong>GitHub Actions SaaS.</strong> Free tier: 2,000 Linux minutes/month for private repos, unlimited for public. Beyond that: ~$0.008/min Linux, ~$0.08/min macOS, ~$0.016/min Windows. Macs are expensive.</li>
+</ul>
+
+<p>Heuristic: if you're paying for SaaS CI minutes and spending &gt;$500/month, evaluate self-hosted or larger-tier runners. If you're paying &gt;$5000/month, self-hosted on spot instances is almost always cheaper.</p>
+
+<h2 id="ops">Ops burden</h2>
+
+<table>
+<thead><tr><th>Task</th><th>Jenkins</th><th>GitLab SaaS</th><th>GitHub Actions SaaS</th></tr></thead>
+<tbody>
+<tr><td>Upgrade core</td>              <td>You</td><td>GitLab</td><td>GitHub</td></tr>
+<tr><td>Upgrade plugins / actions</td> <td>You (weekly-ish)</td><td>N/A</td><td>Pinned dependencies; review PRs</td></tr>
+<tr><td>Runner autoscaling</td>        <td>You (K8s, EC2 Fleet, etc.)</td><td>GitLab (or your runners)</td><td>GitHub (or your runners)</td></tr>
+<tr><td>OS patches on runners</td>     <td>You</td><td>GitLab</td><td>GitHub</td></tr>
+<tr><td>Backups</td>                   <td>You</td><td>GitLab</td><td>GitHub</td></tr>
+<tr><td>Availability SLO</td>          <td>You</td><td>99.95%</td><td>99.9%</td></tr>
+<tr><td>Security advisories</td>       <td>You monitor + patch</td><td>GitLab</td><td>GitHub</td></tr>
+</tbody>
+</table>
+
+<p>Jenkins is "own the whole stack". The others are "own just your pipelines".</p>
+
+<h2 id="tradeoffs">Honest trade-offs</h2>
+
+<h4>Why you'd still pick Jenkins in 2026</h4>
+<ul>
+  <li>Your code isn't on GitHub or GitLab.</li>
+  <li>You need air-gapped CI (classified environments, financial networks, OT/ICS).</li>
+  <li>You have custom hardware: mainframes, FPGAs, embedded test rigs.</li>
+  <li>You need to integrate with ancient auth (older LDAP, RADIUS, SAML IdPs).</li>
+  <li>You have genuine scale — 1000+ concurrent builds, tens of thousands of jobs.</li>
+  <li>Your org already runs Jenkins competently and the cost of switching &gt; benefit.</li>
+</ul>
+
+<h4>Why you'd still pick GitLab CI</h4>
+<ul>
+  <li>Your code is on GitLab (duh).</li>
+  <li>You like monolithic tooling: issues, wikis, code, CI, container registry, pages, all in one pane.</li>
+  <li>You self-host everything and want a single product.</li>
+  <li>You need advanced DAG patterns (dynamic child pipelines are especially nice).</li>
+  <li>DevSecOps: the built-in scanning templates are very competitive.</li>
+</ul>
+
+<h4>Why you'd still pick GHA</h4>
+<ul>
+  <li>Your code is on GitHub (duh).</li>
+  <li>You want the largest third-party ecosystem.</li>
+  <li>You like the PR-centric UX (inline annotations, required checks).</li>
+  <li>You want near-zero operational overhead.</li>
+  <li>You're happy being coupled to GitHub's Issues/PR model.</li>
+</ul>
+
+<h2 id="decision-tree">A decision tree</h2>
+
+<div class="code" data-lang="text">
+<pre><code>Where is your code?
+├── GitHub → GitHub Actions (default choice)
+│           ├── need private-network access? → add self-hosted runners
+│           └── need advanced org policies? → GitHub Enterprise
+│
+├── GitLab → GitLab CI (default choice)
+│           ├── need built-in security scanning out-of-box? → GitLab
+│           └── need self-hosted? → easy migration, same config
+│
+├── Bitbucket → Bitbucket Pipelines (not covered here) OR Jenkins
+│
+└── Self-hosted Git / SVN / monorepo with weird rules
+    ├── resources for ops team? → Jenkins
+    └── small team? → consider Woodpecker, Drone, or migrate repos
+
+Do any of the following apply?
+- Air-gapped / classified network
+- Bizarre compliance (FedRAMP High, HIPAA + specific auditors)
+- Must integrate with on-prem tools (JIRA DC, Artifactory, etc.)
+→ Jenkins anyway.
+
+Is your team &lt; 10 people with &lt; 20 repos?
+→ SaaS CI (GHA or GitLab). Never run your own CI at this size.</code></pre>
+</div>
+
+<h2 id="multi-tool">Many teams use more than one</h2>
+
+<p>Realistic mixed setups:</p>
+<ul>
+  <li><strong>GHA for app CI, Jenkins for platform builds.</strong> App teams use GHA because they live on GitHub. Platform team runs Jenkins because they need on-prem integrations.</li>
+  <li><strong>GitLab CI for builds, Argo CD for deploys.</strong> GitLab produces artifacts; Argo CD pulls them into K8s.</li>
+  <li><strong>GHA for CI, Buildkite/CircleCI for the heavy stuff.</strong> Free GHA runs most jobs; paid specialty CI runs the expensive integration tests on beefier hardware.</li>
+</ul>
+
+<p>Don't be dogmatic — match tools to use cases.</p>
+
+<h2 id="migration">Migration patterns</h2>
+
+<p>Switching CI tools is a multi-week project. Rough playbook:</p>
+<ol>
+  <li><strong>Inventory.</strong> List every job, trigger, secret, and deploy target. Document the current pipeline graph.</li>
+  <li><strong>Translate simple jobs first.</strong> Pick five small repos; migrate. Learn idioms.</li>
+  <li><strong>Run in parallel.</strong> Point the new tool at the same repos. Keep the old pipeline green for months.</li>
+  <li><strong>Feature parity.</strong> Ensure approvals, notifications, artifact retention, and dashboards exist in the new tool.</li>
+  <li><strong>Flip the switch.</strong> Make the new tool the required check on PRs; make the old tool optional.</li>
+  <li><strong>Decommission.</strong> After a cooling-off period, turn off the old CI. Archive config for auditors.</li>
+</ol>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Translation drill</span>
+</div>
+<div class="exercise-body">
+<p>Write equivalent pipelines in all three tools that: (a) lint on every push, (b) run unit + integration tests on every PR, (c) publish a Docker image only on pushes to <code>main</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Solutions vary; verify by comparing against Chapter 5 (Jenkins Declarative), Chapter 8 (GitLab advanced), and Chapter 10 (GHA advanced). Key observation: the <em>structure</em> is nearly identical across tools; the <em>syntax</em> differs.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Pick a tool, defend it</span>
+</div>
+<div class="exercise-body">
+<p>You work at a 50-person startup using GitHub, shipping a web app to AWS. Pick a CI tool. Defend it in 5 bullet points.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Default answer: GitHub Actions.</p>
+<ul>
+<li>Zero additional infrastructure to run — free tier covers most jobs.</li>
+<li>Native PR integration and required checks.</li>
+<li>Marketplace covers almost every AWS integration; <code>aws-actions/configure-aws-credentials</code> + OIDC gets you to production securely without stored secrets.</li>
+<li>At 50 people, ops time is your constraint; SaaS is cheaper than running Jenkins for us.</li>
+<li>Migration path later (if we outgrow): self-hosted runners, reusable workflows, then whatever comes next.</li>
+</ul>
+<p>Different answers are defensible. If the team already has deep Jenkins expertise, sticking with it is reasonable.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.3</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Cost model</span>
+</div>
+<div class="exercise-body">
+<p>Your team runs 200 pipelines/day, average 12 minutes each, 60% Linux, 30% macOS, 10% Windows. Estimate monthly cost on (a) GHA SaaS, (b) GitLab SaaS, (c) self-hosted Jenkins on AWS.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Total minutes/month: 200 × 12 × 30 = 72,000 min. Breakdown: 43,200 Linux, 21,600 macOS, 7,200 Windows.</p>
+<p><strong>GHA SaaS</strong> (approx — verify current pricing):</p>
+<ul>
+<li>Linux: 43,200 × $0.008 = $346</li>
+<li>macOS: 21,600 × $0.08 = $1,728</li>
+<li>Windows: 7,200 × $0.016 = $115</li>
+<li>Minus 2,000 included = <em>some</em> discount</li>
+<li>Rough total: <strong>~$2,100/month</strong></li>
+</ul>
+<p><strong>GitLab SaaS</strong>: similar order of magnitude; macOS via hosted mac runners is pricier.</p>
+<p><strong>Self-hosted Jenkins</strong> on AWS:</p>
+<ul>
+<li>Controller: 1 × t3.medium ≈ $30/month</li>
+<li>Linux workers: 2 × c5.xlarge on-demand running ~30% utilised ≈ $250/month, or spot at ~$100</li>
+<li>macOS: specialty mac1.metal or build farm; much pricier per host but potentially cheap per minute at high utilisation. Or skip macOS altogether and use GHA just for those jobs.</li>
+<li>Ops: <em>people cost</em>. Often 0.1–0.5 FTE — the actual dominant cost.</li>
+<li>Rough infra: <strong>~$1,500/month</strong>, plus ops time.</li>
+</ul>
+<p>Conclusion: at this volume, self-hosted isn't obviously cheaper once you include ops time. At 10× the volume, it is.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Feature matrix: broadly similar capabilities; huge differences in language, ecosystem, ops burden.</li>
+  <li>Same concepts translate almost line-by-line between the three — the Rosetta stone is a useful lookup.</li>
+  <li>Cost: SaaS CI wins at small-to-medium scale; self-hosted wins at large scale if you have ops capacity.</li>
+  <li>Ops burden: Jenkins is a job; SaaS CI is near-free.</li>
+  <li>Decision tree: follow the repo home; escape hatch to Jenkins only when you need its flexibility.</li>
+  <li>Many orgs use more than one — don't force a single tool to cover every use case.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="11-security.html"><span class="lbl">← Prev</span><span class="ttl">Security &amp; Secrets</span></a>
+  <a href="13-50-questions.html" class="next"><span class="lbl">Next →</span><span class="ttl">The 50 Questions</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

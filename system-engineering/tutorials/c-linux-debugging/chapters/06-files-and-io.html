@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>6 · Files &amp; I/O</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 06</span>
+  Files &amp; I/O
+</h1>
+<p class="lede">
+  open/read/write are the two-screen API that powers everything from
+  <code>cat</code> to a database engine. This chapter covers the
+  syscalls, mmap, atomic file replacement, fsync vs fdatasync,
+  buffered vs direct I/O, the <code>/proc</code>/<code>/sys</code>
+  pseudo-filesystems, and the patterns for "I want to write this
+  config without ever leaving a half-written file on disk".
+</p>
+
+<h2 id="open">open / read / write / close — the basics</h2>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+int main(void) {
+    int fd = open("/tmp/data", O_RDONLY | O_CLOEXEC);
+    if (fd &lt; 0) { perror("open"); return 1; }
+
+    char buf[4096];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n &gt; 0) {
+            /* process buf[0 .. n) */
+        } else if (n == 0) {
+            break;             /* EOF */
+        } else if (errno == EINTR) {
+            continue;          /* signal — retry */
+        } else {
+            perror("read");
+            close(fd);
+            return 1;
+        }
+    }
+    close(fd);
+    return 0;
+}
+</code></pre>
+</div>
+
+<p>Things to make second-nature:</p>
+
+<ul>
+  <li><strong><code>read</code> may return less than requested.</strong> Always loop. The "short read" is normal — pipes, sockets, slow disks all do it.</li>
+  <li><strong>EINTR</strong>: a signal interrupted the syscall. Retry. <code>SA_RESTART</code> on the signal handler avoids most of this.</li>
+  <li><strong>Always check the return value</strong>; <code>(void) write(fd, ...);</code> is a "you got what you deserved" anti-pattern.</li>
+  <li><strong>Always close.</strong> But check the return — <code>close</code> can fail (NFS, network filesystems delay errors).</li>
+</ul>
+
+<h2 id="open-flags">open() flags worth memorising</h2>
+
+<table>
+<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>O_RDONLY</code> / <code>O_WRONLY</code> / <code>O_RDWR</code></td><td>Access mode (mandatory; one of these three)</td></tr>
+<tr><td><code>O_CREAT</code></td>      <td>Create if missing; with this, mode arg required (<code>0644</code>, etc.)</td></tr>
+<tr><td><code>O_EXCL</code></td>       <td>With <code>O_CREAT</code>: fail if file exists (atomic create-or-fail)</td></tr>
+<tr><td><code>O_TRUNC</code></td>      <td>Truncate to zero on open</td></tr>
+<tr><td><code>O_APPEND</code></td>     <td>Every write seeks to end first — atomic append on Linux for &lt; PIPE_BUF</td></tr>
+<tr><td><code>O_CLOEXEC</code></td>    <td>Close on exec; default-on by habit, save yourself audit reviews</td></tr>
+<tr><td><code>O_NONBLOCK</code></td>   <td>Non-blocking I/O; reads return <code>-1</code> with <code>EAGAIN</code> when no data</td></tr>
+<tr><td><code>O_DIRECT</code></td>     <td>Bypass page cache; alignment requirements; databases only</td></tr>
+<tr><td><code>O_SYNC</code> / <code>O_DSYNC</code></td><td>Each write flushes to disk before returning — slow, sometimes essential</td></tr>
+<tr><td><code>O_PATH</code></td>       <td>Open without read/write access — only for <code>fstatat</code>, <code>openat</code>, <code>fchdir</code></td></tr>
+<tr><td><code>O_TMPFILE</code></td>    <td>Create unnamed file; useful for "write then linkat into place"</td></tr>
+</tbody>
+</table>
+
+<h2 id="seek">Position, lseek, pread/pwrite</h2>
+
+<p>Each open file description has a position. <code>read</code>/<code>write</code> advance it; <code>lseek</code> moves it.</p>
+
+<div class="code" data-lang="c">
+<pre><code>off_t pos = lseek(fd, 0, SEEK_END);   /* find file size */
+lseek(fd, 0, SEEK_SET);                /* back to start */
+
+/* Better — pread/pwrite take an offset, don't change the position */
+char buf[8];
+pread(fd, buf, sizeof buf, 100);       /* read 8 bytes at offset 100 */
+pwrite(fd, "hi", 2, 200);
+</code></pre>
+</div>
+
+<p><code>pread</code>/<code>pwrite</code> are the right primitive for multi-threaded access to one fd — no race on the position. They're also lighter than seek+read.</p>
+
+<h2 id="atomic-write">Atomic file replacement — the safe-write idiom</h2>
+
+<p>The naive "open file, truncate, write" approach corrupts the file if the process dies mid-write. The Unix atomic-replace pattern:</p>
+
+<ol>
+  <li>Write the new content to <code>file.tmp</code> in the <em>same directory</em>.</li>
+  <li>Optionally <code>fsync</code> the temp file.</li>
+  <li><code>rename(tmp, file)</code> — POSIX guarantees this is atomic.</li>
+</ol>
+
+<div class="code" data-lang="c">
+<pre><code>int write_atomic(const char *path, const void *data, size_t len) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
+
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd &lt; 0) return -1;
+
+    const char *p = data;
+    size_t left = len;
+    while (left) {
+        ssize_t n = write(fd, p, left);
+        if (n &lt; 0) {
+            if (errno == EINTR) continue;
+            close(fd); unlink(tmp); return -1;
+        }
+        p += n; left -= n;
+    }
+    if (fsync(fd) &lt; 0) { close(fd); unlink(tmp); return -1; }
+    if (close(fd)  &lt; 0) {           unlink(tmp); return -1; }
+    if (rename(tmp, path) &lt; 0)    { unlink(tmp); return -1; }
+
+    /* Optionally fsync the directory so the rename hits disk */
+    int dfd = open(dirname_of(path), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd &gt;= 0) { fsync(dfd); close(dfd); }
+    return 0;
+}
+</code></pre>
+</div>
+
+<p>The fsync of the parent directory is what makes this survive a power cut: without it, the rename may live only in the directory's page cache.</p>
+
+<h2 id="fsync">fsync vs fdatasync vs sync</h2>
+
+<table>
+<thead><tr><th>Call</th><th>Flushes</th><th>When</th></tr></thead>
+<tbody>
+<tr><td><code>fsync(fd)</code></td>     <td>Data + metadata of one file to disk</td>           <td>Need full durability</td></tr>
+<tr><td><code>fdatasync(fd)</code></td> <td>Data + only metadata that affects readers</td>     <td>Faster; database log writes</td></tr>
+<tr><td><code>sync()</code></td>        <td>Schedules write of all dirty pages; doesn't wait</td><td>Almost never want; very coarse</td></tr>
+<tr><td><code>syncfs(fd)</code></td>    <td>All buffers for the filesystem fd lives on; waits</td><td>"Flush this disk"</td></tr>
+</tbody>
+</table>
+
+<p>The price of <code>fsync</code> is a millisecond on SSD, several on HDD — non-negligible. Database engines sweat over it. For most applications, fsync the file, fsync the dir, sleep well.</p>
+
+<h2 id="mmap">mmap — files as memory</h2>
+
+<p><code>mmap</code> maps a file (or anonymous memory) into the address space. After the call, accessing the address is reading/writing the file — the kernel pages it in on demand.</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/mman.h&gt;
+#include &lt;sys/stat.h&gt;
+
+int fd = open(path, O_RDONLY | O_CLOEXEC);
+struct stat st; fstat(fd, &amp;st);
+size_t sz = st.st_size;
+
+void *p = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+if (p == MAP_FAILED) { perror("mmap"); return 1; }
+close(fd);                                /* mapping persists after close */
+
+/* p is now sz bytes of the file. Read freely. */
+const char *cp = p;
+/* ... */
+
+munmap(p, sz);
+</code></pre>
+</div>
+
+<p>When to reach for mmap:</p>
+<ul>
+  <li>Big read-only files where you want random access (parsing).</li>
+  <li>Loading huge data sets without copying.</li>
+  <li>Sharing memory between processes (<code>MAP_SHARED</code>).</li>
+  <li>Anonymous mmap for big allocations (<code>MAP_ANONYMOUS</code>) — what <code>malloc</code> often does for large sizes.</li>
+</ul>
+
+<p>When NOT to reach for mmap:</p>
+<ul>
+  <li>Small files: cost more than they save.</li>
+  <li>Files that change while you read: page faults can fault on truncated pages → SIGBUS.</li>
+  <li>Network filesystems (NFS): semantics get murky.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">SIGBUS on truncated mmaps</div>
+<p>You mmap a file, another process truncates it. Now your mapped region beyond the new size is unmapped — accessing it sends SIGBUS (not SIGSEGV). Plan for it: handle the signal, don't share files with un-coordinated truncators, or use <code>fallocate</code> to keep them sized.</p>
+</div>
+
+<h2 id="pagecache">The page cache and "real" disk reads</h2>
+
+<p>Linux aggressively caches everything you read or write through the regular filesystem syscalls. Your second <code>cat bigfile</code> is from RAM. <code>vmstat 1</code> shows free/cached numbers; <code>free -h</code> too.</p>
+
+<p>To bypass the cache (e.g. benchmarking, databases that manage their own cache):</p>
+
+<ul>
+  <li><strong><code>O_DIRECT</code></strong> on open — must align reads to filesystem block size, must use aligned buffers (<code>posix_memalign</code>). Skips page cache.</li>
+  <li><strong><code>posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)</code></strong> after a read — drop those pages from cache.</li>
+  <li><strong><code>echo 3 &gt; /proc/sys/vm/drop_caches</code></strong> (root) — drop everything. Useful for benchmarks; never in production.</li>
+</ul>
+
+<h2 id="truncate">truncate, fallocate, sparse files</h2>
+
+<div class="code" data-lang="c">
+<pre><code>ftruncate(fd, 100);                     /* exactly 100 bytes; pads with zeros */
+posix_fallocate(fd, 0, 1024 * 1024);     /* allocate disk blocks for 1 MiB */
+fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096);
+                                          /* punch a hole — file stays same size, blocks freed */
+</code></pre>
+</div>
+
+<p>A <strong>sparse file</strong> is one where some byte ranges have no allocated blocks; reads return zeros. Useful for "logically big, physically small" — like virtual disk images. Sparse-aware tools (<code>cp --sparse=auto</code>, <code>tar --sparse</code>) preserve the holes.</p>
+
+<h2 id="proc-sys">/sys, /dev, and tmpfs</h2>
+
+<table>
+<tr><td><code>/proc</code></td>      <td>Per-process info, kernel state. <code>/proc/sys/*</code> is sysctl.</td></tr>
+<tr><td><code>/sys</code></td>       <td>Device tree, kernel-driver knobs (<code>/sys/class/net/</code>, <code>/sys/block/</code>).</td></tr>
+<tr><td><code>/dev</code></td>       <td>Device files. <code>/dev/null</code>, <code>/dev/zero</code>, <code>/dev/random</code>, <code>/dev/sda</code>, <code>/dev/ttyS0</code>.</td></tr>
+<tr><td><code>tmpfs</code></td>      <td>RAM-backed filesystem. Mounted at <code>/run</code>, <code>/tmp</code> (often), <code>/dev/shm</code>.</td></tr>
+</table>
+
+<p>Reading <code>/sys</code> files is how you get sensor temperatures, network statistics, MTU values, link speeds, USB device info — all without an API. Writing to them is how you change kernel module params at runtime.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cat /sys/class/net/eth0/mtu                        # 1500
+$ cat /sys/class/thermal/thermal_zone0/temp          # 45000  (millidegrees)
+$ echo 9000 &gt; /sys/class/net/eth0/mtu                # set jumbo frames
+</code></pre>
+</div>
+
+<h2 id="stdio">Buffered I/O via stdio</h2>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdio.h&gt;
+
+FILE *f = fopen("data.csv", "r");
+if (!f) { perror("fopen"); return 1; }
+
+char line[1024];
+while (fgets(line, sizeof line, f)) {
+    /* line includes trailing \n */
+}
+fclose(f);
+</code></pre>
+</div>
+
+<p>FILE* is libc's wrapper over an fd, with a buffer. Buffering modes:</p>
+<table>
+<tr><td>Line-buffered</td><td>Default for terminals (stdout). Flushes on \n or buffer-full.</td></tr>
+<tr><td>Fully buffered</td><td>Default for files / pipes. Flushes on buffer-full or fclose.</td></tr>
+<tr><td>Unbuffered</td><td>Default for stderr. Each write hits the kernel.</td></tr>
+</table>
+
+<p>Override with <code>setvbuf(stream, NULL, _IOLBF, 0)</code>. The classic gotcha: <code>printf</code> output disappears on a crash because the buffer was never flushed. <code>fflush(stdout)</code> at strategic points, or <code>setvbuf(stdout, NULL, _IONBF, 0)</code> for crash-friendly logs.</p>
+
+<h2 id="big-files">Big files and large-file support</h2>
+
+<p>On 32-bit systems, <code>off_t</code> was 32-bit and you needed <code>_FILE_OFFSET_BITS=64</code> to access files &gt; 2 GiB. On 64-bit Linux this is automatic; you don't have to think about it. If you maintain code that targets 32-bit embedded Linux, define <code>_FILE_OFFSET_BITS=64</code> in your build flags.</p>
+
+<h2 id="hands-on">Hands-on: a safe config writer</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · write the safe-write pattern from scratch</div>
+<div class="hands-on-body">
+<p>Write a function that writes <code>data</code> to <code>path</code> atomically: no half-written file ever exists. Tests:</p>
+<ol>
+<li>Run twice; <code>cat path</code> shows the second run's content.</li>
+<li>Kill the process mid-write (sleep before fsync); <code>cat path</code> still shows the previous content.</li>
+<li>Run on a freshly-formatted ext4 filesystem; everything still consistent after <code>echo b &gt; /proc/sysrq-trigger</code> reboot.</li>
+</ol>
+<p>Sample skeleton above in "Atomic file replacement". Build it, then test 1 and 2. Test 3 is a virtualised exercise.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Short reads</span>
+</div>
+<div class="exercise-body">
+<p>Why is this wrong?</p>
+<div class="code" data-lang="c">
+<pre><code>char buf[1024];
+read(fd, buf, sizeof buf);
+process(buf);
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>Return value not checked — error or EOF would be silently ignored.</li>
+<li>If <code>read</code> returned less than 1024, you process garbage past the actual data.</li>
+<li>EINTR not handled.</li>
+</ol>
+<div class="code" data-lang="c">
+<pre><code>ssize_t total = 0;
+while (total &lt; sizeof buf) {
+    ssize_t n = read(fd, buf + total, sizeof buf - total);
+    if (n == 0) break;             /* EOF */
+    if (n &lt; 0) {
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    total += n;
+}
+process(buf, total);
+</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why fsync the parent directory?</span>
+</div>
+<div class="exercise-body">
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The directory entry is metadata. <code>rename</code> updates the directory: removes the old entry, adds the new one. Until the directory is fsynced, that change may live only in the page cache. Power loss before flush → after reboot, the file could be the old content (or even gone, if both old and new entries weren't both committed).</p>
+<p>The fsync ensures the directory metadata is on stable storage. Most filesystems also order things sensibly via journaling, but fsyncing the dir is the only portable guarantee.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">mmap or read?</span>
+</div>
+<div class="exercise-body">
+<p>You're parsing 50 GB of structured data, mostly random-access. You can't fit it in RAM. Which API and why?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>mmap</code> with <code>MAP_PRIVATE</code> + <code>PROT_READ</code>. The kernel pages in only the parts you touch; LRU evicts what you don't. You get pointer arithmetic over the file as if it were memory. <code>read</code>/<code>pread</code> would also work but you'd be re-implementing what the page cache already does.</p>
+<p>Add <code>posix_madvise</code> with <code>MADV_RANDOM</code> to hint the kernel about access pattern. For sequential scans, <code>MADV_SEQUENTIAL</code> hints aggressive readahead.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Concurrent writers</span>
+</div>
+<div class="exercise-body">
+<p>Two processes append to the same log file. Some lines come out interleaved (mid-line). Why, and what's the fix?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Without coordination, two processes' writes interleave at any byte boundary. The fix is <code>O_APPEND</code>: each <code>write</code> seeks-to-end-and-writes <em>atomically as one syscall</em>, for sizes ≤ <code>PIPE_BUF</code> (4 KiB on Linux). For ≤ 4 KiB lines on the same filesystem, this is enough.</p>
+<p>For larger lines, or if you need ordering guarantees: take an advisory lock with <code>flock</code> or <code>fcntl(F_OFD_SETLK)</code>, or write through a single multiplexer process (<code>syslog</code>, <code>journald</code>).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Find a leak with /proc/PID/fd</span>
+</div>
+<div class="exercise-body">
+<p>Your daemon's RSS keeps growing. <code>ls /proc/$(pidof mydaemon)/fd | wc -l</code> climbs from 50 to thousands over a week. What's leaking, and how do you find <em>which</em> open are leaking?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><code>ls -l /proc/$PID/fd</code> shows where each fd points — files, sockets, pipes, anon-inodes. Group by destination: the fastest-growing is the leak.</li>
+<li>Compile the daemon with <code>-finstrument-functions</code> or use eBPF: <code>bpftrace -e 'tracepoint:syscalls:sys_enter_openat { @[ustack] = count(); }'</code> aggregates open call sites; the top contributor is your culprit.</li>
+<li>Or attach with gdb and break on <code>open</code>/<code>socket</code>; check stacks at moments when the count surges.</li>
+<li>Likeliest fix: missing <code>close</code> on an error path, or storing fds in a structure whose owner doesn't release on drop.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>open/read/write are the universal API. Loop on short reads; handle EINTR; check every return.</li>
+  <li>Atomic file replacement: write to <code>tmp</code> in same dir, fsync, rename, fsync the dir.</li>
+  <li>fsync = data + metadata, fdatasync = data + only readable-affecting metadata. Don't reach for <code>sync()</code>.</li>
+  <li>mmap for random access into big files; beware SIGBUS on truncate, NFS quirks, and the cost on tiny files.</li>
+  <li>O_DIRECT skips the page cache and has alignment requirements; use only when your code is the cache.</li>
+  <li><code>/proc</code> and <code>/sys</code> are filesystems-as-API; great for debugging and for talking to drivers.</li>
+  <li>stdio buffering bites: flush before crashes, or unbuffer logs.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="05-linux-process-model.html"><span class="lbl">← Prev</span><span class="ttl">Linux process model</span></a>
+  <a href="07-threads-and-concurrency.html" class="next"><span class="lbl">Next →</span><span class="ttl">Threads &amp; concurrency</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1 · CI/CD Fundamentals — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 01</span>
+  CI/CD Fundamentals
+</h1>
+<p class="lede">
+  Before comparing Jenkins, GitLab, and GitHub Actions, we need shared
+  vocabulary. What is CI? What is CD? What problem does either actually
+  solve? If you skip this chapter you'll spend the next 13 copying
+  snippets without understanding why they exist.
+</p>
+
+<h2 id="definitions">The words, precisely</h2>
+
+<table>
+<thead><tr><th>Term</th><th>Means</th></tr></thead>
+<tbody>
+<tr><td><strong>Continuous Integration</strong></td>
+    <td>Every change a developer makes is merged into a shared main branch at least daily, and every merge is validated by an automated build + test run.</td></tr>
+<tr><td><strong>Continuous Delivery</strong></td>
+    <td>Every change that passes CI is automatically packaged into a release artifact that <em>could be deployed</em> to production at any time. A human clicks a button to actually deploy.</td></tr>
+<tr><td><strong>Continuous Deployment</strong></td>
+    <td>Every change that passes CI is automatically <em>deployed</em> to production with no human step.</td></tr>
+</tbody>
+</table>
+
+<p>
+  <strong>CI/CD</strong> the umbrella phrase usually means "Continuous
+  Integration plus at least Continuous Delivery". Continuous Deployment
+  is the aggressive end of the spectrum — Etsy, Netflix, and Amazon do
+  it; most businesses stop at Delivery and gate with human approval.
+</p>
+
+<div class="callout history">
+<div class="callout-title">Where these ideas came from</div>
+<p>
+  Kent Beck's 1999 book <em>Extreme Programming Explained</em> argued
+  for "continuous integration — integrate and build the system many
+  times a day, every time a task is completed". Paul Duvall's 2007
+  book <em>Continuous Integration</em> codified the practice. Jez
+  Humble and Dave Farley's 2010 <em>Continuous Delivery</em> extended
+  it past the build to the release.
+</p>
+<p>
+  The tools followed the practices, not the other way around.
+  Understanding the <em>ideas</em> first — "trunk-based, tested,
+  always releasable" — makes every tool feel like a variation on a
+  theme.
+</p>
+</div>
+
+<h2 id="why">Why do it at all?</h2>
+
+<p>The short answer: <strong>small batches</strong>. The long answer:</p>
+
+<ul>
+  <li><strong>Faster feedback.</strong> A test failure five minutes after a commit is easy to fix. A test failure five days after the commit, when fifteen other commits have landed, is a detective novel.</li>
+  <li><strong>Always shippable.</strong> If every merge passes tests, you can release any commit at any time. Your "release train" collapses to a one-command deploy.</li>
+  <li><strong>Smaller merges.</strong> Frequent small merges beat rare huge merges at nearly every metric that matters — review quality, bug rate, time-to-merge.</li>
+  <li><strong>Automation substitutes for discipline.</strong> If humans can skip a step, some human eventually will. Automation doesn't.</li>
+</ul>
+
+<p>
+  The <em>State of DevOps</em> report — DORA, ran annually since 2014 —
+  consistently shows that deployment frequency, lead time for changes,
+  change failure rate, and mean time to recovery predict team
+  performance and business outcomes. Elite teams deploy many times per
+  day with &lt;15% change failure rate. Low teams deploy once per
+  quarter with &gt;60% change failure rate. The practices in this
+  tutorial are what elite teams do.
+</p>
+
+<h2 id="graph">The graph, again</h2>
+
+<p>
+  If you've done the <a href="https://www.gnu.org/software/make/manual/make.html">GNU Make</a>
+  tutorial from earlier, you already know the punchline: a pipeline is
+  <strong>a dependency graph over jobs</strong>. Each job takes inputs
+  (source code, artifacts from previous jobs, secrets) and produces
+  outputs (test results, build artifacts, deploy notifications).
+</p>
+
+<div class="code" data-lang="text">
+<pre><code>          [commit]
+             │
+             ▼
+       ┌──── lint ────┐
+       │              │
+     test-unit    test-integ
+       │              │
+       └──── build ───┘
+             │
+             ▼
+        scan / sbom
+             │
+             ▼
+         package
+             │
+             ▼
+       deploy-staging
+             │
+        (manual gate)
+             ▼
+        deploy-prod</code></pre>
+</div>
+
+<p>
+  The specific shape varies. The principle doesn't. Jenkins calls the
+  nodes "stages" (or historically "freestyle projects"), GitLab calls
+  them "jobs" with "stages" for grouping, GitHub Actions calls them
+  "jobs" inside "workflows". Different words. Same concept.
+</p>
+
+<h2 id="basic-pipeline">What's actually in a minimum pipeline?</h2>
+
+<p>A "minimum viable" CI pipeline for most projects has four stages:</p>
+
+<ol>
+  <li><strong>Lint / format.</strong> Cheap, fast, catches obvious issues before anything expensive runs.</li>
+  <li><strong>Test.</strong> Unit tests first (fast, no external deps), then integration tests (slower, need services). Fail fast on the first.</li>
+  <li><strong>Build.</strong> Compile, bundle, containerise — produce the artifact you'll deploy.</li>
+  <li><strong>Publish or deploy.</strong> Either push the artifact to a registry/store (Delivery), or actually apply it (Deployment).</li>
+</ol>
+
+<p>Add to taste: security scanning, SBOM generation, signing, notifications, preview environments.</p>
+
+<h2 id="three-tools">The three tools at a glance</h2>
+
+<table>
+<thead><tr><th></th><th>Jenkins</th><th>GitLab CI</th><th>GitHub Actions</th></tr></thead>
+<tbody>
+<tr><td>Born</td><td>2011 (Hudson since 2005)</td><td>2015</td><td>2018 GA (Nov 2019)</td></tr>
+<tr><td>Pipeline language</td><td>Groovy (or UI)</td><td>YAML</td><td>YAML</td></tr>
+<tr><td>Runs where</td><td>Self-hosted controller + agents</td><td>GitLab.com or self-hosted; runners self-hosted or managed</td><td>GitHub-hosted runners or self-hosted</td></tr>
+<tr><td>Cost model</td><td>Free; you pay for infra</td><td>Free tier + paid; runners billed per minute on SaaS</td><td>Free tier + paid; runners billed per minute</td></tr>
+<tr><td>Extensibility</td><td>1,800+ plugins; can do anything</td><td>Built-in + Docker images</td><td>Marketplace Actions — most mature third-party ecosystem</td></tr>
+<tr><td>VCS tie-in</td><td>Any (polling/webhooks)</td><td>Coupled to GitLab repos</td><td>Coupled to GitHub repos</td></tr>
+<tr><td>Ops burden</td><td>High — you're the admin</td><td>Low on SaaS, high self-hosted</td><td>Zero on SaaS</td></tr>
+</tbody>
+</table>
+
+<p>
+  In a sentence: <strong>Jenkins</strong> is a programmable automation
+  server where you host everything; <strong>GitLab CI</strong> and
+  <strong>GitHub Actions</strong> are tightly coupled to their
+  respective source-control products and designed to be effortless for
+  the 80% case.
+</p>
+
+<h2 id="when-to-use">When to use which (a rough first pass)</h2>
+
+<ul>
+  <li>Your code is on GitHub and you don't have strong reasons otherwise → <strong>GitHub Actions</strong>.</li>
+  <li>Your code is on GitLab → <strong>GitLab CI</strong>. It's superbly tightly integrated and has no real cost.</li>
+  <li>You need to build on a fleet of weird hardware, integrate with a mainframe, plug into enterprise identity, or run a 5000-job nightly → <strong>Jenkins</strong>. Nothing else has Jenkins' raw flexibility, and the plugin ecosystem covers almost any edge case.</li>
+  <li>Your code is on Bitbucket or self-hosted git → Jenkins or a SaaS like CircleCI / Buildkite. Teams often mix: Jenkins for the complex cases, GHA or GitLab for the fast path.</li>
+</ul>
+
+<p>We dedicate Chapter 12 to this decision in earnest.</p>
+
+<h2 id="terminology-drift">Terminology drift</h2>
+
+<p>Each tool uses different words for similar things. Internalise this table — we'll refer to it constantly:</p>
+
+<table>
+<thead><tr><th>Concept</th><th>Jenkins</th><th>GitLab CI</th><th>GitHub Actions</th></tr></thead>
+<tbody>
+<tr><td>Top-level file</td><td><code>Jenkinsfile</code></td><td><code>.gitlab-ci.yml</code></td><td><code>.github/workflows/*.yml</code></td></tr>
+<tr><td>One end-to-end run</td><td>Build</td><td>Pipeline</td><td>Workflow run</td></tr>
+<tr><td>Grouping of work</td><td>Stage</td><td>Stage</td><td>Job</td></tr>
+<tr><td>Unit of work</td><td>Step (within a Stage)</td><td>Job (within a Stage)</td><td>Step (within a Job)</td></tr>
+<tr><td>Runs the work</td><td>Agent / Node</td><td>Runner</td><td>Runner</td></tr>
+<tr><td>Passes files between jobs</td><td>Archive / stash</td><td>Artifact</td><td>Artifact</td></tr>
+<tr><td>Speeds up repeated runs</td><td>Cache plugins / workspaces</td><td>Cache</td><td>Cache</td></tr>
+<tr><td>External-system auth</td><td>Credentials</td><td>CI/CD variables + secrets</td><td>Secrets</td></tr>
+<tr><td>Reusable logic</td><td>Shared Library</td><td><code>include</code>, <code>extends</code></td><td>Reusable workflows, composite actions</td></tr>
+</tbody>
+</table>
+
+<p>Two things deserve special attention because the mapping <em>feels</em> simple but isn't:</p>
+
+<ul>
+  <li>Jenkins <em>Stages</em> contain <em>Steps</em>; GitLab CI <em>Stages</em> contain <em>Jobs</em>; GitHub Actions <em>Workflows</em> contain <em>Jobs</em> containing <em>Steps</em>. A "Job" in GitLab is roughly a Jenkins <em>Stage</em>.</li>
+  <li>All three can parallelise within a single logical step. The syntax differs wildly.</li>
+</ul>
+
+<h2 id="hello-world">A minimal pipeline, in all three</h2>
+
+<p>
+  To taste the differences, here's "print hello, run a shell command,
+  pass" in each tool. Don't try to understand every line — we'll
+  dissect them in their respective chapters.
+</p>
+
+<h4>Jenkinsfile (Declarative)</h4>
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkinsfile</span></div>
+<pre><code>pipeline {
+    agent any
+    stages {
+        stage('Greet') {
+            steps {
+                sh 'echo "Hello from Jenkins"'
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<h4>.gitlab-ci.yml</h4>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.gitlab-ci.yml</span></div>
+<pre><code>greet:
+  stage: build
+  script:
+    - echo "Hello from GitLab CI"</code></pre>
+</div>
+
+<h4>GitHub Actions workflow</h4>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/hello.yml</span></div>
+<pre><code>name: Hello
+on: [push]
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Hello from GitHub Actions"</code></pre>
+</div>
+
+<p>
+  Notice: GitLab and GHA are pure YAML — declarative data.
+  Jenkins is Groovy — a real programming language. That single
+  difference explains half the distinctions we'll draw.
+</p>
+
+<h2 id="core-principles">Six principles every good pipeline follows</h2>
+
+<ol>
+  <li><strong>Fast feedback.</strong> The full CI run should ideally finish in under 10 minutes. Past 20 minutes, developers start context-switching and productivity falls off a cliff.</li>
+  <li><strong>Deterministic.</strong> Two runs of the same commit give the same result. No flaky tests. No network dependencies that fail randomly. Pin tool versions.</li>
+  <li><strong>Hermetic where possible.</strong> The build doesn't reach out to the internet for dependencies mid-build. Use a lockfile, cache dependencies, use a proxy/mirror.</li>
+  <li><strong>Parallelism is built-in.</strong> Tests run in parallel; independent jobs run in parallel; only the dependency graph dictates order.</li>
+  <li><strong>Secrets are never in the repo.</strong> Ever. Use the tool's secret store; audit access.</li>
+  <li><strong>Every step leaves a log.</strong> If it didn't log, it didn't happen. Save artifacts, collect test reports, keep history.</li>
+</ol>
+
+<p>We'll reference these by number ("Principle 3 says…") throughout the tutorial.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Definitions, unambiguously</span>
+</div>
+<div class="exercise-body">
+<p>In one sentence each, define CI, CD (Delivery), and CD (Deployment). What distinguishes the second from the third?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li><strong>CI</strong>: every change merged into a shared main branch is validated by automated build + tests.</li>
+<li><strong>CD (Delivery)</strong>: every passing change is packaged into a releasable artifact; a human triggers the deploy.</li>
+<li><strong>CD (Deployment)</strong>: every passing change is automatically deployed to production.</li>
+</ul>
+<p>The difference between the two is the human gate.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Terminology mapping</span>
+</div>
+<div class="exercise-body">
+<p>A colleague on your team writes: "the Jenkins stage failed, but the GitHub Actions step passed, so the GitLab job re-ran." Translate each to the <em>same</em> word.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>All three are referring to the same concept — "a chunk of work that was scheduled to run". The neutral word is <strong>job</strong>:</p>
+<ul>
+<li>Jenkins <em>stage</em> ≈ Jenkins job in a GHA sense — a collection of steps</li>
+<li>GHA <em>step</em> is smaller — one command inside a job</li>
+<li>GitLab <em>job</em> is the right-sized unit</li>
+</ul>
+<p>The sentence is ambiguous because the words aren't comparable. You'd sharpen it as: "the Jenkins stage and the GitLab job both ran the same logic; the GHA job's individual step passed." Precision matters when you debug across tools.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Argue against your preferred tool</span>
+</div>
+<div class="exercise-body">
+<p>Whatever CI tool you like best, write three legitimate reasons someone might pick another tool instead. Forcing yourself out of defensive mode sharpens future decisions.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  No single solution. Authentic examples:
+</p>
+<ul>
+<li><strong>Against GHA:</strong> vendor lock-in to GitHub; limited private-network options; GitHub-hosted runners are slow and memory-starved for big builds.</li>
+<li><strong>Against GitLab:</strong> if your code isn't on GitLab, setting it up is a migration project; some features are paid tiers.</li>
+<li><strong>Against Jenkins:</strong> you are now a Jenkins admin. Plugins break. Groovy is an acquired taste. The LTS upgrade path can be brutal.</li>
+</ul>
+<p>Knowing your own blind spots is an engineering skill.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">DORA on your team</span>
+</div>
+<div class="exercise-body">
+<p>
+  For a project you know, estimate the four DORA metrics:
+  deployment frequency, lead time for changes (commit → prod), change
+  failure rate, mean time to recovery (MTTR). Which does a better CI/CD
+  pipeline improve most?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Deployment frequency and lead time are direct — both go up (or down,
+  for lead time) when CI/CD pipelines are fast, trustworthy, and
+  trigger automatically. Change failure rate goes down because you
+  catch problems earlier. MTTR tends to improve because reverting
+  becomes "push another commit through the same pipeline".
+</p>
+<p>
+  The weakest link for most teams is usually <em>lead time</em>: they
+  have fast CI but slow reviews, slow staging, or a weekly release
+  train. CI alone doesn't fix that — the human process does.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Inventory your pipelines</span>
+</div>
+<div class="exercise-body">
+<p>Pick a repository you have access to. In plain English, describe its pipeline: what triggers runs, what runs in parallel, what artifacts get produced, what deploys. If it doesn't have one, describe the one it <em>should</em> have.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>No "right" answer. The goal is to force you to articulate the pipeline as a graph before trying to write or improve one. You'll be surprised how often even people familiar with a repo can't answer "what runs on push to main?" precisely.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>CI = every merge is validated; CD (Delivery) = every pass is packaged; CD (Deployment) = every pass is released.</li>
+  <li>A pipeline is a dependency graph of jobs. The tools differ; the concept doesn't.</li>
+  <li>Minimum viable pipeline: lint → test → build → publish/deploy.</li>
+  <li>The three tools use different words for similar things. Learn the mapping.</li>
+  <li>Six principles: fast, deterministic, hermetic, parallel, secret-aware, observable.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="../index.html"><span class="lbl">← Prev</span><span class="ttl">Introduction</span></a>
+  <a href="02-pipeline-thinking.html" class="next"><span class="lbl">Next →</span><span class="ttl">Pipeline Thinking</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

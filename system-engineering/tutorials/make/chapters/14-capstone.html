@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14 · Capstone Project — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 14</span>
+  Capstone Project
+</h1>
+<p class="lede">
+  One last project that uses everything we've covered. Build a small
+  C library called <code>miniset</code> — a generic hash set — plus a
+  CLI that uses it, a test suite, and a release pipeline. By the end
+  you'll have a Makefile you'd be proud to ship.
+</p>
+
+<h2 id="goals">Goals</h2>
+
+<ul>
+  <li>Non-recursive Makefile (Chapter 12).</li>
+  <li>Separate <code>src/lib</code>, <code>src/bin</code>, <code>tests/</code>, <code>include/</code> trees.</li>
+  <li>Auto-dependency tracking for headers (Chapter 9).</li>
+  <li>Debug / release / asan configurations (Chapter 8).</li>
+  <li>Parallel-safe (Chapter 10).</li>
+  <li>Self-testing <code>make check</code>.</li>
+  <li>Install + uninstall respecting <code>DESTDIR</code> and <code>prefix</code>.</li>
+  <li>Source tarball + release zip.</li>
+  <li>A <code>make help</code> that prints everything above.</li>
+</ul>
+
+<h2 id="layout">Project layout</h2>
+
+<div class="code" data-lang="text">
+<pre><code>miniset/
+├── Makefile
+├── include/
+│   └── miniset.h
+├── src/
+│   ├── lib/
+│   │   ├── miniset.c
+│   │   └── hash.c
+│   └── bin/
+│       └── minisetcli.c
+├── tests/
+│   ├── test_insert.c
+│   ├── test_delete.c
+│   └── test_iter.c
+└── docs/
+    └── miniset.1</code></pre>
+</div>
+
+<p>Create the directories and stub files:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ mkdir -p miniset/{include,src/lib,src/bin,tests,docs}
+$ cd miniset</code></pre>
+</div>
+
+<h2 id="c-source">The C sources (just enough to build)</h2>
+
+<p>These are placeholders so the build system has something to compile. Substance isn't the point.</p>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">include/miniset.h</span></div>
+<pre><code>#ifndef MINISET_H
+#define MINISET_H
+
+#include &lt;stdint.h&gt;
+#include &lt;stddef.h&gt;
+
+typedef struct miniset miniset_t;
+
+miniset_t *miniset_new(void);
+void       miniset_free(miniset_t *s);
+int        miniset_insert(miniset_t *s, const char *key);
+int        miniset_contains(const miniset_t *s, const char *key);
+int        miniset_delete(miniset_t *s, const char *key);
+size_t     miniset_size(const miniset_t *s);
+
+uint32_t   miniset_hash(const char *key);
+
+#endif</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">src/lib/hash.c</span></div>
+<pre><code>#include "miniset.h"
+
+/* FNV-1a — small, good enough, same license as everything. */
+uint32_t miniset_hash(const char *key) {
+    uint32_t h = 2166136261u;
+    while (*key) { h ^= (unsigned char)*key++; h *= 16777619u; }
+    return h;
+}</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">src/lib/miniset.c</span></div>
+<pre><code>#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include "miniset.h"
+
+struct entry  { char *key; struct entry *next; };
+struct miniset { struct entry **buckets; size_t n, cap; };
+
+static const size_t CAP = 64;
+
+miniset_t *miniset_new(void) {
+    miniset_t *s = calloc(1, sizeof *s);
+    s-&gt;cap = CAP;
+    s-&gt;buckets = calloc(CAP, sizeof *s-&gt;buckets);
+    return s;
+}
+
+void miniset_free(miniset_t *s) {
+    if (!s) return;
+    for (size_t i = 0; i &lt; s-&gt;cap; i++) {
+        struct entry *e = s-&gt;buckets[i];
+        while (e) { struct entry *n = e-&gt;next; free(e-&gt;key); free(e); e = n; }
+    }
+    free(s-&gt;buckets); free(s);
+}
+
+static struct entry **find(const miniset_t *s, const char *key) {
+    size_t i = miniset_hash(key) % s-&gt;cap;
+    struct entry **p = (struct entry **)&amp;s-&gt;buckets[i];
+    while (*p &amp;&amp; strcmp((*p)-&gt;key, key) != 0) p = &amp;(*p)-&gt;next;
+    return p;
+}
+
+int miniset_insert(miniset_t *s, const char *key) {
+    struct entry **p = find(s, key);
+    if (*p) return 0;
+    struct entry *e = malloc(sizeof *e);
+    e-&gt;key = strdup(key); e-&gt;next = NULL;
+    *p = e; s-&gt;n++;
+    return 1;
+}
+
+int miniset_contains(const miniset_t *s, const char *key) {
+    return *find(s, key) != NULL;
+}
+
+int miniset_delete(miniset_t *s, const char *key) {
+    struct entry **p = find(s, key);
+    if (!*p) return 0;
+    struct entry *e = *p;
+    *p = e-&gt;next;
+    free(e-&gt;key); free(e);
+    s-&gt;n--;
+    return 1;
+}
+
+size_t miniset_size(const miniset_t *s) { return s-&gt;n; }</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">src/bin/minisetcli.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include "miniset.h"
+
+#ifndef VERSION
+#define VERSION "dev"
+#endif
+
+int main(int argc, char **argv) {
+    miniset_t *s = miniset_new();
+    for (int i = 1; i &lt; argc; i++) miniset_insert(s, argv[i]);
+    printf("miniset %s: size=%zu\n", VERSION, miniset_size(s));
+    miniset_free(s);
+    return 0;
+}</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">tests/test_insert.c</span></div>
+<pre><code>#include &lt;assert.h&gt;
+#include &lt;stdio.h&gt;
+#include "miniset.h"
+
+int main(void) {
+    miniset_t *s = miniset_new();
+    assert(miniset_insert(s, "a") == 1);
+    assert(miniset_insert(s, "a") == 0);
+    assert(miniset_insert(s, "b") == 1);
+    assert(miniset_size(s) == 2);
+    assert(miniset_contains(s, "a"));
+    assert(!miniset_contains(s, "c"));
+    miniset_free(s);
+    printf("insert: ok\n");
+    return 0;
+}</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">tests/test_delete.c</span></div>
+<pre><code>#include &lt;assert.h&gt;
+#include &lt;stdio.h&gt;
+#include "miniset.h"
+
+int main(void) {
+    miniset_t *s = miniset_new();
+    miniset_insert(s, "x");
+    assert(miniset_delete(s, "x") == 1);
+    assert(miniset_delete(s, "x") == 0);
+    assert(miniset_size(s) == 0);
+    miniset_free(s);
+    printf("delete: ok\n");
+    return 0;
+}</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">tests/test_iter.c</span></div>
+<pre><code>#include &lt;assert.h&gt;
+#include &lt;stdio.h&gt;
+#include "miniset.h"
+
+int main(void) {
+    miniset_t *s = miniset_new();
+    const char *items[] = { "red", "blue", "green" };
+    for (int i = 0; i &lt; 3; i++) miniset_insert(s, items[i]);
+    for (int i = 0; i &lt; 3; i++) assert(miniset_contains(s, items[i]));
+    miniset_free(s);
+    printf("iter: ok\n");
+    return 0;
+}</code></pre>
+</div>
+
+<h2 id="the-makefile">The Makefile</h2>
+
+<p>Now the main event. Read this top to bottom; every idiom should be something you recognise by now.</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — capstone</span></div>
+<pre><code># =====================================================================
+# miniset — capstone build
+# =====================================================================
+.DELETE_ON_ERROR:
+.SUFFIXES:
+MAKEFLAGS += --no-builtin-rules --warn-undefined-variables
+
+SHELL       := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+
+# --- project metadata ------------------------------------------------
+NAME    := miniset
+VERSION != git describe --tags --always --dirty 2&gt;/dev/null || echo dev
+LIBNAME := lib$(NAME).a
+
+# --- configuration ---------------------------------------------------
+CONFIG  ?= release
+
+CFLAGS_release := -O2 -DNDEBUG
+CFLAGS_debug   := -O0 -g
+CFLAGS_asan    := -O1 -g -fsanitize=address -fno-omit-frame-pointer
+LDFLAGS_asan   := -fsanitize=address
+
+ifeq ($(origin CFLAGS_$(CONFIG)),undefined)
+$(error Unknown CONFIG=$(CONFIG). Valid: release debug asan)
+endif
+
+# --- tools ------------------------------------------------------------
+CC      ?= cc
+AR      ?= ar
+INSTALL ?= install
+
+# --- flags ------------------------------------------------------------
+CPPFLAGS += -Iinclude -DVERSION='"$(VERSION)"'
+CFLAGS   += -std=c11 -Wall -Wextra -Wpedantic
+CFLAGS   += -MMD -MP
+CFLAGS   += $(CFLAGS_$(CONFIG))
+LDFLAGS  += $(LDFLAGS_$(CONFIG))
+LDLIBS   +=
+
+# --- layout -----------------------------------------------------------
+BLD       := build/$(CONFIG)
+
+LIB_SRC   := $(wildcard src/lib/*.c)
+LIB_OBJ   := $(patsubst src/lib/%.c,$(BLD)/lib/%.o,$(LIB_SRC))
+LIB       := $(BLD)/$(LIBNAME)
+
+BIN_SRC   := $(wildcard src/bin/*.c)
+BIN_OBJ   := $(patsubst src/bin/%.c,$(BLD)/bin/%.o,$(BIN_SRC))
+BIN       := $(BLD)/$(NAME)
+
+TEST_SRC  := $(wildcard tests/*.c)
+TEST_BIN  := $(patsubst tests/%.c,$(BLD)/tests/%,$(TEST_SRC))
+
+DEP       := $(LIB_OBJ:.o=.d) $(BIN_OBJ:.o=.d) $(TEST_BIN:=.d)
+
+# --- default / help ---------------------------------------------------
+.PHONY: all help
+.DEFAULT_GOAL := all
+all: $(BIN)                                                ## build the CLI
+
+help:                                                      ## show this help
+	@awk 'BEGIN {FS=":.*##"} /^[a-zA-Z_-]+:.*##/ { \
+	      printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@echo ""
+	@echo "Variables:"
+	@echo "  CONFIG=release|debug|asan  (current: $(CONFIG))"
+	@echo "  V=1                        verbose"
+	@echo "  prefix=/usr/local          install prefix"
+	@echo ""
+	@echo "Version:  $(VERSION)"
+
+# --- quiet vs verbose -------------------------------------------------
+Q := $(if $(V),,@)
+define log
+	@printf '  \033[1;33m%-4s\033[0m %s\n' '$(1)' '$(2)'
+endef
+
+# --- library ----------------------------------------------------------
+$(LIB): $(LIB_OBJ)
+	$(call log,AR,$@)
+	$(Q)$(AR) crs $@ $^
+
+$(BLD)/lib/%.o: src/lib/%.c | $(BLD)/lib
+	$(call log,CC,$&lt;)
+	$(Q)$(CC) $(CPPFLAGS) $(CFLAGS) -c $&lt; -o $@
+
+# --- binary -----------------------------------------------------------
+$(BIN): $(BIN_OBJ) $(LIB)
+	$(call log,LD,$@)
+	$(Q)$(CC) $(LDFLAGS) $(BIN_OBJ) $(LIB) $(LDLIBS) -o $@
+
+$(BLD)/bin/%.o: src/bin/%.c | $(BLD)/bin
+	$(call log,CC,$&lt;)
+	$(Q)$(CC) $(CPPFLAGS) $(CFLAGS) -c $&lt; -o $@
+
+# --- tests ------------------------------------------------------------
+.PHONY: check
+check: $(TEST_BIN)                                         ## build &amp; run tests
+	@pass=0; fail=0; \
+	 for t in $^; do \
+	   if "./$$t"; then pass=$$((pass+1)); \
+	   else fail=$$((fail+1)); fi; \
+	 done; \
+	 echo ""; \
+	 printf '  \033[1;32m%d passed\033[0m  \033[1;31m%d failed\033[0m\n' $$pass $$fail; \
+	 [ $$fail -eq 0 ]
+
+$(BLD)/tests/%: tests/%.c $(LIB) | $(BLD)/tests
+	$(call log,TST,$&lt;)
+	$(Q)$(CC) $(CPPFLAGS) $(CFLAGS) $&lt; $(LIB) -o $@
+
+# --- install ----------------------------------------------------------
+prefix  ?= /usr/local
+bindir  := $(prefix)/bin
+libdir  := $(prefix)/lib
+incdir  := $(prefix)/include
+mandir  := $(prefix)/share/man/man1
+DESTDIR ?=
+
+.PHONY: install uninstall
+install: $(BIN) $(LIB)                                     ## install to $(prefix)
+	$(INSTALL) -d $(DESTDIR)$(bindir) $(DESTDIR)$(libdir) \
+	             $(DESTDIR)$(incdir) $(DESTDIR)$(mandir)
+	$(INSTALL) -m 755 $(BIN)            $(DESTDIR)$(bindir)/
+	$(INSTALL) -m 644 $(LIB)            $(DESTDIR)$(libdir)/
+	$(INSTALL) -m 644 include/miniset.h $(DESTDIR)$(incdir)/
+	$(INSTALL) -m 644 docs/$(NAME).1    $(DESTDIR)$(mandir)/
+
+uninstall:                                                 ## remove installed files
+	rm -f $(DESTDIR)$(bindir)/$(NAME) \
+	      $(DESTDIR)$(libdir)/$(LIBNAME) \
+	      $(DESTDIR)$(incdir)/miniset.h \
+	      $(DESTDIR)$(mandir)/$(NAME).1
+
+# --- release ---------------------------------------------------------
+RELEASE := $(NAME)-$(VERSION)
+
+.PHONY: dist
+dist: $(RELEASE).tar.gz                                    ## source tarball
+
+$(RELEASE).tar.gz:
+	git archive --format=tar.gz --prefix=$(RELEASE)/ -o $@ HEAD
+
+# --- directory creation -----------------------------------------------
+$(BLD)/lib $(BLD)/bin $(BLD)/tests:
+	@mkdir -p $@
+
+# --- dependency files -------------------------------------------------
+-include $(DEP)
+
+# --- cleanup ----------------------------------------------------------
+.PHONY: clean distclean
+clean:                                                     ## remove build/
+	rm -rf build
+
+distclean: clean                                           ## also remove tarballs
+	rm -f *.tar.gz</code></pre>
+</div>
+
+<p>
+  That's ~130 lines of Makefile. It builds a library, a CLI, and three
+  tests, in three configurations, with per-header dependency tracking,
+  pretty output, install/uninstall, release tarballs, and a help
+  screen. I want you to feel that this is <em>manageable</em> — every
+  line is something you've seen.
+</p>
+
+<h2 id="using-it">Using it</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make help
+  all                build the CLI
+  help               show this help
+  check              build &amp; run tests
+  install            install to /usr/local
+  uninstall          remove installed files
+  dist               source tarball
+  clean              remove build/
+  distclean          also remove tarballs
+
+Variables:
+  CONFIG=release|debug|asan  (current: release)
+  V=1                        verbose
+  prefix=/usr/local          install prefix
+
+Version:  dev
+
+$ make
+  CC   src/lib/hash.c
+  CC   src/lib/miniset.c
+  AR   build/release/libminiset.a
+  CC   src/bin/minisetcli.c
+  LD   build/release/miniset
+
+$ ./build/release/miniset foo bar baz foo
+miniset dev: size=3
+
+$ make check
+  TST  tests/test_delete.c
+  TST  tests/test_insert.c
+  TST  tests/test_iter.c
+delete: ok
+insert: ok
+iter: ok
+
+  3 passed  0 failed
+
+$ make CONFIG=asan check
+  CC   src/lib/hash.c
+  CC   src/lib/miniset.c
+  AR   build/asan/libminiset.a
+  TST  tests/test_delete.c
+  TST  tests/test_insert.c
+  TST  tests/test_iter.c
+delete: ok
+insert: ok
+iter: ok
+
+  3 passed  0 failed
+
+$ make -j 8 V=1
+cc -std=c11 -Wall -Wextra -Wpedantic -MMD -MP -O2 -DNDEBUG -Iinclude ...
+...</code></pre>
+</div>
+
+<p>
+  Notice: changing <code>CONFIG</code> builds into a separate
+  <code>build/&lt;config&gt;/</code> tree, so the release and asan
+  builds coexist. Auto-deps live in their respective
+  <code>build/*/lib/*.d</code>. Parallelism scales across the whole
+  graph.
+</p>
+
+<h2 id="extensions">Suggested extensions</h2>
+
+<ol>
+  <li><strong>Shared library.</strong> Add a rule for <code>build/release/libminiset.so</code> (using <code>-fPIC -shared</code>) and an <code>SO</code> target in the default goals.</li>
+  <li><strong>Coverage.</strong> Add <code>CONFIG=coverage</code> with <code>--coverage</code>, plus a <code>make coverage</code> target that runs tests and emits an HTML report via <code>lcov</code>.</li>
+  <li><strong>Fuzzing.</strong> Add <code>CONFIG=fuzz</code> with <code>-fsanitize=fuzzer,address</code> and a <code>fuzz/</code> directory for libFuzzer entry points.</li>
+  <li><strong>Benchmark.</strong> Add a <code>make bench</code> target that compiles and runs a benchmark, dumping timings.</li>
+  <li><strong>pkg-config file.</strong> Generate and install a <code>miniset.pc</code> so downstream users can <code>pkg-config --cflags miniset</code>.</li>
+  <li><strong>CI configuration.</strong> Write a <code>.github/workflows/ci.yml</code> that runs <code>make -j check</code> in all three configurations.</li>
+</ol>
+
+<p>Each of these is a 10-30 line extension to the Makefile. Try one.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 14.1</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Type it out</span>
+</div>
+<div class="exercise-body">
+<p>Don't copy-paste. <em>Type</em> the Makefile, line by line. You'll notice idioms you glossed over reading the code. Build, test, verify output matches the transcripts above.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>No specific solution. The point is muscle memory. You'll make mistakes. When they happen, you'll learn what each piece actually does — often more than you'd have learned reading a "correct" template.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 14.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Add the shared library</span>
+</div>
+<div class="exercise-body">
+<p>Extend the Makefile to also produce <code>build/$(CONFIG)/libminiset.so</code> (or <code>.dylib</code> on macOS). Add an <code>SO</code> variable and make <code>all</code> depend on it. The library's object files should use <code>-fPIC</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>LIB_OBJ_PIC := $(patsubst src/lib/%.c,$(BLD)/lib/%.pic.o,$(LIB_SRC))
+SO := $(BLD)/$(LIBNAME:.a=.so)
+
+ifeq ($(shell uname -s),Darwin)
+  SO := $(BLD)/$(LIBNAME:.a=.dylib)
+  SOFLAGS := -dynamiclib -install_name @rpath/$(notdir $(SO))
+else
+  SOFLAGS := -shared -Wl,-soname,$(notdir $(SO))
+endif
+
+all: $(BIN) $(SO)
+
+$(SO): $(LIB_OBJ_PIC)
+	$(call log,LD,$@)
+	$(Q)$(CC) $(LDFLAGS) $(SOFLAGS) $^ -o $@
+
+$(BLD)/lib/%.pic.o: src/lib/%.c | $(BLD)/lib
+	$(call log,CC,$&lt;)
+	$(Q)$(CC) -fPIC $(CPPFLAGS) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+<p>Note: we compile library sources twice — once as <code>.o</code> for the static lib, once as <code>.pic.o</code> for the shared. Wasteful for small libs; for larger ones, you'd commit to one or the other.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 14.3</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Wire in pkg-config</span>
+</div>
+<div class="exercise-body">
+<p>Generate a <code>miniset.pc</code> from a template, and install it to <code>$(libdir)/pkgconfig/</code>. Use <code>sed</code> or <code>envsubst</code> for the substitution.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Template:</p>
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">pc</span><span class="title">miniset.pc.in</span></div>
+<pre><code>prefix=@prefix@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: miniset
+Description: Minimal hash set
+Version: @version@
+Libs: -L${libdir} -lminiset
+Cflags: -I${includedir}</code></pre>
+</div>
+<p>Makefile additions:</p>
+<div class="code" data-lang="make">
+<pre><code>PC := $(BLD)/miniset.pc
+
+$(PC): miniset.pc.in | $(BLD)
+	$(call log,GEN,$@)
+	$(Q)sed -e 's|@prefix@|$(prefix)|g' \
+	        -e 's|@version@|$(VERSION)|g' $&lt; &gt; $@
+
+install: $(PC)
+	$(INSTALL) -d $(DESTDIR)$(libdir)/pkgconfig
+	$(INSTALL) -m 644 $(PC) $(DESTDIR)$(libdir)/pkgconfig/</code></pre>
+</div>
+<p>
+  Don't forget to add <code>$(PC)</code> to the cleanup and to
+  <code>all</code>. Test with
+  <code>pkg-config --cflags miniset</code> after install.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 14.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">CI matrix</span>
+</div>
+<div class="exercise-body">
+<p>Write a <code>.github/workflows/ci.yml</code> that runs <code>make -j check</code> for each <code>CONFIG</code> in <code>[release, debug, asan]</code>, plus a lint job using <code>clang-tidy</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>name: ci
+on: [push, pull_request]
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config: [release, debug, asan]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y build-essential
+      - run: make CONFIG=${{ matrix.config }} -j $(nproc) check
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y clang-tidy
+      - run: |
+          clang-tidy --quiet \
+            $(find src include -name '*.[ch]') \
+            -- -Iinclude -std=c11</code></pre>
+</div>
+<p>No Makefile changes — the CI calls <code>make CONFIG=...</code> with the variables already supported. That's the point of a clean build system.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 14.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Flag-change detection</span>
+</div>
+<div class="exercise-body">
+<p>
+  Remember the "compile-flag change" problem? When CFLAGS changes,
+  Make doesn't rebuild because source files aren't newer. Implement
+  a <code>build/$(CONFIG)/.flags</code> stamp that triggers a full
+  rebuild when any flag changes.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>FLAG_STAMP := $(BLD)/.flags
+
+$(shell mkdir -p $(BLD); \
+        new='$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS)'; \
+        old="$$(cat $(FLAG_STAMP) 2&gt;/dev/null)"; \
+        [ "$$new" = "$$old" ] || printf '%s' "$$new" &gt; $(FLAG_STAMP))
+
+$(LIB_OBJ) $(BIN_OBJ): $(FLAG_STAMP)</code></pre>
+</div>
+<p>
+  Every <code>.o</code> now depends on the flag-stamp, which is
+  rewritten only when flags change. Switch from <code>CONFIG=release</code>
+  to <code>CONFIG=debug</code>: the stamp changes (different flags),
+  every <code>.o</code> is older than the stamp, full rebuild.
+</p>
+<p>
+  In practice we dodge this by using per-config <code>build/</code>
+  subdirectories, which is cheaper. But for a project without that
+  split, the flag stamp is worth having.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="what-next">Where to go from here</h2>
+
+<p>You now know more about Make than probably 95% of developers who use it. A few paths from here:</p>
+
+<ul>
+  <li><strong>Real projects.</strong> Volunteer to overhaul a gnarly Makefile in a project you care about. The concepts transfer.</li>
+  <li><strong>Ninja.</strong> Read the <a href="https://ninja-build.org/manual.html">Ninja manual</a>. It's Make's "modern cousin" — same mental model, different syntax, faster. You'll read it in an hour.</li>
+  <li><strong>The GNU Make manual.</strong> Now go read <a href="https://www.gnu.org/software/make/manual/make.html">the manual</a> cover to cover. After this tutorial, it'll be a breeze — and you'll pick up edge cases and quirks (hello, <code>$(guile …)</code>).</li>
+  <li><strong>Other build tools.</strong> Meson, CMake, Bazel, Buck2, Nix — each one is easier with Make as a mental anchor.</li>
+  <li><strong>Read someone else's Makefile.</strong> Clone the Linux kernel. Open <code>Makefile</code>. Read until confused. Figure out what's happening. Repeat. It will humble you, and it will make you better.</li>
+</ul>
+
+<p>
+  Make is 50 years old. It's older than most of the people using it.
+  And yet for the next 50 years, whenever someone needs to turn source
+  files into artefacts, <code>make</code> will still be the first tool
+  they try. You're part of that lineage now. Go build something.
+</p>
+
+<div class="page-nav">
+  <a href="13-50-questions.html"><span class="lbl">← Prev</span><span class="ttl">The 50 Questions</span></a>
+  <a href="../exercises.html" class="next"><span class="lbl">Next →</span><span class="ttl">All Exercises</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

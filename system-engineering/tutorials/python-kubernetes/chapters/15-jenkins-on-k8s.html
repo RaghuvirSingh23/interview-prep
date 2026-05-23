@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>15 · Jenkins on Kubernetes — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 15</span>
+  Jenkins on Kubernetes
+</h1>
+<p class="lede">
+  Jenkins and Kubernetes fit together when you stop treating Jenkins as
+  a pet VM. The controller runs as a small, persistent service; builds
+  run as disposable Pods; deployment either updates the cluster
+  directly with least-privilege RBAC or hands off desired state to
+  GitOps. This chapter is the bridge between traditional CI and the
+  Kubernetes operating model.
+</p>
+
+<h2 id="shape">The shape of Jenkins on K8s</h2>
+
+<p>A Jenkins-on-Kubernetes setup has two very different kinds of workloads.</p>
+
+<table>
+<thead><tr><th>Part</th><th>What it does</th><th>Kubernetes shape</th></tr></thead>
+<tbody>
+<tr><td>Controller</td><td>UI, job metadata, queue, plugin runtime, credentials references</td><td>One StatefulSet/Pod with a PVC</td></tr>
+<tr><td>Agent Pods</td><td>Run build stages: test, package, scan, publish</td><td>Short-lived Pods created per build</td></tr>
+<tr><td>Registry</td><td>Stores built images and cache layers</td><td>External service: ECR/GAR/ACR/Harbor/etc.</td></tr>
+<tr><td>Deployment target</td><td>Where the image ends up running</td><td>Same cluster, another cluster, or GitOps repo</td></tr>
+</tbody>
+</table>
+
+<p>The controller should not compile code, run Docker builds, or hold long-lived workspaces. It should schedule work and keep state. Agents do the heavy lifting and then disappear.</p>
+
+<div class="callout tip">
+<div class="callout-title">Production default</div>
+<p>Set the controller executor count to <code>0</code>. If a build can run on the controller, someone will eventually put CPU-heavy, secret-heavy, disk-heavy work there. Make the safe path the only path.</p>
+</div>
+
+<h2 id="install">Install the controller with Helm</h2>
+
+<p>The official Jenkins Helm chart already knows about the controller, PVC, service account, JCasC, and the Kubernetes plugin. A minimal local install looks like this:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl create namespace jenkins
+
+$ helm repo add jenkinsci https://charts.jenkins.io
+$ helm repo update
+
+$ helm upgrade --install jenkins jenkinsci/jenkins \
+    --namespace jenkins \
+    --values jenkins-values.yaml</code></pre>
+</div>
+
+<h4>A practical values file</h4>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">jenkins-values.yaml</span></div>
+<pre><code>controller:
+  numExecutors: 0
+  serviceType: ClusterIP
+
+  # In real environments, pin plugin versions and test upgrades in staging.
+  installPlugins:
+    - kubernetes
+    - workflow-aggregator
+    - git
+    - configuration-as-code
+    - credentials-binding
+    - kubernetes-cli
+
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      welcome: |
+        jenkins:
+          systemMessage: "Jenkins is managed by Helm and JCasC."
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      memory: "4Gi"
+
+agent:
+  enabled: true
+  namespace: jenkins
+  podName: default
+  workingDir: /home/jenkins/agent
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "2Gi"
+
+persistence:
+  enabled: true
+  size: 20Gi
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: jenkins</code></pre>
+</div>
+
+<p>For local exploration, port-forward the controller:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl -n jenkins port-forward svc/jenkins 8080:8080
+
+$ kubectl -n jenkins get secret jenkins \
+    -o jsonpath='{.data.jenkins-admin-password}' | base64 -d; echo</code></pre>
+</div>
+
+<p>For a real team, put the controller behind Ingress/Gateway with TLS, SSO, audit logging, backups for the PVC, and a deliberate plugin upgrade process. The Helm chart gets Jenkins running; it does not remove the need to operate Jenkins.</p>
+
+<h2 id="agents">Ephemeral agent Pods</h2>
+
+<p>The Kubernetes plugin creates a Pod for a build, runs Jenkins agent code inside it, executes the Pipeline steps, then deletes the Pod. The win is isolation: every build gets a clean filesystem, scoped resources, and its own container toolchain.</p>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkinsfile</span></div>
+<pre><code>pipeline {
+  agent {
+    kubernetes {
+      defaultContainer 'python'
+      yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: python
+      image: python:3.12-slim
+      command: ["sleep"]
+      args: ["99d"]
+      resources:
+        requests: { cpu: "250m", memory: "512Mi" }
+        limits:   {              memory: "1Gi" }
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: ["ALL"] }
+    - name: kubectl
+      image: bitnami/kubectl:latest
+      command: ["sleep"]
+      args: ["99d"]
+'''
+    }
+  }
+
+  stages {
+    stage('Test') {
+      steps {
+        sh 'python -m pip install -r requirements.txt'
+        sh 'python -m pytest -q'
+      }
+    }
+
+    stage('Inspect cluster') {
+      steps {
+        container('kubectl') {
+          sh 'kubectl get pods -n "$NAMESPACE"'
+        }
+      }
+    }
+  }
+}</code></pre>
+</div>
+
+<p>Notice the pattern: one Pod, multiple containers, shared workspace. The <code>python</code> container runs tests. The <code>kubectl</code> container has cluster tooling. You do not need one giant image with every build tool installed.</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Do not mount the host Docker socket</div>
+<p><code>/var/run/docker.sock</code> gives the build container control over the node's container runtime. In most clusters, that is effectively root on the node. Use BuildKit, a managed builder, or a registry-native build service instead.</p>
+</div>
+
+<h2 id="build-images">Build images inside the cluster</h2>
+
+<p>The old Jenkins VM pattern was: install Docker on the agent, run <code>docker build</code>, push. In Kubernetes, that usually means either privileged Docker-in-Docker or a host socket mount. Both are uncomfortable defaults.</p>
+
+<p>Modern options:</p>
+<ul>
+  <li><strong>BuildKit / Buildx Kubernetes driver</strong> — good default for new setups. Build pods run in a dedicated namespace, support cache/export, and can run rootless where the cluster supports it.</li>
+  <li><strong>Managed builders</strong> — Cloud Build, CodeBuild, ACR Tasks, Depot, etc. Jenkins triggers the build and records the result.</li>
+  <li><strong>Kaniko or maintained forks</strong> — historically common for unprivileged Dockerfile builds. Treat it as a migration topic now, not the only default.</li>
+</ul>
+
+<h4>BuildKit from a Jenkins agent</h4>
+<p>One clean design is to let Jenkins create a normal agent Pod with the Docker CLI, then point <code>buildx</code> at a BuildKit builder running in Kubernetes.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl create namespace buildkit
+
+$ docker buildx create \
+    --name kube \
+    --driver kubernetes \
+    --driver-opt namespace=buildkit,rootless=true \
+    --bootstrap
+
+$ docker buildx build \
+    --builder kube \
+    --tag registry.example.com/app:${GIT_COMMIT} \
+    --cache-to type=registry,ref=registry.example.com/app:buildcache,mode=max \
+    --cache-from type=registry,ref=registry.example.com/app:buildcache \
+    --push .</code></pre>
+</div>
+
+<p>In a locked-down cluster, pre-create the BuildKit builder with platform, node selectors, resource requests, and registry credentials. Jenkins should not need cluster-admin just to build an image.</p>
+
+<h4>Kaniko-style build stage</h4>
+<p>You will still see Kaniko in older Jenkins examples. The shape is useful to understand because the same credential and workspace ideas apply to other builders.</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Image') {
+  agent {
+    kubernetes {
+      defaultContainer 'kaniko'
+      yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:v1.24.0-debug
+      command: ["/busybox/cat"]
+      tty: true
+      volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: registry-dockerconfig
+'''
+    }
+  }
+  steps {
+    sh '''
+      /kaniko/executor \
+        --context "$WORKSPACE" \
+        --dockerfile "$WORKSPACE/Dockerfile" \
+        --destination "registry.example.com/app:${GIT_COMMIT}" \
+        --cache=true
+    '''
+  }
+}</code></pre>
+</div>
+
+<p>The important parts are independent of the builder: the registry credential is a Kubernetes Secret, the image tag is immutable, and the build Pod has only the permissions it needs.</p>
+
+<h2 id="rbac">RBAC for Jenkins</h2>
+
+<p>Jenkins has two different Kubernetes identities:</p>
+<ul>
+  <li>The <strong>controller identity</strong> creates and watches agent Pods in the Jenkins namespace.</li>
+  <li>The <strong>deployment identity</strong> updates application resources, ideally in only one target namespace.</li>
+</ul>
+
+<p>Do not bind the controller service account to <code>cluster-admin</code>. Give it a narrow Role for agent management, and give deployment jobs separate service accounts or kubeconfigs per environment.</p>
+
+<h4>Controller can manage only agent Pods</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-agent-manager
+  namespace: jenkins
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-agent-manager
+  namespace: jenkins
+subjects:
+  - kind: ServiceAccount
+    name: jenkins
+    namespace: jenkins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jenkins-agent-manager</code></pre>
+</div>
+
+<h4>Deploy job can update only one app namespace</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deployer
+  namespace: prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-deployer
+  namespace: prod
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: app-deployer
+  namespace: prod
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-deployer</code></pre>
+</div>
+
+<p>Then verify the permission before wiring a Pipeline around it:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl auth can-i patch deployments \
+    --as system:serviceaccount:prod:deployer \
+    --namespace prod</code></pre>
+</div>
+
+<h2 id="deploy">Deploy from Jenkins or hand off to GitOps?</h2>
+
+<p>There are two respectable models. Pick one deliberately.</p>
+
+<table>
+<thead><tr><th>Model</th><th>Pipeline does</th><th>Best when</th><th>Risk</th></tr></thead>
+<tbody>
+<tr><td>Jenkins deploys directly</td><td><code>helm upgrade</code>, <code>kubectl apply</code>, rollout checks</td><td>Small teams, simple envs, legacy Jenkins investment</td><td>Jenkins becomes a privileged deploy box</td></tr>
+<tr><td>Jenkins hands off to GitOps</td><td>Builds image, signs/scans, updates a manifest repo or opens PR</td><td>Multiple clusters/envs, audit-heavy orgs, platform teams</td><td>Requires GitOps discipline and repo hygiene</td></tr>
+</tbody>
+</table>
+
+<h4>Direct deploy pipeline</h4>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy') {
+  steps {
+    container('kubectl') {
+      sh '''
+        helm upgrade --install app ./chart \
+          --namespace prod \
+          --set image.repository=registry.example.com/app \
+          --set image.tag="${GIT_COMMIT}" \
+          --atomic \
+          --timeout 5m
+
+        kubectl -n prod rollout status deploy/app --timeout=5m
+      '''
+    }
+  }
+}</code></pre>
+</div>
+
+<p>This is direct and easy to understand. The tradeoff is that Jenkins credentials now change production. Protect the job with approvals, environment separation, audit logging, and a service account that cannot touch anything except the target app.</p>
+
+<h4>GitOps handoff pipeline</h4>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Promote manifest') {
+  steps {
+    sh '''
+      git clone git@github.com:example/platform-envs.git envs
+      cd envs/apps/app/overlays/prod
+      kustomize edit set image registry.example.com/app=registry.example.com/app:${GIT_COMMIT}
+      git diff
+      git commit -am "promote app ${GIT_COMMIT}"
+      git push origin main
+    '''
+  }
+}</code></pre>
+</div>
+
+<p>Argo CD or Flux sees the git change and reconciles the cluster. Jenkins owns CI and promotion intent; GitOps owns applying desired state. This is the model to prefer once there are several environments or compliance requirements.</p>
+
+<h2 id="jcasc">Jenkins Configuration as Code</h2>
+
+<p>Clicking around the Jenkins UI is fine for learning and bad for operations. JCasC makes controller configuration reviewable, repeatable, and restorable.</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">values.yaml fragment</span></div>
+<pre><code>controller:
+  JCasC:
+    defaultConfig: true
+    overwriteConfiguration: true
+    configScripts:
+      system: |
+        jenkins:
+          systemMessage: "Managed by Helm + JCasC"
+          numExecutors: 0
+          clouds:
+            - kubernetes:
+                name: "kubernetes"
+                namespace: "jenkins"
+                serverUrl: "https://kubernetes.default"
+                templates:
+                  - name: "python"
+                    label: "python"
+                    containers:
+                      - name: "python"
+                        image: "python:3.12-slim"
+                        command: "sleep"
+                        args: "99d"
+                        resourceRequestCpu: "250m"
+                        resourceRequestMemory: "512Mi"</code></pre>
+</div>
+
+<p>For day-two operations, keep a repo with:</p>
+<ul>
+  <li><code>values.yaml</code> for chart-level configuration.</li>
+  <li>JCasC snippets for clouds, security realm, authorization, credentials references, shared libraries, and global tools.</li>
+  <li>A plugin catalog or pinned <code>installPlugins</code> list.</li>
+  <li>Backup/restore runbooks for <code>$JENKINS_HOME</code>.</li>
+</ul>
+
+<div class="callout hood">
+<div class="callout-title">Plugin upgrades are releases</div>
+<p>Jenkins plugins are code running inside your controller. Test plugin updates like application deploys: staging controller, pinned versions, changelog review, rollback plan, and a PVC snapshot before production rollout.</p>
+</div>
+
+<h2 id="operating">Operating checklist</h2>
+
+<ul>
+  <li><strong>Controller:</strong> one replica, persistent volume, backups, requests/limits, probes, zero executors.</li>
+  <li><strong>Agents:</strong> short-lived Pods, resource requests, no privileged mode, no host Docker socket, minimal tool images.</li>
+  <li><strong>Credentials:</strong> store in Jenkins only when needed; prefer cloud workload identity or external secret managers for cluster access.</li>
+  <li><strong>Build output:</strong> immutable image tags, digest capture, SBOM/scanning/signing before promotion.</li>
+  <li><strong>Deployments:</strong> either least-privilege direct deploy or GitOps handoff; avoid mixing both for the same app.</li>
+  <li><strong>Audit:</strong> job history, git history, chart/JCasC history, Kubernetes audit logs for deploy service accounts.</li>
+  <li><strong>Cost:</strong> cap agent concurrency, set resource requests correctly, clean orphan Pods and stale workspaces.</li>
+</ul>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 15.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Why ephemeral agents?</span>
+</div>
+<div class="exercise-body">
+<p>Why are ephemeral Kubernetes agent Pods usually better than a small pool of long-lived Jenkins agents?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>They give each build a clean filesystem, fresh process state, scoped resources, and a toolchain matched to that job. Long-lived agents accumulate hidden state: leftover files, cached credentials, mutated tools, and unpredictable resource contention. Ephemeral agents make builds more reproducible and reduce cross-job leakage.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 15.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Multi-container pod template</span>
+</div>
+<div class="exercise-body">
+<p>Write the idea, not every line of YAML: why would you put <code>python</code>, <code>kubectl</code>, and <code>helm</code> in separate containers inside one Jenkins agent Pod?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>They share the workspace but keep toolchains isolated. The Python image stays focused on tests, the kubectl image contains only cluster tooling, and the helm image contains only chart tooling. Updating Helm does not rebuild the Python test image. The Pipeline switches containers with <code>container('helm') { ... }</code> or <code>container('kubectl') { ... }</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 15.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Replace docker-build with Kaniko</span>
+</div>
+<div class="exercise-body">
+<p>A legacy Jenkins agent runs <code>docker build -t app:$GIT_COMMIT . &amp;&amp; docker push ...</code> by mounting <code>/var/run/docker.sock</code>. What changes when replacing it with a Kaniko-style builder?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li>The build runs inside a normal container, not through the node's Docker socket.</li>
+<li>The Docker context is the Jenkins workspace path.</li>
+<li>Registry auth is mounted as a Secret, commonly under <code>/kaniko/.docker/config.json</code>.</li>
+<li>The command writes directly to the registry with <code>--destination</code>; there is no local Docker daemon image store.</li>
+<li>You should still evaluate maintained builders for new setups, because older Kaniko examples may be stale.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 15.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">RBAC for the controller</span>
+</div>
+<div class="exercise-body">
+<p>What Kubernetes permissions does the Jenkins controller need to run ephemeral agents in namespace <code>jenkins</code>? What should it not receive?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>It needs namespaced permissions to create, get, list, watch, and delete agent Pods, plus access to pod logs and exec if Pipelines use those operations. It may need to read specific Secrets used by agent Pods. It should not receive <code>cluster-admin</code>, broad Secret access across namespaces, node permissions, or permission to mutate production Deployments unless the controller service account is intentionally also the deployment identity, which is usually a mistake.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 15.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Build vs deploy split</span>
+</div>
+<div class="exercise-body">
+<p>Design a production flow where Jenkins builds the image but Argo CD deploys it. What artifacts cross the boundary?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>Jenkins tests the commit, builds the image, pushes <code>registry.example.com/app:&lt;sha&gt;</code>, captures the immutable digest, and runs scan/sign steps.</li>
+<li>Jenkins opens a PR or pushes a commit to the environment repo changing the image tag/digest in a Helm values file or Kustomize overlay.</li>
+<li>Argo CD watches the environment repo, detects the desired-state change, applies it, and reports sync/health.</li>
+<li>The artifacts crossing the boundary are the image reference/digest, provenance/SBOM/signature metadata, and the git commit in the environment repo. Jenkins does not need production cluster write access.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 15.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">JCasC + GitOps for Jenkins itself</span>
+</div>
+<div class="exercise-body">
+<p>You want Jenkins itself to be recoverable from git. What belongs in the repo, and what must stay out?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Put chart values, JCasC config, plugin versions, shared library definitions, folder/job seed definitions, RBAC manifests, NetworkPolicies, and backup/restore docs in git. Keep raw secrets, private keys, API tokens, and generated runtime state out. Store secrets in Vault/cloud secret manager/External Secrets and reference them from JCasC or Kubernetes Secret names. Back up the PVC because build history and some runtime state still live in <code>$JENKINS_HOME</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Jenkins on Kubernetes means persistent controller, ephemeral build Pods.</li>
+  <li>Install the controller with Helm, keep executors at <code>0</code>, and manage configuration with JCasC.</li>
+  <li>Use multi-container agent Pods instead of giant all-tools images.</li>
+  <li>Avoid Docker socket mounts and privileged Docker-in-Docker; prefer BuildKit, managed builders, or carefully evaluated daemonless builders.</li>
+  <li>Separate controller RBAC from deployment RBAC. Least privilege is the difference between CI and a cluster-wide deploy backdoor.</li>
+  <li>Direct Jenkins deploys are simple; Jenkins-plus-GitOps scales better for many environments and audit-heavy teams.</li>
+  <li>Operate Jenkins like a production app: backups, plugin pinning, upgrade tests, resource controls, and clear ownership.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="14-helm-gitops-operators.html"><span class="lbl">← Prev</span><span class="ttl">Helm, GitOps, Operators</span></a>
+  <a href="16-50-questions.html" class="next"><span class="lbl">Next →</span><span class="ttl">The 50 Questions</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

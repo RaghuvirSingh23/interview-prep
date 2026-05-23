@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1 · Python Refresher — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 01</span>
+  Python Refresher
+</h1>
+<p class="lede">
+  You know Python. This chapter brushes off the parts that matter for
+  automation work — type hints, error handling, comprehensions,
+  dataclasses, context managers, and a handful of idioms that separate
+  "writes Python" from "writes good Python". Skim, hit the exercises,
+  move on.
+</p>
+
+<h2 id="version">Pin your Python version</h2>
+
+<p>Use Python 3.11 or 3.12 unless something forces older. Many automation idioms (structural pattern matching, exception groups, better error messages, <code>typing.Self</code>) only land in 3.10+.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ python3 --version
+Python 3.12.3
+$ python3 -c "import sys; print(sys.version_info)"
+sys.version_info(major=3, minor=12, micro=3, releaselevel='final', serial=0)</code></pre>
+</div>
+
+<p>Manage versions with <code>pyenv</code>, <code>asdf</code>, or <code>uv python install</code>. Avoid system Python for project work — it's owned by the OS and breaks if you <code>pip install --user</code> too aggressively.</p>
+
+<h2 id="venv">Virtual environments, briefly</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ python3 -m venv .venv
+$ source .venv/bin/activate
+(.venv) $ pip install requests pyyaml
+(.venv) $ pip freeze &gt; requirements.txt
+(.venv) $ deactivate</code></pre>
+</div>
+
+<p>Or with <code>uv</code> (fast, modern):</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ uv venv
+$ source .venv/bin/activate
+$ uv pip install requests pyyaml
+$ uv pip compile pyproject.toml -o requirements.lock</code></pre>
+</div>
+
+<p><strong>Rule:</strong> one venv per project, never global, never <code>sudo pip</code>. We cover packaging in depth in Chapter 5.</p>
+
+<h2 id="types">Type hints — actually use them</h2>
+
+<p>Python is dynamic but type hints are now table stakes. They cost almost nothing, give you IDE auto-complete, and catch a class of bugs at parse time via <code>mypy</code> / <code>pyright</code>.</p>
+
+<div class="code" data-lang="python">
+<pre><code>from pathlib import Path
+
+def load_config(path: Path, strict: bool = True) -&gt; dict[str, str]:
+    """Read a config file as a flat string→string map."""
+    text = path.read_text()
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '=' not in line:
+            if strict:
+                raise ValueError(f"bad line: {line!r}")
+            continue
+        k, v = line.split('=', 1)
+        out[k.strip()] = v.strip()
+    return out</code></pre>
+</div>
+
+<p>Note <code>dict[str, str]</code> not <code>Dict[str, str]</code> — Python 3.9+. Drop the <code>from typing import Dict</code> bloat.</p>
+
+<h4>Common types you'll write</h4>
+
+<div class="code" data-lang="python">
+<pre><code>from collections.abc import Iterable, Iterator, Sequence, Mapping, Callable
+from typing import Any, Optional, Union, TypeAlias
+
+# Modern (3.10+)
+PathLike: TypeAlias = str | Path
+Result: TypeAlias = dict[str, Any]
+
+def first(items: Iterable[int]) -&gt; int | None:    # union type
+    for x in items:
+        return x
+    return None
+
+def apply(fn: Callable[[int], str], xs: Sequence[int]) -&gt; list[str]:
+    return [fn(x) for x in xs]</code></pre>
+</div>
+
+<p>Conventions:</p>
+<ul>
+  <li>Prefer <code>X | None</code> over <code>Optional[X]</code> on 3.10+.</li>
+  <li>Prefer <code>X | Y</code> over <code>Union[X, Y]</code>.</li>
+  <li>Use <code>collections.abc.Iterable</code> for "anything you can iterate over once" instead of <code>List[X]</code> when you're <em>accepting</em> a parameter.</li>
+  <li>Use <code>Sequence</code> when you need indexing but not mutation.</li>
+  <li>Reserve concrete types (<code>list</code>, <code>dict</code>) for return types or local variables.</li>
+</ul>
+
+<h2 id="dataclasses">Dataclasses</h2>
+
+<p>For "a record with named fields and no behaviour", use <code>@dataclass</code> instead of writing <code>__init__</code>, <code>__repr__</code>, <code>__eq__</code> by hand.</p>
+
+<div class="code" data-lang="python">
+<pre><code>from dataclasses import dataclass, field
+from datetime import datetime
+
+@dataclass
+class BuildResult:
+    sha:        str
+    image:      str
+    started_at: datetime
+    duration_s: float
+    success:    bool
+    artifacts:  list[str] = field(default_factory=list)
+
+r = BuildResult(
+    sha="3f2a1c0",
+    image="firmware:1.0.0",
+    started_at=datetime.utcnow(),
+    duration_s=812.4,
+    success=True,
+    artifacts=["firmware.img", "firmware.sig"],
+)
+print(r)
+# BuildResult(sha='3f2a1c0', image='firmware:1.0.0', ...)</code></pre>
+</div>
+
+<p>Variants:</p>
+<div class="code" data-lang="python">
+<pre><code>@dataclass(frozen=True)         # immutable, hashable — use as dict keys
+class Sha:
+    value: str
+
+@dataclass(slots=True)          # smaller memory, faster attribute access
+class Pixel:
+    x: int
+    y: int
+    color: str
+
+@dataclass(kw_only=True)        # force keyword arguments — call sites are clearer
+class Promotion:
+    artifact: str
+    target_channel: str
+    requested_by: str</code></pre>
+</div>
+
+<div class="callout tip">
+<div class="callout-title"><code>field(default_factory=list)</code> not <code>= []</code></div>
+<p>The classic Python gotcha: <code>def f(x=[]):</code> shares the same list across calls. Same in dataclasses — never write <code>artifacts: list[str] = []</code> as a default. Use <code>field(default_factory=list)</code>.</p>
+</div>
+
+<h2 id="errors">Errors — raise specific, catch specific</h2>
+
+<div class="code" data-lang="python">
+<pre><code># BAD — too broad, swallows real bugs
+try:
+    do_thing()
+except Exception:
+    pass
+
+# GOOD — narrow exception, narrow recovery
+try:
+    config = load_config(path)
+except FileNotFoundError:
+    log.warning("no config; using defaults")
+    config = {}
+except ValueError as e:
+    log.error("config malformed: %s", e)
+    raise SystemExit(2) from e</code></pre>
+</div>
+
+<p>Define your own exception types when a caller might want to distinguish:</p>
+<div class="code" data-lang="python">
+<pre><code>class PromotionError(Exception):
+    """Base class for all promotion errors."""
+
+class AlreadyPromotedError(PromotionError):
+    """Idempotent no-op signal — already at target channel."""
+
+class PromotionForbidden(PromotionError):
+    """Caller does not have permission to promote to this channel."""
+
+# Caller can do narrow handling:
+try:
+    promote(artifact, channel="release")
+except AlreadyPromotedError:
+    log.info("already promoted, nothing to do")
+except PromotionForbidden as e:
+    log.error("forbidden: %s", e)
+    raise SystemExit(3)</code></pre>
+</div>
+
+<h4>The <code>raise X from Y</code> pattern</h4>
+<p>Preserve the exception chain when wrapping:</p>
+<div class="code" data-lang="python">
+<pre><code>try:
+    data = json.loads(text)
+except json.JSONDecodeError as e:
+    raise PromotionError(f"manifest is not valid JSON: {e}") from e</code></pre>
+</div>
+<p>The traceback will show the original cause, which is essential for debugging.</p>
+
+<h2 id="comprehensions">Comprehensions, the right ones</h2>
+
+<div class="code" data-lang="python">
+<pre><code># list comprehension
+squares = [n * n for n in range(10)]
+
+# with filter
+positives = [x for x in numbers if x &gt; 0]
+
+# dict comprehension
+by_sha = {b.sha: b for b in builds}
+
+# set comprehension
+unique_authors = {commit.author for commit in commits}
+
+# generator expression — no list materialised, lazy
+total = sum(b.duration_s for b in builds)        # no [] inside sum()</code></pre>
+</div>
+
+<p>Two refactor cues:</p>
+<ul>
+  <li>If a <code>for</code> loop appends to a list, it's almost always a comprehension.</li>
+  <li>If you find yourself writing nested comprehensions deeper than one level, stop — extract a function. Readability matters more than density.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">Generator vs list — the <code>sum([…])</code> mistake</div>
+<p>
+  <code>sum([n*n for n in range(10**7)])</code> materialises a 10-million-item list in memory.<br>
+  <code>sum(n*n for n in range(10**7))</code> streams. Same answer, fraction of the memory. Drop the brackets when consuming with <code>sum</code>, <code>min</code>, <code>max</code>, <code>any</code>, <code>all</code>.
+</p>
+</div>
+
+<h2 id="context">Context managers</h2>
+
+<p><code>with</code> blocks make resource lifetime explicit. Use them for files, locks, connections, temp dirs — anything that needs cleanup.</p>
+
+<div class="code" data-lang="python">
+<pre><code>with open('manifest.json') as f:
+    data = json.load(f)
+# file is closed here, even if json.load raised
+
+# Multiple at once
+with open('a.txt') as a, open('b.txt') as b:
+    diff = compare(a, b)</code></pre>
+</div>
+
+<p>Write your own with <code>contextlib</code>:</p>
+<div class="code" data-lang="python">
+<pre><code>from contextlib import contextmanager
+from pathlib import Path
+import os
+
+@contextmanager
+def cd(path: Path):
+    """Temporarily chdir, restore on exit."""
+    prev = Path.cwd()
+    os.chdir(path)
+    try:
+        yield path
+    finally:
+        os.chdir(prev)
+
+with cd(Path('/tmp/build')):
+    subprocess.run(['make', '-j8'], check=True)
+# back in original cwd here</code></pre>
+</div>
+
+<h2 id="generators">Generators</h2>
+
+<p>A function with <code>yield</code> instead of <code>return</code> is a generator — produces values on demand. Use for anything streamy or memory-bound.</p>
+
+<div class="code" data-lang="python">
+<pre><code>def tail_log(path: Path) -&gt; Iterator[str]:
+    """Yield each new line as it's written, like `tail -f`."""
+    with path.open() as f:
+        f.seek(0, 2)                      # end of file
+        while True:
+            line = f.readline()
+            if line:
+                yield line.rstrip()
+            else:
+                time.sleep(0.1)
+
+for line in tail_log(Path('/var/log/build.log')):
+    if 'ERROR' in line:
+        notify(line)</code></pre>
+</div>
+
+<p>Generators are also how you process huge files without loading them:</p>
+<div class="code" data-lang="python">
+<pre><code>def parse_records(path: Path) -&gt; Iterator[dict]:
+    with path.open() as f:
+        for line in f:
+            yield json.loads(line)
+
+# 10 GB JSONL file, constant memory
+for rec in parse_records(Path('events.jsonl')):
+    process(rec)</code></pre>
+</div>
+
+<h2 id="iter-tricks">Iteration tricks worth memorising</h2>
+
+<div class="code" data-lang="python">
+<pre><code># enumerate — give me index AND value
+for i, line in enumerate(lines, start=1):
+    print(f"{i:4d}  {line}")
+
+# zip — walk multiple iterables in lockstep
+for src, dst in zip(sources, destinations, strict=True):    # 3.10+ strict=
+    copy(src, dst)
+
+# unpack — leftovers go to *rest
+first, *middle, last = ['a', 'b', 'c', 'd', 'e']
+# first='a', middle=['b','c','d'], last='e'
+
+# chain — flatten one level
+from itertools import chain
+all_files = list(chain.from_iterable(d.iterdir() for d in dirs))
+
+# groupby (NOTE: needs sorted input)
+from itertools import groupby
+items.sort(key=lambda x: x.channel)
+for channel, group in groupby(items, key=lambda x: x.channel):
+    print(channel, list(group))</code></pre>
+</div>
+
+<h2 id="match">Structural pattern matching (3.10+)</h2>
+
+<div class="code" data-lang="python">
+<pre><code>def handle_event(event: dict) -&gt; str:
+    match event:
+        case {"type": "push", "branch": "main"}:
+            return "trigger main pipeline"
+        case {"type": "push", "branch": branch} if branch.startswith("release/"):
+            return f"trigger release pipeline for {branch}"
+        case {"type": "pull_request", "action": "opened"}:
+            return "open PR pipeline"
+        case {"type": "pull_request"}:
+            return "ignore other PR events"
+        case _:
+            return f"unknown event: {event!r}"</code></pre>
+</div>
+
+<p>Cleaner than nested <code>if/elif</code> for shapes. Patterns can also match types, sequences, and class instances. Don't go wild — for two cases, <code>if</code> is still clearer.</p>
+
+<h2 id="strings">f-strings, properly</h2>
+
+<div class="code" data-lang="python">
+<pre><code>name = "world"
+msg = f"Hello, {name}!"
+
+# expressions
+r = 7
+print(f"area={3.14159*r*r:.2f}")             # area=153.94
+
+# format specs
+print(f"{42:08d}")                            # 00000042
+print(f"{0.123456:.3%}")                      # 12.346%
+print(f"{1_234_567:,}")                       # 1,234,567
+
+# !r for repr (great for log messages with surprising whitespace)
+val = "  hi  "
+log.error(f"unexpected value: {val!r}")        # unexpected value: '  hi  '
+
+# 3.8+ self-documenting
+x = 42
+print(f"{x=}")                                # x=42</code></pre>
+</div>
+
+<h2 id="logging">Logging — never <code>print</code> in real code</h2>
+
+<p>Production rule: <code>print</code> goes to stdout, no severity, no timestamps, no module name, can't be silenced. Use the standard <code>logging</code> module.</p>
+
+<div class="code" data-lang="python">
+<pre><code>import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+)
+log = logging.getLogger(__name__)
+
+log.debug("verbose detail; usually off in prod")
+log.info("normal progress")
+log.warning("something fishy but we continued")
+log.error("something failed")
+log.exception("auto-logs traceback inside an except block")</code></pre>
+</div>
+
+<p>Structured logging — for anything CI/automation, log JSON with context fields:</p>
+<div class="code" data-lang="python">
+<pre><code>import json, logging
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "ts":     self.formatTime(record),
+            "level":  record.levelname,
+            "logger": record.name,
+            "msg":    record.getMessage(),
+            **getattr(record, "extra_fields", {}),
+        })
+
+# Usage:
+log.info("promoted artifact",
+         extra={"extra_fields": {"sha": "3f2a1c0", "channel": "staging"}})</code></pre>
+</div>
+
+<p>We dive deeper in Chapter 6.</p>
+
+<h2 id="ten-idioms">Ten idioms that mark a "good" Python writer</h2>
+
+<ol>
+  <li><strong>Use <code>pathlib.Path</code>, not string paths.</strong> <code>Path('/tmp') / 'foo' / 'bar.txt'</code>.</li>
+  <li><strong>Walrus operator <code>:=</code></strong> for "compute once, test, use" — but sparingly.</li>
+  <li><strong><code>with</code> for everything that has cleanup</strong> — files, locks, sockets, temp dirs.</li>
+  <li><strong>EAFP, not LBYL.</strong> "Easier to ask forgiveness than permission" — <code>try/except</code> beats checking <code>if path.exists()</code> then opening.</li>
+  <li><strong><code>collections.defaultdict</code></strong> instead of <code>if k not in d: d[k] = …</code>.</li>
+  <li><strong><code>collections.Counter</code></strong> for histograms in one line.</li>
+  <li><strong><code>functools.lru_cache</code></strong> for memoisation.</li>
+  <li><strong><code>enum.Enum</code></strong> for fixed sets of values, not magic strings.</li>
+  <li><strong>Unpacking</strong> over indexing — <code>first, *_, last = items</code>.</li>
+  <li><strong>Comprehensions</strong> over <code>map</code>/<code>filter</code> — they read more naturally in Python.</li>
+</ol>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Type-hint a function</span>
+</div>
+<div class="exercise-body">
+<p>Add type hints to:</p>
+<div class="code" data-lang="python">
+<pre><code>def merge(a, b, prefer=None):
+    out = {}
+    out.update(a)
+    out.update(b)
+    if prefer:
+        out.update(prefer)
+    return out</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>from collections.abc import Mapping
+from typing import Any
+
+def merge(
+    a: Mapping[str, Any],
+    b: Mapping[str, Any],
+    prefer: Mapping[str, Any] | None = None,
+) -&gt; dict[str, Any]:
+    out: dict[str, Any] = {}
+    out.update(a)
+    out.update(b)
+    if prefer:
+        out.update(prefer)
+    return out</code></pre>
+</div>
+<p>Why <code>Mapping</code> not <code>dict</code> for inputs: any read-only-mappable accepts. Why <code>dict</code> for return: callers should know they get a real dict (mutable, indexable).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Comprehensions</span>
+</div>
+<div class="exercise-body">
+<p>Given <code>builds: list[BuildResult]</code>, write a one-liner that returns <code>{sha: duration}</code> only for successful builds whose duration was over 60 seconds.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>slow = {b.sha: b.duration_s for b in builds if b.success and b.duration_s &gt; 60}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Define an exception hierarchy</span>
+</div>
+<div class="exercise-body">
+<p>Design exceptions for an artifact-promotion library: a base, plus distinct subclasses for "artifact missing", "channel forbidden", "checksum mismatch". Show a caller doing narrow handling.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>class PromotionError(Exception):
+    """Base for promotion failures."""
+
+class ArtifactNotFound(PromotionError):
+    pass
+
+class ChannelForbidden(PromotionError):
+    pass
+
+class ChecksumMismatch(PromotionError):
+    def __init__(self, expected: str, actual: str):
+        super().__init__(f"checksum mismatch: expected {expected}, got {actual}")
+        self.expected = expected
+        self.actual   = actual
+
+# Caller
+try:
+    promote(name, channel="release")
+except ArtifactNotFound as e:
+    log.error("artifact missing: %s", e); raise SystemExit(2)
+except ChannelForbidden as e:
+    log.error("not allowed: %s", e); raise SystemExit(3)
+except ChecksumMismatch as e:
+    log.error("integrity check failed: %s", e); raise SystemExit(4)
+except PromotionError as e:
+    log.exception("unexpected promotion failure")
+    raise SystemExit(1)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Write a context manager</span>
+</div>
+<div class="exercise-body">
+<p>Write <code>timed("name")</code> as a context manager that logs how long the block took on exit.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>from contextlib import contextmanager
+import time, logging
+
+log = logging.getLogger(__name__)
+
+@contextmanager
+def timed(label: str):
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        log.info("%s took %.3fs", label, time.monotonic() - t0)
+
+with timed("build image"):
+    subprocess.run(["bitbake", "core-image-base"], check=True)</code></pre>
+</div>
+<p>Note <code>time.monotonic()</code> not <code>time.time()</code> — the former never goes backwards on clock adjustments.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Generator for batched processing</span>
+</div>
+<div class="exercise-body">
+<p>Write <code>batched(iterable, n)</code> that yields tuples of <code>n</code> items at a time (last tuple may be shorter). 3.12 has it built in as <code>itertools.batched</code> — write the equivalent.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>from collections.abc import Iterable, Iterator
+from typing import TypeVar
+
+T = TypeVar("T")
+
+def batched(it: Iterable[T], n: int) -&gt; Iterator[tuple[T, ...]]:
+    if n &lt; 1:
+        raise ValueError("n must be &gt;= 1")
+    buf: list[T] = []
+    for x in it:
+        buf.append(x)
+        if len(buf) == n:
+            yield tuple(buf); buf = []
+    if buf:
+        yield tuple(buf)
+
+list(batched(range(7), 3))   # [(0,1,2), (3,4,5), (6,)]</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Frozen dataclass as dict key</span>
+</div>
+<div class="exercise-body">
+<p>Why does <code>@dataclass(frozen=True)</code> let an instance be used as a dict key, while a regular dataclass doesn't? Demonstrate with a small example, including the failure.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Default dataclasses are mutable and Python forbids hashing mutable objects (their hash could change while they're in the dict, breaking lookup). <code>frozen=True</code> generates <code>__hash__</code> based on the field values and disables <code>__setattr__</code>.</p>
+<div class="code" data-lang="python">
+<pre><code>from dataclasses import dataclass
+
+@dataclass
+class M:
+    x: int
+
+@dataclass(frozen=True)
+class F:
+    x: int
+
+d = {}
+d[F(1)] = "ok"               # works
+try:
+    d[M(1)] = "fails"
+except TypeError as e:
+    print("expected:", e)    # unhashable type: 'M'</code></pre>
+</div>
+<p>Side benefit: frozen dataclasses are safer to share across threads.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.7</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Refactor with match</span>
+</div>
+<div class="exercise-body">
+<p>Rewrite using structural pattern matching:</p>
+<div class="code" data-lang="python">
+<pre><code>def parse(item):
+    if isinstance(item, dict) and item.get("kind") == "Pod":
+        return f"pod {item['metadata']['name']}"
+    elif isinstance(item, dict) and item.get("kind") == "Service":
+        return f"svc {item['metadata']['name']}"
+    elif isinstance(item, list):
+        return f"list of {len(item)}"
+    else:
+        return "unknown"</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>def parse(item) -&gt; str:
+    match item:
+        case {"kind": "Pod",     "metadata": {"name": name}}: return f"pod {name}"
+        case {"kind": "Service", "metadata": {"name": name}}: return f"svc {name}"
+        case list() as xs:                                   return f"list of {len(xs)}"
+        case _:                                              return "unknown"</code></pre>
+</div>
+<p>Reads top-down as a decision table. The <code>{...}</code> patterns also bind nested keys — no manual <code>['metadata']['name']</code> indexing.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Modern Python (3.10+) with type hints is the default. Use built-in generics (<code>list[X]</code>) and <code>X | None</code>.</li>
+  <li>Dataclasses for records; <code>frozen=True</code> for hashable; <code>field(default_factory=…)</code> for mutable defaults.</li>
+  <li>Raise specific, catch specific. Use <code>raise X from Y</code> to preserve the chain. Define a typed exception hierarchy for libraries.</li>
+  <li>Generator expressions and <code>yield</code> for streaming and memory-bound work.</li>
+  <li><code>with</code> + <code>contextlib.contextmanager</code> for any resource lifecycle.</li>
+  <li>Structural pattern matching for tag-shaped dispatch.</li>
+  <li>Stop using <code>print</code>. Use <code>logging</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="../index.html"><span class="lbl">← Prev</span><span class="ttl">Introduction</span></a>
+  <a href="02-python-toolbox.html" class="next"><span class="lbl">Next →</span><span class="ttl">Python Toolbox</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

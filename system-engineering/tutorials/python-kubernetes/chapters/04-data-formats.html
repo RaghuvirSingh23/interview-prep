@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4 · Data Formats — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 04</span>
+  Data Formats
+</h1>
+<p class="lede">
+  JSON, YAML, TOML, CSV, and the quiet middle layer between "raw
+  bytes" and "Python objects": schemas. By the end you'll know when
+  to reach for which format and how to validate untrusted input
+  without hand-rolled <code>if/else</code> trees.
+</p>
+
+<h2 id="picking">Pick the right format</h2>
+
+<table>
+<thead><tr><th>Format</th><th>Use for</th><th>Avoid for</th></tr></thead>
+<tbody>
+<tr><td>JSON</td><td>API payloads, machine-to-machine, anything you'll diff</td><td>Human-edited config (no comments)</td></tr>
+<tr><td>YAML</td><td>Human-edited config (K8s, CI), supports comments &amp; anchors</td><td>Machine-to-machine (parser surprises)</td></tr>
+<tr><td>TOML</td><td>Tool config (<code>pyproject.toml</code>, Cargo), simple flat-ish</td><td>Deeply nested data</td></tr>
+<tr><td>CSV/TSV</td><td>Tabular logs, exports, spreadsheets</td><td>Anything with structure</td></tr>
+<tr><td>JSONL</td><td>Streaming logs, append-only event data</td><td>Anything you need to update in place</td></tr>
+<tr><td>Protobuf / MessagePack</td><td>Hot-path RPC, binary efficiency</td><td>Human inspection</td></tr>
+</tbody>
+</table>
+
+<p>Heuristic: humans read it → YAML or TOML. Machines exchange it → JSON. Tabular and stream-friendly → CSV/JSONL. Need every byte → binary.</p>
+
+<h2 id="json">JSON</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import json
+from pathlib import Path
+
+# Parse
+data = json.loads('{"name": "fw", "version": "1.0"}')
+data = json.loads(Path('manifest.json').read_text())
+
+# Emit
+text = json.dumps(data, indent=2, sort_keys=True)
+Path('out.json').write_text(text)
+
+# Stream — preferred for large arrays
+with open('events.json') as f:
+    data = json.load(f)
+with open('out.json', 'w') as f:
+    json.dump(data, f, indent=2)</code></pre>
+</div>
+
+<h4>Common gotchas</h4>
+<ul>
+  <li><strong>JSON has no comments.</strong> Stop trying. If you need them, use YAML or JSONC (a JSON-with-comments superset many tools accept) or a sidecar file.</li>
+  <li><strong><code>NaN</code> and <code>Infinity</code> aren't real JSON</strong> but <code>json.dumps</code> will emit them by default. Pass <code>allow_nan=False</code> to be strict — strict JSON parsers (browsers) will reject them.</li>
+  <li><strong>Non-string dict keys</strong> get coerced to strings: <code>json.dumps({1: "a"}) == '{"1": "a"}'</code>. Round-trip is lossy.</li>
+  <li><strong>Datetime, Path, set, bytes, Decimal</strong> aren't natively serialisable. Provide <code>default=</code> or use a custom encoder.</li>
+</ul>
+
+<h4>Custom encoder for awkward types</h4>
+<div class="code" data-lang="python">
+<pre><code>import json
+from datetime import datetime, date
+from pathlib import Path
+from decimal import Decimal
+
+class SmartEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, (datetime, date)): return o.isoformat()
+        if isinstance(o, Path):              return str(o)
+        if isinstance(o, set):               return sorted(o)
+        if isinstance(o, Decimal):           return str(o)
+        return super().default(o)
+
+text = json.dumps(record, cls=SmartEncoder, indent=2)</code></pre>
+</div>
+
+<h2 id="yaml">YAML</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import yaml                              # `pip install pyyaml`
+from pathlib import Path
+
+data = yaml.safe_load(Path('config.yaml').read_text())
+
+text = yaml.safe_dump(data, sort_keys=False, indent=2)
+Path('out.yaml').write_text(text)</code></pre>
+</div>
+
+<div class="callout pitfall">
+<div class="callout-title">Always <code>safe_load</code> — never <code>load</code></div>
+<p>
+  <code>yaml.load</code> can instantiate arbitrary Python objects from
+  YAML tags (<code>!!python/object/apply:os.system</code>) — turning a
+  config file into remote-code-execution. Use <code>yaml.safe_load</code>
+  always; it produces only basic types (dict, list, str, int, float,
+  bool, None). PyYAML even prints a warning the first time you call
+  the unsafe one.
+</p>
+</div>
+
+<h4>Round-trip preservation: ruamel.yaml</h4>
+<p>PyYAML's <code>safe_load</code> + <code>safe_dump</code> loses comments and re-orders keys. When you need to <em>edit</em> a YAML file in place — say, bump a version in <code>values.yaml</code> — use <code>ruamel.yaml</code>:</p>
+
+<div class="code" data-lang="python">
+<pre><code>from ruamel.yaml import YAML
+
+yaml = YAML()
+yaml.preserve_quotes = True
+yaml.indent(mapping=2, sequence=4, offset=2)
+
+with open('values.yaml') as f:
+    data = yaml.load(f)
+
+data['image']['tag'] = 'v1.2.3'
+
+with open('values.yaml', 'w') as f:
+    yaml.dump(data, f)</code></pre>
+</div>
+
+<p>Comments, ordering, and quoting style survive the round-trip. Critical for files committed to git that humans also edit.</p>
+
+<h4>YAML quirks worth knowing</h4>
+<ul>
+  <li><strong>Norway problem.</strong> <code>NO</code>, <code>YES</code>, <code>ON</code>, <code>OFF</code> are booleans in YAML 1.1. <code>country: NO</code> becomes <code>False</code>. PyYAML follows YAML 1.1 by default. Quote strings that look booleanish: <code>country: "NO"</code>. YAML 1.2 fixed this; <code>ruamel.yaml</code> with <code>typ='safe'</code> uses 1.2.</li>
+  <li><strong>Anchors and merges.</strong> <code>&amp;name</code> defines, <code>*name</code> references, <code>&lt;&lt;: *name</code> merges. Useful for DRY in config; awkward when more than one level deep.</li>
+  <li><strong>Multiline strings.</strong> <code>|</code> preserves newlines, <code>&gt;</code> folds to spaces. Strip-control: <code>|-</code> strips trailing newline, <code>|+</code> keeps all.</li>
+  <li><strong>Implicit types</strong> bite. <code>version: 1.10</code> parses as the float <code>1.1</code>. Always quote version strings.</li>
+</ul>
+
+<div class="code" data-lang="yaml">
+<pre><code># Anchor/merge example
+defaults: &amp;defaults
+  retries: 3
+  timeout: 30
+
+prod:
+  &lt;&lt;: *defaults
+  url: https://api.example.com
+
+staging:
+  &lt;&lt;: *defaults
+  url: https://staging.example.com
+  retries: 5             # override the merged default</code></pre>
+</div>
+
+<h2 id="toml">TOML</h2>
+
+<p>The friendly cousin of INI, with proper types and nesting. <code>pyproject.toml</code> made it ubiquitous in the Python world.</p>
+
+<div class="code" data-lang="python">
+<pre><code>import tomllib                            # std-lib in 3.11+
+from pathlib import Path
+
+# Read
+data = tomllib.loads(Path('pyproject.toml').read_text())
+print(data['project']['name'])
+
+# Write — std-lib has no writer (yet); use tomli-w
+import tomli_w
+Path('out.toml').write_text(tomli_w.dumps({"project": {"name": "myapp"}}))</code></pre>
+</div>
+
+<p>TOML's strengths: comments are first-class, dates and durations are typed, structure is unambiguous. Weakness: deeply nested data is awkward (lots of <code>[a.b.c]</code> table headers).</p>
+
+<h2 id="csv">CSV</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import csv
+from pathlib import Path
+
+# Read (use DictReader — header-aware)
+with open('events.csv', newline='') as f:
+    for row in csv.DictReader(f):
+        print(row['timestamp'], row['event'])
+
+# Write
+rows = [
+    {'sha': '3f2a1c0', 'machine': 'imx8',  'success': True},
+    {'sha': '8b3d291', 'machine': 'rpi4',  'success': False},
+]
+with open('builds.csv', 'w', newline='') as f:
+    w = csv.DictWriter(f, fieldnames=rows[0].keys())
+    w.writeheader()
+    w.writerows(rows)</code></pre>
+</div>
+
+<p>Two iron rules:</p>
+<ul>
+  <li><strong>Open with <code>newline=''</code></strong>. Without it, <code>csv</code> duplicates line endings on Windows.</li>
+  <li><strong>For anything serious, use <code>pandas</code> or <code>polars</code></strong>. Quoting, escaping, and dialects (Excel vs Unix) are full of edge cases.</li>
+</ul>
+
+<h2 id="jsonl">JSONL — one JSON per line</h2>
+
+<p>The "everyone loves it for streaming" format:</p>
+
+<div class="code" data-lang="python">
+<pre><code># Read
+def read_jsonl(path):
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+# Write
+def write_jsonl(path, records):
+    with open(path, 'w') as f:
+        for r in records:
+            f.write(json.dumps(r, separators=(',', ':')))
+            f.write('\n')</code></pre>
+</div>
+
+<p>Append-friendly, line-tool-friendly (<code>grep</code>, <code>jq</code>), constant memory. Used heavily for log files, ML datasets, event streams.</p>
+
+<h2 id="schemas">Schemas — validate untrusted input</h2>
+
+<p>Hand-rolling <code>if "field" not in data: …</code> trees doesn't scale and misses errors. Three good options.</p>
+
+<h4>1 · Pydantic v2 — the modern default</h4>
+
+<div class="code" data-lang="python">
+<pre><code>from pydantic import BaseModel, Field, field_validator
+from datetime import datetime
+from typing import Literal
+
+class Manifest(BaseModel):
+    sha:        str           = Field(..., pattern=r'^[0-9a-f]{40}$')
+    machine:    Literal['imx8', 'rpi4', 'qemu']
+    started_at: datetime
+    duration_s: float         = Field(..., ge=0)
+    success:    bool
+    artifacts:  list[str]     = []
+
+    @field_validator('artifacts')
+    @classmethod
+    def no_dupes(cls, v):
+        if len(set(v)) != len(v):
+            raise ValueError('artifacts contains duplicates')
+        return v
+
+# Parse + validate
+m = Manifest.model_validate(json.loads(Path('manifest.json').read_text()))
+print(m.sha, m.duration_s)
+
+# Emit JSON
+Path('out.json').write_text(m.model_dump_json(indent=2))</code></pre>
+</div>
+
+<p>What you get: type coercion (string ISO dates → datetime), regex / range validation, custom validators, automatic JSON Schema, structured errors. Fast (Pydantic v2 is Rust-backed) and well-known across the ecosystem.</p>
+
+<h4>2 · dataclasses-json or msgspec — leaner</h4>
+
+<p><code>msgspec</code> is the speed king for high-volume parsing. <code>dataclasses-json</code> sticks closer to stdlib idioms. Both are fine for cases where Pydantic is overkill.</p>
+
+<h4>3 · jsonschema — when the schema is the contract</h4>
+
+<p>Use when you're consuming someone else's published JSON Schema, or when you want the schema in a separate <code>.json</code> file checked into git for non-Python consumers:</p>
+
+<div class="code" data-lang="python">
+<pre><code>import jsonschema
+from pathlib import Path
+
+schema = json.loads(Path('manifest.schema.json').read_text())
+data   = json.loads(Path('manifest.json').read_text())
+
+jsonschema.validate(data, schema)  # raises ValidationError if invalid</code></pre>
+</div>
+
+<h2 id="config-pattern">Config-loader pattern</h2>
+
+<p>Goal: load user-edited YAML, validate it, present a typed object to the rest of the program. Pydantic does the heavy lifting:</p>
+
+<div class="code" data-lang="python">
+<pre><code>from pydantic import BaseModel, Field
+from pathlib import Path
+import yaml
+
+class RegistryConfig(BaseModel):
+    url:   str
+    user:  str
+    token: str = Field(..., min_length=8)
+
+class AppConfig(BaseModel):
+    name:     str
+    channels: list[str] = ['dev', 'staging', 'release']
+    registry: RegistryConfig
+    debug:    bool = False
+
+def load_config(path: Path) -&gt; AppConfig:
+    raw = yaml.safe_load(path.read_text())
+    return AppConfig.model_validate(raw)
+
+cfg = load_config(Path('app.yaml'))
+print(cfg.registry.url)</code></pre>
+</div>
+
+<p>One source of truth for both <em>structure</em> and <em>defaults</em>. Misspelled keys, wrong types, missing fields — all caught at load time with clear errors.</p>
+
+<h2 id="env-config">Layered config: file → env → CLI</h2>
+
+<p>Real apps need multi-source config. Pattern: defaults from a file, override with env vars, override with CLI flags. Use <code>pydantic-settings</code>:</p>
+
+<div class="code" data-lang="python">
+<pre><code>from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+
+class Settings(BaseSettings):
+    nexus_url:   str = "https://nexus.example.com"
+    nexus_token: str = ""
+    log_level:   str = "INFO"
+    max_workers: int = 4
+
+    model_config = SettingsConfigDict(
+        env_file=".env",                    # if present
+        env_prefix="PROMOTE_",              # PROMOTE_NEXUS_URL etc.
+        case_sensitive=False,
+    )
+
+s = Settings()
+print(s.nexus_url, s.max_workers)</code></pre>
+</div>
+
+<p>Precedence (highest to lowest): explicit constructor args → env vars → <code>.env</code> file → defaults. Standard for 12-factor apps.</p>
+
+<h2 id="binary">Binary formats — quick mention</h2>
+
+<p>For embedded work you'll occasionally hit:</p>
+
+<ul>
+  <li><strong>MessagePack</strong> — JSON-shaped but binary; <code>pip install msgpack</code>. Half the size, much faster.</li>
+  <li><strong>Protobuf</strong> — schema-driven, language-agnostic, used heavily in gRPC.</li>
+  <li><strong>FlatBuffers</strong> / <strong>Cap'n Proto</strong> — zero-copy reads, niche.</li>
+  <li><strong>CBOR</strong> — RFC-standard binary JSON, used in IoT.</li>
+</ul>
+
+<p>For most automation work, JSON or YAML is fine. Reach for binary only when you're moving GBs or running on constrained hardware.</p>
+
+<h2 id="hands-on">Hands-on: a release-notes generator</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · YAML in, Markdown out</div>
+<div class="hands-on-body">
+<p>Reads a <code>changelog.yaml</code>, validates with Pydantic, emits release notes:</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">changelog.yaml</span></div>
+<pre><code>version: "1.4.0"
+date: 2026-04-23
+sections:
+  - title: Added
+    items:
+      - "Support for iMX8MP wide-temp variant."
+      - "OTA delta-update for &gt;100 MB images."
+  - title: Fixed
+    items:
+      - "U-Boot env corruption on power-cut during update (CVE-2026-1234)."
+  - title: Changed
+    items:
+      - "Bumped kernel to 6.6.30 LTS."</code></pre>
+</div>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">scripts/notes.py</span></div>
+<pre><code>#!/usr/bin/env python3
+from pathlib import Path
+from datetime import date
+import sys, yaml
+from pydantic import BaseModel, Field
+
+class Section(BaseModel):
+    title: str
+    items: list[str] = Field(..., min_length=1)
+
+class Changelog(BaseModel):
+    version:  str = Field(..., pattern=r'^\d+\.\d+\.\d+$')
+    date:     date
+    sections: list[Section]
+
+def render(c: Changelog) -&gt; str:
+    out = [f"# v{c.version} — {c.date.isoformat()}\n"]
+    for s in c.sections:
+        out.append(f"## {s.title}")
+        for item in s.items:
+            out.append(f"- {item}")
+        out.append("")
+    return "\n".join(out)
+
+def main(path: Path) -&gt; int:
+    raw = yaml.safe_load(path.read_text())
+    c = Changelog.model_validate(raw)
+    print(render(c))
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main(Path(sys.argv[1])))</code></pre>
+</div>
+
+<p>Run: <code>./notes.py changelog.yaml &gt; RELEASE_NOTES.md</code>. The Pydantic model rejects: missing fields, wrong types, malformed version strings, empty sections. The whole "validate untrusted YAML" pattern in 25 lines.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">JSON gotcha</span>
+</div>
+<div class="exercise-body">
+<p>What's wrong with this and how do you fix it?</p>
+<div class="code" data-lang="python">
+<pre><code>data = {"version": "1.0", "build_time": datetime.now()}
+text = json.dumps(data)</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>datetime</code> isn't JSON-serialisable. Either pass <code>default=str</code> for a quick fix, or use a custom encoder, or convert before dumping:</p>
+<div class="code" data-lang="python">
+<pre><code>data["build_time"] = data["build_time"].isoformat()
+text = json.dumps(data)
+# or
+text = json.dumps(data, default=str)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Norway problem</span>
+</div>
+<div class="exercise-body">
+<p>What does this print, and why?</p>
+<div class="code" data-lang="python">
+<pre><code>import yaml
+print(yaml.safe_load("country: NO"))
+print(yaml.safe_load("version: 1.10"))</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>{'country': False}
+{'version': 1.1}</code></pre>
+</div>
+<p>YAML 1.1 implicit typing: <code>NO</code> is a boolean false, <code>1.10</code> is a float. Quote strings: <code>country: "NO"</code>, <code>version: "1.10"</code>. Or switch to a YAML 1.2 parser.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Pydantic model for K8s-like manifest</span>
+</div>
+<div class="exercise-body">
+<p>Write a Pydantic model that validates this minimal Pod-like spec, requiring a name (DNS-safe), at least one container, and only known restart policies:</p>
+<div class="code" data-lang="yaml">
+<pre><code>name: my-pod
+restart: Always
+containers:
+  - name: app
+    image: nginx:1.27
+    ports: [80]</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>from pydantic import BaseModel, Field
+from typing import Literal
+
+class Container(BaseModel):
+    name:  str   = Field(..., pattern=r'^[a-z][a-z0-9-]{0,62}$')
+    image: str
+    ports: list[int] = []
+
+class PodLike(BaseModel):
+    name:       str   = Field(..., pattern=r'^[a-z][a-z0-9-]{0,252}[a-z0-9]$')
+    restart:    Literal['Always', 'OnFailure', 'Never'] = 'Always'
+    containers: list[Container] = Field(..., min_length=1)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">In-place YAML edit preserving comments</span>
+</div>
+<div class="exercise-body">
+<p>Bump the <code>image.tag</code> field in this <code>values.yaml</code> from <code>v1.0.0</code> to <code>v1.1.0</code> while preserving every comment and the original key order:</p>
+<div class="code" data-lang="yaml">
+<pre><code># App settings
+image:
+  repository: registry.example.com/myapp
+  tag: v1.0.0          # bumped weekly
+replicas: 3</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>from ruamel.yaml import YAML
+from pathlib import Path
+
+yaml = YAML()
+yaml.preserve_quotes = True
+
+p = Path('values.yaml')
+with p.open() as f:
+    data = yaml.load(f)
+
+data['image']['tag'] = 'v1.1.0'
+
+with p.open('w') as f:
+    yaml.dump(data, f)</code></pre>
+</div>
+<p>PyYAML's <code>safe_load</code> + <code>safe_dump</code> would erase the comment. <code>ruamel.yaml</code> preserves it.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">JSONL streaming aggregation</span>
+</div>
+<div class="exercise-body">
+<p>Given a 10 GB JSONL file of events with shape <code>{"ts": "...", "type": "X", "ms": 42}</code>, compute count and average <code>ms</code> per event type, in constant memory.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import json
+from collections import defaultdict
+from pathlib import Path
+
+counts: dict[str, int] = defaultdict(int)
+totals: dict[str, float] = defaultdict(float)
+
+with Path('events.jsonl').open() as f:
+    for line in f:
+        if not line.strip():
+            continue
+        e = json.loads(line)
+        t = e['type']
+        counts[t] += 1
+        totals[t] += e['ms']
+
+for t in sorted(counts):
+    print(f"{t:&lt;20} n={counts[t]:&gt;8}  avg={totals[t]/counts[t]:.2f}")</code></pre>
+</div>
+<p>Streaming line-by-line + accumulators. Constant memory regardless of file size.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>JSON for machines, YAML for humans, TOML for tool config, CSV/JSONL for tabular/streaming.</li>
+  <li>YAML: always <code>safe_load</code>; use <code>ruamel.yaml</code> for comment-preserving in-place edits; quote anything ambiguous to avoid the Norway problem.</li>
+  <li>JSON: pass <code>default=</code> or use a custom encoder for non-trivial types; pass <code>allow_nan=False</code> for strict output.</li>
+  <li>For untrusted input, validate with Pydantic v2 — coercion, regex, range checks, structured errors out of the box.</li>
+  <li>Layered config: <code>pydantic-settings</code> stacks defaults, <code>.env</code>, env vars, and CLI flags.</li>
+  <li>JSONL is the streaming workhorse — pair with generators for constant-memory pipelines.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="03-http-and-apis.html"><span class="lbl">← Prev</span><span class="ttl">HTTP &amp; APIs</span></a>
+  <a href="05-clis-and-packaging.html" class="next"><span class="lbl">Next →</span><span class="ttl">CLIs &amp; Packaging</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

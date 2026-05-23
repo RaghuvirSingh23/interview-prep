@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>7 · GitLab CI — Fundamentals — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 07</span>
+  GitLab CI — Fundamentals
+</h1>
+<p class="lede">
+  GitLab CI is the "batteries-included" option. Your CI config lives
+  in a single YAML file, runners handle the work, and the whole thing
+  is tightly integrated with GitLab's git hosting, merge requests,
+  environments, and container registry. This chapter covers the
+  fundamentals; the next one goes deep.
+</p>
+
+<h2 id="architecture">Architecture at a glance</h2>
+
+<div class="code" data-lang="text">
+<pre><code>  ┌────────────────────────────────┐
+  │    GitLab (SaaS or self-hosted)│
+  │  - stores repos &amp; MRs          │
+  │  - stores .gitlab-ci.yml       │
+  │  - schedules pipelines         │
+  │  - shows results in UI         │
+  └────────────┬───────────────────┘
+               │ HTTPS long-poll
+               │
+       ┌───────┴───────┬───────────┐
+       │               │           │
+   [Runner A]      [Runner B]  [Runner C]
+    shared          group        project
+    runner          runner       runner</code></pre>
+</div>
+
+<p>
+  GitLab itself holds the code, schedules the pipeline, and renders
+  the UI. <strong>Runners</strong> are the worker processes that run
+  jobs; they poll GitLab for work, receive jobs, execute them, and
+  upload logs and artifacts back.
+</p>
+
+<p>Three scopes of runner:</p>
+<ul>
+  <li><strong>Shared runners</strong> — provisioned by GitLab (on <code>gitlab.com</code>, you get generous free minutes); available to any project on the instance.</li>
+  <li><strong>Group runners</strong> — registered to a GitLab group; available to any project in that group.</li>
+  <li><strong>Project (specific) runners</strong> — registered to a single project. Useful for projects with unique hardware or secrets.</li>
+</ul>
+
+<p>Runners can execute jobs in multiple <strong>executors</strong>:</p>
+<ul>
+  <li><strong>Shell</strong> — runs commands directly on the runner host. Simple, stateful, dangerous (jobs share state).</li>
+  <li><strong>Docker</strong> — each job runs in a fresh container. The default; what you usually want.</li>
+  <li><strong>Kubernetes</strong> — each job runs as a K8s pod. For scale.</li>
+  <li><strong>SSH</strong>, <strong>VirtualBox</strong>, <strong>Parallels</strong>, <strong>Custom</strong> — niche.</li>
+</ul>
+
+<p>On <code>gitlab.com</code>, the shared runners are Linux containers, with macOS and Windows Docker runners available on paid tiers.</p>
+
+<h2 id="hello">Your first pipeline</h2>
+
+<p>Create <code>.gitlab-ci.yml</code> in the root of any GitLab project:</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.gitlab-ci.yml</span></div>
+<pre><code>stages:
+  - test
+  - build
+
+unit-tests:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - pip install pytest
+    - pytest tests/
+
+build-artifact:
+  stage: build
+  image: alpine:3.19
+  script:
+    - mkdir -p dist
+    - echo "release $(date -u)" &gt; dist/version.txt
+    - tar czf dist/app.tar.gz src/ README.md
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week</code></pre>
+</div>
+
+<p>Commit + push. Go to <strong>Build → Pipelines</strong> in GitLab's UI. A pipeline has started. Click in, you'll see two stages, each with a job, with live log output.</p>
+
+<h2 id="concepts">The three first-class concepts</h2>
+
+<table>
+<thead><tr><th>Concept</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><strong>Pipeline</strong></td><td>One end-to-end run for a given commit or trigger. Contains stages and jobs.</td></tr>
+<tr><td><strong>Stage</strong></td><td>A group of jobs that can run in parallel. Stages run sequentially — every job in stage N finishes before stage N+1 starts (unless you use <code>needs</code>).</td></tr>
+<tr><td><strong>Job</strong></td><td>A unit of work. The top-level keys of <code>.gitlab-ci.yml</code> that aren't reserved are jobs.</td></tr>
+</tbody>
+</table>
+
+<p>The default stages are <code>.pre</code>, <code>build</code>, <code>test</code>, <code>deploy</code>, <code>.post</code>. Override with the top-level <code>stages:</code> list.</p>
+
+<h2 id="job-anatomy">A job, block by block</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>unit-tests:                      # &lt;-- job name
+  stage: test                    # which stage it belongs to
+  image: python:3.11-slim        # docker image to run in
+  services:                      # additional containers
+    - postgres:16
+  variables:                     # env vars for the job
+    POSTGRES_DB: testdb
+  before_script:                 # runs before `script`
+    - pip install -r requirements.txt
+  script:                        # the main commands (required)
+    - pytest --junitxml=report.xml
+  after_script:                  # runs after `script` (even on failure)
+    - echo "cleanup"
+  rules:                         # when to run this job
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  timeout: 20 minutes            # kill job if it runs longer
+  retry: 1                       # retry on failure
+  artifacts:
+    when: always                 # upload even on failure
+    reports:
+      junit: report.xml
+    paths:
+      - coverage/
+    expire_in: 7 days
+  cache:
+    key:
+      files: [requirements.txt]
+    paths: [.cache/pip/]
+  allow_failure: false           # if true, failure doesn't fail the pipeline
+  tags:                          # pick runners with these tags
+    - docker
+    - linux</code></pre>
+</div>
+
+<p>Memorise the shape; we'll meet each of these repeatedly.</p>
+
+<h2 id="variables">Variables</h2>
+
+<p>Variables can be set at three levels (inner wins):</p>
+<ol>
+  <li><strong>Instance/group/project</strong> — via GitLab UI (Settings → CI/CD → Variables). Can be masked, protected, or file-type.</li>
+  <li><strong>Top-level <code>variables:</code></strong> — pipeline-wide.</li>
+  <li><strong>Job-level <code>variables:</code></strong> — job-scoped, overrides higher-level.</li>
+</ol>
+
+<div class="code" data-lang="yaml">
+<pre><code>variables:
+  NODE_VERSION: "20"
+  CACHE_DIR: ".cache"
+
+unit-tests:
+  variables:
+    NODE_VERSION: "18"            # override for this job
+  script: ["node --version"]</code></pre>
+</div>
+
+<p>Predefined variables are where GitLab really shines. A huge set of them is exposed:</p>
+
+<table>
+<thead><tr><th>Variable</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td><code>$CI_COMMIT_SHA</code></td>        <td>Full commit SHA</td></tr>
+<tr><td><code>$CI_COMMIT_SHORT_SHA</code></td>  <td>First 8 chars</td></tr>
+<tr><td><code>$CI_COMMIT_REF_NAME</code></td>   <td>Branch or tag name</td></tr>
+<tr><td><code>$CI_COMMIT_TAG</code></td>        <td>Tag name (empty if not a tag build)</td></tr>
+<tr><td><code>$CI_COMMIT_MESSAGE</code></td>    <td>Full commit message</td></tr>
+<tr><td><code>$CI_PIPELINE_ID</code></td>       <td>Unique pipeline ID</td></tr>
+<tr><td><code>$CI_PIPELINE_URL</code></td>      <td>Link to the pipeline</td></tr>
+<tr><td><code>$CI_PIPELINE_SOURCE</code></td>   <td>push, merge_request_event, schedule, web, api, …</td></tr>
+<tr><td><code>$CI_PROJECT_ID</code></td>        <td>Numeric project ID</td></tr>
+<tr><td><code>$CI_PROJECT_PATH</code></td>      <td><code>group/project</code></td></tr>
+<tr><td><code>$CI_PROJECT_NAME</code></td>      <td>Bare project name</td></tr>
+<tr><td><code>$CI_MERGE_REQUEST_IID</code></td> <td>MR number (in MR pipelines)</td></tr>
+<tr><td><code>$CI_DEFAULT_BRANCH</code></td>    <td>Usually <code>main</code></td></tr>
+<tr><td><code>$CI_REGISTRY</code></td>          <td>URL of the per-project container registry</td></tr>
+<tr><td><code>$CI_REGISTRY_IMAGE</code></td>    <td><code>registry.gitlab.com/group/project</code></td></tr>
+<tr><td><code>$CI_REGISTRY_USER</code></td>     <td><code>gitlab-ci-token</code></td></tr>
+<tr><td><code>$CI_JOB_TOKEN</code></td>         <td>Short-lived token for per-job auth (use as a password)</td></tr>
+</tbody>
+</table>
+
+<p>The official list has ~80 more. Ctrl-F-search when you need one.</p>
+
+<h2 id="script">script / before_script / after_script</h2>
+
+<p>Each is a list of commands run by the runner's shell. Default shell: <code>sh</code> in Docker executors; your login shell on shell executors.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>test:
+  before_script:
+    - apt-get update -qq &amp;&amp; apt-get install -y libpq-dev
+    - pip install -r requirements.txt
+  script:
+    - pytest --cov
+  after_script:
+    - rm -rf .tox/</code></pre>
+</div>
+
+<p>Each line is a separate command but they <em>do</em> share a shell — <code>before_script</code> env vars persist into <code>script</code>, unlike Jenkins. That simplifies things considerably.</p>
+
+<p>Failure semantics: if any line in <code>script</code> fails, the job fails and subsequent lines are skipped. <code>after_script</code> runs no matter what.</p>
+
+<h2 id="artifacts">Artifacts and caches</h2>
+
+<h4>Artifacts</h4>
+<div class="code" data-lang="yaml">
+<pre><code>build:
+  script: [make dist]
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+    when: on_success            # always / on_success / on_failure
+
+deploy:
+  needs: [build]                # auto-fetches build's artifacts
+  script: ["./deploy.sh dist/"]</code></pre>
+</div>
+
+<p>Key point: jobs in a later stage automatically receive artifacts from <em>all</em> earlier-stage jobs unless you use <code>needs:</code> which makes the dependency explicit.</p>
+
+<h4>Caches</h4>
+<div class="code" data-lang="yaml">
+<pre><code>default:
+  cache:
+    key:
+      files: [package-lock.json]
+    paths:
+      - node_modules/
+      - .npm/
+    policy: pull-push            # pull-push | pull | push</code></pre>
+</div>
+
+<p>Cache key based on the lockfile means: same lockfile = same cache, different lockfile = new cache. <code>policy: pull</code> lets a job read but not write — useful when many jobs share one warm cache.</p>
+
+<h4>Reports (typed artifacts)</h4>
+<div class="code" data-lang="yaml">
+<pre><code>test:
+  script: [pytest --cov --junitxml=junit.xml --cov-report=cobertura.xml]
+  artifacts:
+    reports:
+      junit: junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: cobertura.xml</code></pre>
+</div>
+
+<p>GitLab understands report types and shows them inline in MRs (test summaries, coverage deltas). Supported types include <code>junit</code>, <code>cobertura</code>, <code>sast</code>, <code>container_scanning</code>, <code>dependency_scanning</code>, <code>dast</code>, <code>license_scanning</code>, <code>terraform</code>, <code>requirements</code>.</p>
+
+<h2 id="rules">rules — when jobs run</h2>
+
+<p>Classic approach — <code>only</code> and <code>except</code> keywords. Modern approach — <code>rules</code>:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>deploy-staging:
+  script: ["./deploy.sh staging"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - when: never                       # default: don't run</code></pre>
+</div>
+
+<p>Rules evaluate top-to-bottom; first match wins. Each rule can set:</p>
+<ul>
+  <li><code>if:</code> — expression with CI variables and comparison operators.</li>
+  <li><code>changes:</code> — only if given paths changed.</li>
+  <li><code>exists:</code> — only if a file exists.</li>
+  <li><code>when:</code> — <code>on_success</code>, <code>always</code>, <code>never</code>, <code>manual</code>, <code>delayed</code>.</li>
+  <li><code>allow_failure:</code> — true/false.</li>
+</ul>
+
+<p>Deep dive in Chapter 8.</p>
+
+<h2 id="env">Environments &amp; deploys</h2>
+
+<p>Mark a job as deploying to a named environment:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>deploy-staging:
+  stage: deploy
+  script: ["./deploy.sh staging"]
+  environment:
+    name: staging
+    url: https://staging.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-prod:
+  stage: deploy
+  script: ["./deploy.sh prod"]
+  environment:
+    name: production
+    url: https://example.com
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual</code></pre>
+</div>
+
+<p>GitLab tracks every deploy to every environment. Under Operate → Environments you can see who deployed what to where, link to the URL, rollback to a previous release, see a deploy history per environment.</p>
+
+<p><code>when: manual</code> makes the job a button in the pipeline UI — nobody deploys to prod automatically.</p>
+
+<h2 id="services">Services (companion containers)</h2>
+
+<p>Run supporting containers alongside your job — e.g. a real Postgres for integration tests:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>integration-tests:
+  image: python:3.11
+  services:
+    - name: postgres:16
+      alias: db
+  variables:
+    POSTGRES_PASSWORD: secret
+    DATABASE_URL: "postgresql://postgres:secret@db:5432/postgres"
+  script:
+    - pip install -r requirements.txt
+    - pytest tests/integration/</code></pre>
+</div>
+
+<p>The <code>db</code> alias is the hostname your job's container reaches Postgres on. This is a massive quality-of-life feature — no tearing up docker-compose for tests.</p>
+
+<h2 id="needs">needs — the DAG escape</h2>
+
+<p>Default: stages enforce strict ordering. Add <code>needs:</code> and a job skips to front-of-line as soon as its named prereqs are done:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>stages: [lint, test, build, deploy]
+
+lint:        { stage: lint,  script: [npm run lint] }
+test-unit:   { stage: test,  script: [npm test], needs: [] }   # starts immediately
+test-integ:  { stage: test,  script: [./integ.sh], needs: [lint] }
+build:       { stage: build, script: [npm run build], needs: [test-unit, test-integ] }
+deploy:      { stage: deploy, script: [./deploy.sh], needs: [build] }</code></pre>
+</div>
+
+<p><code>needs: []</code> means "no dependencies, go now". Otherwise list specific jobs. This turns a stages waterfall into a DAG — big wall-clock wins for wide pipelines. More in Chapter 8.</p>
+
+<h2 id="hands-on">Hands-on: a full mini pipeline</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · real .gitlab-ci.yml</div>
+<div class="hands-on-body">
+<p>Create a new GitLab project (the free <code>gitlab.com</code> tier is fine). Add this file at the repo root:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.gitlab-ci.yml</span></div>
+<pre><code>stages: [lint, test, build]
+
+default:
+  image: python:3.11-slim
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip"
+
+cache:
+  key:
+    files: [requirements.txt]
+  paths:
+    - .pip/
+    - .venv/
+
+.setup: &amp;setup
+  before_script:
+    - python -m venv .venv
+    - . .venv/bin/activate
+    - pip install -r requirements.txt
+
+lint:
+  stage: lint
+  &lt;&lt;: *setup
+  script:
+    - ruff check src/ tests/
+
+test:
+  stage: test
+  needs: [lint]
+  &lt;&lt;: *setup
+  script:
+    - pytest --junitxml=report.xml --cov=src --cov-report=xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+      coverage_report: { coverage_format: cobertura, path: coverage.xml }
+
+build:
+  stage: build
+  needs: [test]
+  &lt;&lt;: *setup
+  script:
+    - python -m build
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days</code></pre>
+</div>
+<p>Create a minimal Python project alongside (<code>src/hello.py</code>, <code>tests/test_hello.py</code>, <code>requirements.txt</code> with <code>pytest</code>, <code>ruff</code>, <code>coverage[toml]</code>, <code>build</code>). Push. Watch the pipeline run on gitlab.com's shared runners.</p>
+<p>Things to click on after the run:</p>
+<ul>
+<li>The pipeline graph view — drag the stages around.</li>
+<li>The test report tab (populated by <code>junit</code>).</li>
+<li>The coverage badge in project Settings → CI/CD → General Pipelines.</li>
+<li>The artifacts of <code>build</code> — download <code>dist/</code> directly.</li>
+</ul>
+</div>
+</div>
+
+<h2 id="yaml-anchors">YAML anchors — DRY without include</h2>
+
+<p>
+  Notice the <code>.setup: &amp;setup</code> and <code>&lt;&lt;: *setup</code>
+  dance in the example. That's YAML anchors, usable any time you want
+  to reuse a block. GitLab respects them natively:
+</p>
+<div class="code" data-lang="yaml">
+<pre><code>.base: &amp;base
+  image: node:20
+  before_script:
+    - npm ci
+
+lint:
+  &lt;&lt;: *base
+  script: [npm run lint]
+
+test:
+  &lt;&lt;: *base
+  script: [npm test]</code></pre>
+</div>
+
+<p>The dot-prefixed <code>.base</code> is a "hidden" job — GitLab ignores dot-prefixed keys as jobs, so they're only useful as anchor sources.</p>
+
+<p>Chapter 8 covers <code>extends</code> and <code>include</code> — more powerful than anchors.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Default stages</span>
+</div>
+<div class="exercise-body">
+<p>Without setting <code>stages:</code>, what are the default stages in GitLab CI and in what order?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>.pre</code>, <code>build</code>, <code>test</code>, <code>deploy</code>, <code>.post</code>. <code>.pre</code> runs before everything; <code>.post</code> runs after everything. Jobs without an explicit <code>stage:</code> go to <code>test</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Manual deploy</span>
+</div>
+<div class="exercise-body">
+<p>Write a <code>deploy-prod</code> job that only appears as a manual button on pipelines built from tags matching <code>v*</code>, and deploys to the <code>production</code> environment.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>deploy-prod:
+  stage: deploy
+  script: ["./deploy.sh prod"]
+  environment:
+    name: production
+    url: https://example.com
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+      when: manual</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Services</span>
+</div>
+<div class="exercise-body">
+<p>Your Ruby project needs Postgres 16 and Redis 7 for integration tests. Write the job config.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>integration:
+  image: ruby:3.3
+  services:
+    - name: postgres:16
+      alias: db
+    - name: redis:7
+      alias: redis
+  variables:
+    POSTGRES_PASSWORD: test
+    DATABASE_URL: "postgres://postgres:test@db:5432/postgres"
+    REDIS_URL:    "redis://redis:6379/0"
+  script:
+    - bundle install
+    - bundle exec rspec spec/integration/</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Artifact vs cache</span>
+</div>
+<div class="exercise-body">
+<p>A colleague writes this and wonders why the build job fails saying <code>node_modules not found</code>:</p>
+<div class="code" data-lang="yaml">
+<pre><code>install:
+  script: [npm ci]
+  cache:
+    paths: [node_modules/]
+
+build:
+  script: [npm run build]</code></pre>
+</div>
+<p>Fix it.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Caches are best-effort — a fresh pipeline might start with an empty cache, and they also depend on cache keys. Artifacts are the contract between jobs in the same pipeline:</p>
+<div class="code" data-lang="yaml">
+<pre><code>install:
+  script: [npm ci]
+  artifacts:
+    paths: [node_modules/]
+    expire_in: 1 hour
+  cache:
+    key: { files: [package-lock.json] }
+    paths: [node_modules/]
+
+build:
+  needs: [install]
+  script: [npm run build]</code></pre>
+</div>
+<p>Now <code>build</code> gets <code>node_modules/</code> even in a cache-cold run, while the cache still speeds up future <code>install</code> runs.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Run only when changed</span>
+</div>
+<div class="exercise-body">
+<p>A monorepo has <code>frontend/</code> and <code>backend/</code>. Write jobs so that <code>frontend-tests</code> runs only when frontend files change (and on main/tags), and <code>backend-tests</code> only when backend files change (ditto).</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>frontend-tests:
+  stage: test
+  image: node:20
+  script: [cd frontend, npm ci, npm test]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - changes: [frontend/**/*]
+
+backend-tests:
+  stage: test
+  image: python:3.11
+  script: [cd backend, pip install -r req.txt, pytest]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - changes: [backend/**/*]</code></pre>
+</div>
+<p>On main or tag builds both always run; on feature branches, only whichever directory changed.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>GitLab CI = GitLab-hosted pipelines + runners doing the work. Runners come in shared, group, and project scopes.</li>
+  <li><code>.gitlab-ci.yml</code> at the repo root; stages, jobs, predefined variables, <code>rules</code>, artifacts, caches.</li>
+  <li>Docker executor is the default — <code>image</code> and <code>services</code> define the environment.</li>
+  <li>Artifacts are required contracts between jobs; caches are best-effort.</li>
+  <li><code>needs</code> turns stages into a DAG; <code>rules</code> decide when jobs run.</li>
+  <li>Environments track deploys; <code>when: manual</code> gates prod behind a button.</li>
+  <li>YAML anchors are OK, but <code>extends</code> + <code>include</code> (next chapter) are cleaner.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="06-jenkins-advanced.html"><span class="lbl">← Prev</span><span class="ttl">Jenkins — Advanced</span></a>
+  <a href="08-gitlab-advanced.html" class="next"><span class="lbl">Next →</span><span class="ttl">GitLab CI — Advanced</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

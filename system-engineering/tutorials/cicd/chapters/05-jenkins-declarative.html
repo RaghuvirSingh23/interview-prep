@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5 · Jenkins — Declarative DSL — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 05</span>
+  Jenkins — Declarative DSL
+</h1>
+<p class="lede">
+  A full tour of every block in a Declarative <code>Jenkinsfile</code>:
+  <code>parallel</code>, <code>matrix</code>, <code>when</code>,
+  <code>post</code>, <code>options</code>, <code>tools</code>. By the
+  end you'll have a reference you can copy from for every real
+  pipeline.
+</p>
+
+<h2 id="parallel">Parallel execution</h2>
+
+<p>Within a stage, <code>parallel</code> splits work across agents:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Test matrix') {
+    parallel {
+        stage('Unit')        { steps { sh 'make test-unit'  } }
+        stage('Integration') { steps { sh 'make test-integ' } }
+        stage('Smoke')       { steps { sh 'make test-smoke' } }
+    }
+}</code></pre>
+</div>
+
+<p>By default, if any branch fails, the others continue but the stage fails. To stop everything at the first failure:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Test matrix') {
+    failFast true
+    parallel { ... }
+}</code></pre>
+</div>
+
+<p>Each parallel branch can pin to a different agent:</p>
+<div class="code" data-lang="groovy">
+<pre><code>parallel {
+    stage('Linux')   { agent { label 'linux'   }; steps { sh  'make' } }
+    stage('macOS')   { agent { label 'macos'   }; steps { sh  'make' } }
+    stage('Windows') { agent { label 'windows' }; steps { bat 'msbuild' } }
+}</code></pre>
+</div>
+
+<h2 id="matrix">Matrix</h2>
+
+<p>When you want to run the same logic over a cartesian product of axes:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Cross-version test') {
+    matrix {
+        axes {
+            axis { name 'NODE'; values '18', '20', '22' }
+            axis { name 'OS';   values 'linux', 'macos' }
+        }
+        excludes {
+            exclude { axis { name 'NODE'; values '18' }
+                      axis { name 'OS';   values 'macos' } }
+        }
+        agent { label "${OS}" }
+        stages {
+            stage('Test') {
+                steps {
+                    sh 'nvm use $NODE &amp;&amp; npm test'
+                }
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>That's 3 × 2 = 6 combinations, minus the one exclude = 5 parallel jobs. The axis names become env vars inside each cell.</p>
+
+<h2 id="when"><code>when</code> — conditional stages</h2>
+
+<p>A stage runs only when its <code>when</code> evaluates truthy:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy staging') {
+    when { branch 'main' }
+    steps { sh './deploy.sh staging' }
+}
+
+stage('Deploy prod') {
+    when { tag pattern: 'v.*', comparator: 'REGEXP' }
+    steps { sh './deploy.sh prod' }
+}</code></pre>
+</div>
+
+<p>All <code>when</code> predicates:</p>
+<table>
+<thead><tr><th>Predicate</th><th>Fires when</th></tr></thead>
+<tbody>
+<tr><td><code>branch 'main'</code></td>                  <td>Branch name matches (supports globs)</td></tr>
+<tr><td><code>tag 'v*'</code></td>                       <td>Build is for a tag matching the pattern</td></tr>
+<tr><td><code>buildingTag()</code></td>                  <td>Any tag build</td></tr>
+<tr><td><code>changelog '.*\\[release\\].*'</code></td>  <td>Commit message matches regex</td></tr>
+<tr><td><code>changeset '**/*.py'</code></td>            <td>Changed files match glob</td></tr>
+<tr><td><code>changeRequest()</code></td>                <td>Build is for a PR/MR</td></tr>
+<tr><td><code>environment name: 'X', value: 'y'</code></td><td>Env var equals value</td></tr>
+<tr><td><code>expression { ... }</code></td>             <td>Groovy returns truthy</td></tr>
+<tr><td><code>not { ... }</code></td>                    <td>Negate</td></tr>
+<tr><td><code>allOf { a; b }</code></td>                 <td>All match</td></tr>
+<tr><td><code>anyOf { a; b }</code></td>                 <td>At least one matches</td></tr>
+</tbody>
+</table>
+
+<p>Combined:</p>
+<div class="code" data-lang="groovy">
+<pre><code>when {
+    allOf {
+        branch 'main'
+        anyOf { changeset 'src/**'; changeset 'Dockerfile' }
+        not { changelog '.*\\[skip-deploy\\].*' }
+    }
+}</code></pre>
+</div>
+
+<p>By default, <code>when</code> is evaluated <em>after</em> agent allocation. That means you pay for the agent before deciding to skip. Use <code>beforeAgent true</code> to evaluate first:</p>
+<div class="code" data-lang="groovy">
+<pre><code>when {
+    beforeAgent true
+    branch 'main'
+}</code></pre>
+</div>
+
+<h2 id="post"><code>post</code> — conditions for cleanup/notification</h2>
+
+<p>Post blocks have named conditions that run depending on build status:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>post {
+    always    { sh 'rm -rf .cache' }          // runs no matter what
+    success   { notifySuccess() }             // all stages succeeded
+    failure   { notifyFailure() }             // at least one failed
+    unstable  { notifyUnstable() }            // e.g. tests failed but no hard error
+    aborted   { notifyAborted() }             // user clicked Abort
+    changed   { notifyChanged() }             // status differs from previous build
+    fixed     { notifyFixed() }               // went from not-success to success
+    regression { notifyBroken() }             // went from success to not-success
+    cleanup   { cleanWs() }                  // runs AFTER all other conditions
+}</code></pre>
+</div>
+
+<p><code>cleanup</code> is special: it always runs, last. Use for workspace cleanup that shouldn't interfere with other notifications.</p>
+
+<h2 id="options-detail">options — per-build knobs</h2>
+
+<div class="code" data-lang="groovy">
+<pre><code>options {
+    // Kill the whole pipeline after 20 min
+    timeout(time: 20, unit: 'MINUTES')
+
+    // Prefix log lines with timestamps (needs Timestamper plugin)
+    timestamps()
+
+    // ANSI color rendering for recipe output
+    ansiColor('xterm')
+
+    // Keep only the last 30 builds
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+
+    // If triggered while another build is running, skip new
+    disableConcurrentBuilds()
+
+    // Wait for quiet period (useful for rapid commits)
+    quietPeriod 10
+
+    // Retry the whole pipeline on failure
+    retry(3)
+
+    // Skip the default SCM checkout — lets you manually control checkout
+    skipDefaultCheckout(true)
+
+    // Don't echo recipe lines for this step (matches `sh` step 'quiet' option)
+    newContainerPerStage()       // only with `agent { docker … }`
+}</code></pre>
+</div>
+
+<p>Stage-level options are a subset — see the official docs. The above are the ones you'll use weekly.</p>
+
+<h2 id="tools">Tools</h2>
+
+<p>
+  Jenkins can auto-install common build tools. Go to Manage Jenkins →
+  Tools and configure JDK, Maven, NodeJS (with the NodeJS plugin),
+  etc. Then pull them into any pipeline:
+</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent any
+    tools {
+        jdk    'openjdk-21'       // matches the name configured in Global Tools
+        maven  'maven-3.9'
+    }
+    stages {
+        stage('Build') { steps { sh 'mvn clean verify' } }
+    }
+}</code></pre>
+</div>
+
+<p>Jenkins adds them to <code>PATH</code> automatically. Alternatives: Docker-based agents, <code>asdf</code> / <code>mise</code> in shell, or just install on the agent image.</p>
+
+<h2 id="envs">Pipeline environment variables, recap</h2>
+
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent any
+    environment {
+        // Plain strings
+        SERVICE = 'api'
+        VERSION = '1.0.0-${env.BUILD_NUMBER}'   // NB: single-quoted => literal
+
+        // Credentials — auto-masked in logs
+        DB         = credentials('staging-db')   // sets DB_USR, DB_PSW, DB
+        GITHUB_TOK = credentials('gh-token')     // a 'secret text' credential
+
+        // Derived — can use ${env.X}
+        TAG = "${env.SERVICE}-${env.BUILD_NUMBER}"
+    }
+    stages {
+        stage('Show') {
+            steps { sh 'echo $SERVICE $DB_USR $TAG' }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>In <code>environment</code>, single-quoted strings are literal; double-quoted interpolate at pipeline compile time. Inside the recipe, <code>$SERVICE</code> is read by the shell from its environment.</p>
+
+<h2 id="input">Human-in-the-loop input</h2>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy prod') {
+    when { branch 'main' }
+    steps {
+        timeout(time: 1, unit: 'HOURS') {
+            input message: 'Deploy to production?',
+                  ok: 'Ship it',
+                  submitter: 'release-managers',
+                  parameters: [
+                      choice(name: 'CONFIRM', choices: ['no', 'yes'])
+                  ]
+        }
+        sh './deploy.sh prod'
+    }
+}</code></pre>
+</div>
+
+<p>
+  <code>input</code> halts until a permitted user (<code>submitter</code>)
+  clicks the UI button. <strong>It holds an executor while waiting</strong>
+  — painful on small Jenkins instances. Workaround: wrap the
+  <code>input</code> in a stage with <code>agent none</code>:
+</p>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Wait for approval') {
+    agent none
+    steps { input 'Proceed?' }
+}
+stage('Deploy') {
+    agent any
+    steps { sh './deploy.sh' }
+}</code></pre>
+</div>
+
+<h2 id="docker-agent">Docker agents per stage</h2>
+
+<p>Run each stage in a specific container:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent none
+    stages {
+        stage('Lint') {
+            agent { docker { image 'python:3.11-slim' } }
+            steps {
+                sh 'pip install ruff &amp;&amp; ruff check src/'
+            }
+        }
+        stage('Test') {
+            agent { docker { image 'python:3.11-slim'; args '-u 1000' } }
+            steps {
+                sh 'pip install -r requirements.txt &amp;&amp; pytest'
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>Each stage gets a fresh container. The repo is auto-checked-out into the container's workspace. <code>args '-u 1000'</code> runs as UID 1000 (handy to avoid root-owned files in the host workspace).</p>
+
+<p>More sophisticated: <code>agent { dockerfile true }</code> builds a <code>Dockerfile</code> from the repo and uses it as the agent. Perfect when the build tools live in the repo.</p>
+
+<h2 id="complete">A complete, idiomatic Jenkinsfile</h2>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkinsfile — reference template</span></div>
+<pre><code>pipeline {
+    agent none
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        disableConcurrentBuilds()
+    }
+    environment {
+        APP        = 'hello-api'
+        REGISTRY   = 'registry.example.com/myteam'
+    }
+    triggers {
+        cron(env.BRANCH_NAME == 'main' ? 'H 2 * * *' : '')
+    }
+
+    stages {
+        stage('Lint') {
+            agent { docker { image 'python:3.11-slim' } }
+            steps {
+                sh 'pip install ruff &amp;&amp; ruff check src/'
+            }
+        }
+
+        stage('Test') {
+            parallel {
+                stage('Unit') {
+                    agent { docker { image 'python:3.11-slim' } }
+                    steps {
+                        sh '''
+                            pip install -r requirements.txt -r requirements-dev.txt
+                            pytest --junitxml=reports/unit.xml --cov=src --cov-report=xml
+                        '''
+                    }
+                    post {
+                        always { junit 'reports/unit.xml' }
+                    }
+                }
+                stage('Type-check') {
+                    agent { docker { image 'python:3.11-slim' } }
+                    steps {
+                        sh 'pip install mypy &amp;&amp; mypy src/'
+                    }
+                }
+            }
+        }
+
+        stage('Build image') {
+            agent { label 'docker' }
+            steps {
+                sh "docker build -t ${env.REGISTRY}/${env.APP}:${env.BUILD_NUMBER} ."
+            }
+        }
+
+        stage('Publish') {
+            when { branch 'main' }
+            agent { label 'docker' }
+            environment { REG_CREDS = credentials('registry-login') }
+            steps {
+                sh '''
+                    echo "$REG_CREDS_PSW" | docker login $REGISTRY -u "$REG_CREDS_USR" --password-stdin
+                    docker push $REGISTRY/$APP:$BUILD_NUMBER
+                    docker tag  $REGISTRY/$APP:$BUILD_NUMBER $REGISTRY/$APP:latest
+                    docker push $REGISTRY/$APP:latest
+                '''
+            }
+        }
+
+        stage('Deploy staging') {
+            when { branch 'main' }
+            agent { label 'deploy' }
+            environment { KUBECONFIG = credentials('staging-kubeconfig') }
+            steps {
+                sh 'kubectl set image deploy/$APP $APP=$REGISTRY/$APP:$BUILD_NUMBER -n staging'
+                sh 'kubectl rollout status deploy/$APP -n staging --timeout=3m'
+            }
+        }
+
+        stage('Wait for prod approval') {
+            when { buildingTag() }
+            agent none
+            steps {
+                timeout(time: 4, unit: 'HOURS') {
+                    input message: "Deploy tag ${env.TAG_NAME} to production?",
+                          submitter: 'release-managers'
+                }
+            }
+        }
+
+        stage('Deploy prod') {
+            when { buildingTag() }
+            agent { label 'deploy' }
+            environment { KUBECONFIG = credentials('prod-kubeconfig') }
+            steps {
+                sh 'kubectl set image deploy/$APP $APP=$REGISTRY/$APP:$BUILD_NUMBER -n prod'
+                sh 'kubectl rollout status deploy/$APP -n prod --timeout=5m'
+            }
+        }
+    }
+
+    post {
+        success {
+            slackSend channel: '#ci',
+                      color: 'good',
+                      message: "✅ ${env.JOB_NAME} #${env.BUILD_NUMBER} succeeded"
+        }
+        failure {
+            slackSend channel: '#ci',
+                      color: 'danger',
+                      message: "❌ ${env.JOB_NAME} #${env.BUILD_NUMBER} failed"
+        }
+        cleanup { cleanWs() }
+    }
+}</code></pre>
+</div>
+
+<p>Study it. Every block is something we've covered. Adapt it to your project's specifics.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Failed-fast matrix</span>
+</div>
+<div class="exercise-body">
+<p>Write a matrix that tests Python 3.9, 3.10, 3.11 on Ubuntu and macOS, and stops all cells as soon as any one fails.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Matrix test') {
+    failFast true
+    matrix {
+        axes {
+            axis { name 'PYVER'; values '3.9', '3.10', '3.11' }
+            axis { name 'OS';    values 'linux', 'macos' }
+        }
+        agent { label "${OS}" }
+        stages {
+            stage('pytest') {
+                steps { sh "python${PYVER} -m pytest" }
+            }
+        }
+    }
+}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Only when docs changed</span>
+</div>
+<div class="exercise-body">
+<p>Run a "Build docs" stage only when files under <code>docs/</code> have changed in the commit range being built.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Build docs') {
+    when {
+        beforeAgent true
+        changeset 'docs/**'
+    }
+    steps { sh 'make -C docs' }
+}</code></pre>
+</div>
+<p>
+  <code>changeset</code> compares to the previous successful build.
+  <code>beforeAgent true</code> lets us skip allocating an agent if
+  docs didn't change.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Post conditions</span>
+</div>
+<div class="exercise-body">
+<p>Write a post block that Slacks <em>only when the build goes from failed to success</em> (the recovery notification).</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>post {
+    fixed {
+        slackSend channel: '#ci',
+                  color: 'good',
+                  message: "🎉 ${env.JOB_NAME} recovered: build #${env.BUILD_NUMBER}"
+    }
+}</code></pre>
+</div>
+<p><code>fixed</code> is a post-condition that fires only when <em>this</em> build succeeded and the <em>previous</em> didn't.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Approval without holding an executor</span>
+</div>
+<div class="exercise-body">
+<p>Write a pattern where deploying to prod requires approval but doesn't tie up an executor while waiting.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Approval') {
+    when { buildingTag() }
+    agent none                                   // no executor used
+    options { timeout(time: 4, unit: 'HOURS') }  // allow long wait
+    steps { input 'Deploy tag to prod?' }
+}
+stage('Deploy prod') {
+    when { buildingTag() }
+    agent { label 'deploy' }
+    steps { sh './deploy.sh prod' }
+}</code></pre>
+</div>
+<p><code>agent none</code> at the stage level means Jenkins doesn't hold an executor during the wait — useful on busy instances where executors are scarce.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Dockerfile-based agent</span>
+</div>
+<div class="exercise-body">
+<p>Your repo has a <code>Dockerfile.ci</code> defining the exact environment the build needs. Configure a Declarative pipeline to build and use that image as the agent.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent {
+        dockerfile {
+            filename 'Dockerfile.ci'
+            dir '.'
+            label 'docker'
+        }
+    }
+    stages {
+        stage('Build') { steps { sh 'make' } }
+    }
+}</code></pre>
+</div>
+<p>Jenkins builds the image (cached on the agent), starts a container, mounts the workspace, and runs steps inside. Perfect hermeticity — the build environment is versioned with the code.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Cron that varies by branch</span>
+</div>
+<div class="exercise-body">
+<p>Schedule nightly builds only on <code>main</code>, not feature branches. Declarative <code>triggers</code> is set at pipeline scope — how?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent any
+    triggers {
+        cron(env.BRANCH_NAME == 'main' ? 'H 2 * * *' : '')
+    }
+    // ...
+}</code></pre>
+</div>
+<p>An empty cron string means "no schedule". The conditional is evaluated per branch in a multibranch pipeline, so only the <code>main</code> branch's job has the schedule installed.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>parallel</code> within a <code>stage</code>; add <code>failFast true</code> to stop on first failure.</li>
+  <li><code>matrix</code> for cartesian products of axes; <code>excludes</code> to trim the grid.</li>
+  <li><code>when</code> with <code>branch</code>, <code>tag</code>, <code>changeset</code>, <code>changeRequest()</code>, etc. <code>beforeAgent true</code> avoids allocating agents for skipped stages.</li>
+  <li><code>post</code> conditions: <code>always</code>, <code>success</code>, <code>failure</code>, <code>fixed</code>, <code>cleanup</code>, and others.</li>
+  <li><code>options</code> for timeouts, log rotation, concurrency, ANSI colors.</li>
+  <li><code>tools</code> auto-installs JDKs/Maven/Node without shell gymnastics.</li>
+  <li><code>agent { docker … }</code> or <code>agent { dockerfile … }</code> gives hermetic per-stage environments.</li>
+  <li><code>input</code> for approvals; use <code>agent none</code> to avoid holding an executor.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="04-jenkins-pipelines.html"><span class="lbl">← Prev</span><span class="ttl">Jenkins — Pipelines</span></a>
+  <a href="06-jenkins-advanced.html" class="next"><span class="lbl">Next →</span><span class="ttl">Jenkins — Advanced</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

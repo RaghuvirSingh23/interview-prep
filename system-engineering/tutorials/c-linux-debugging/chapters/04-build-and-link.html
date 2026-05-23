@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4 · Build &amp; link</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 04</span>
+  Build &amp; link — preprocessor, ELF, symbols, libs
+</h1>
+<p class="lede">
+  The mysterious "undefined reference to <code>foo</code>" message
+  becomes a five-second fix once you know what's happening between
+  source and binary. This chapter walks the pipeline:
+  preprocessor → translation unit → object file → executable, then the
+  ELF, symbols, and the difference between static and dynamic
+  linkage.
+</p>
+
+<h2 id="pipeline">The pipeline, drawn</h2>
+
+<div class="code" data-lang="text">
+<pre><code>     foo.c                          libstuff.a / libstuff.so
+       │                                       │
+   ┌───┴────┐                               (search)
+   │ cpp    │  preprocessor                     │
+   │ #incl. │                                   │
+   └───┬────┘                                   │
+       │ foo.i  (preprocessed source)           │
+   ┌───┴────┐                                   │
+   │ cc1    │  C compiler                       │
+   └───┬────┘                                   │
+       │ foo.s  (assembly)                      │
+   ┌───┴────┐                                   │
+   │ as     │  assembler                        │
+   └───┬────┘                                   │
+       │ foo.o  (object: code + relocations + symbols)
+       └───────────────────┐
+                           ▼
+                       ┌───────┐
+                       │  ld   │   linker
+                       └───┬───┘
+                           ▼
+                        a.out  (ELF executable)
+                           │
+                           ▼ at runtime
+                       ld-linux.so   dynamic loader
+                           │
+                           ▼
+                       running process
+</code></pre>
+</div>
+
+<p>The driver — <code>cc</code>, <code>gcc</code>, <code>clang</code> — is just a front-end that runs each tool in sequence. You can do each step by hand:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -E foo.c -o foo.i        # preprocess
+$ cc -S foo.i -o foo.s        # compile to assembly
+$ cc -c foo.s -o foo.o        # assemble
+$ cc foo.o   -o foo           # link
+
+# common shorthand: compile + link in one
+$ cc foo.c   -o foo
+
+# split compile/link explicitly:
+$ cc -c foo.c bar.c           # makes foo.o, bar.o
+$ cc foo.o bar.o -o app
+</code></pre>
+</div>
+
+<h2 id="preprocessor">The preprocessor — text in, text out</h2>
+
+<p><code>cpp</code> is a textual replacement engine. Before the compiler ever sees your code, the preprocessor:</p>
+<ul>
+  <li>Inlines <code>#include</code> directives.</li>
+  <li>Expands macros (<code>#define</code>).</li>
+  <li>Evaluates <code>#if</code> / <code>#ifdef</code>.</li>
+  <li>Strips comments.</li>
+  <li>Adds <code>#line</code> directives so error messages point at the original source.</li>
+</ul>
+
+<div class="code" data-lang="c">
+<pre><code>#define MAX(a, b) ((a) &gt; (b) ? (a) : (b))         /* careful! evaluates twice */
+#define ARR_LEN(a) (sizeof(a) / sizeof((a)[0]))
+#define UNUSED(x) ((void)(x))                       /* silence unused-warning */
+
+#ifdef DEBUG
+#  define LOG(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+#else
+#  define LOG(fmt, ...) ((void)0)
+#endif
+</code></pre>
+</div>
+
+<p>Macro hygiene rules:</p>
+<ol>
+  <li><strong>Parenthesise every argument and the whole expansion.</strong> Otherwise <code>MAX(a, b+1)</code> bites.</li>
+  <li>Avoid macros with side-effecting arguments — they may evaluate twice or zero times.</li>
+  <li>Prefer <code>static inline</code> functions, <code>constexpr</code>, or templates over macros where possible.</li>
+  <li>Use UPPER_SNAKE_CASE for macros so readers can spot them.</li>
+</ol>
+
+<h2 id="includes">#include — quote vs angle brackets</h2>
+
+<table>
+<tr><td><code>#include "foo.h"</code></td><td>Project-relative search first, then system paths.</td></tr>
+<tr><td><code>#include &lt;stdio.h&gt;</code></td><td>System paths only (<code>-I</code> dirs and stdlib).</td></tr>
+</table>
+
+<p>You add search dirs with <code>-I/path</code>; <code>-iquote/path</code> for quote-only; <code>-isystem/path</code> for "system" inclusion (suppresses warnings inside, like stdlib headers).</p>
+
+<h2 id="header-guard">Header guards / <code>#pragma once</code></h2>
+
+<p>A header may be included many times in one TU (transitively). Without protection, you get redefinition errors.</p>
+
+<div class="code" data-lang="c">
+<pre><code>/* Classic guard — portable */
+#ifndef MYAPP_FOO_H
+#define MYAPP_FOO_H
+
+void foo(void);
+
+#endif /* MYAPP_FOO_H */
+
+
+/* Modern alternative — supported by every real compiler */
+#pragma once
+
+void foo(void);
+</code></pre>
+</div>
+
+<p><code>#pragma once</code> is technically non-standard but works on GCC, Clang, MSVC, every BSD, every embedded compiler you'll meet. Use it; if your codebase already uses guards, match the style.</p>
+
+<h2 id="declaration-vs-definition">Declarations vs definitions</h2>
+
+<p>The single most-confused bit of C/C++ linkage:</p>
+
+<ul>
+  <li>A <strong>declaration</strong> introduces a name — "this name exists, here's its type". You can have many.</li>
+  <li>A <strong>definition</strong> provides storage or a body — "this name lives here, here it is". You can have one (per linkage scope).</li>
+</ul>
+
+<div class="code" data-lang="c">
+<pre><code>extern int counter;       /* declaration — counter exists somewhere */
+int counter;              /* definition — gives it storage */
+int counter = 42;         /* also a definition, with init */
+
+int  add(int a, int b);   /* declaration */
+int  add(int a, int b)    /* definition */
+{ return a + b; }
+</code></pre>
+</div>
+
+<p>Headers should contain <em>declarations</em>; <code>.c</code>/<code>.cpp</code> files contain <em>definitions</em>. The exception: <code>static inline</code> / <code>inline</code> / <code>constexpr</code> / templates may live in headers because the compiler needs the body in every TU that uses them.</p>
+
+<h2 id="linkage">Linkage</h2>
+
+<p>Every name has a <strong>linkage</strong> that says how it can be referenced from other translation units:</p>
+
+<table>
+<thead><tr><th>Linkage</th><th>Meaning</th><th>How to write</th></tr></thead>
+<tbody>
+<tr><td><strong>External</strong></td><td>Visible from other TUs by symbol name</td><td>Plain <code>int x;</code> at file scope; non-<code>static</code> functions</td></tr>
+<tr><td><strong>Internal</strong></td><td>Private to this TU</td><td><code>static int x;</code> at file scope; <code>static</code> on a function</td></tr>
+<tr><td><strong>None</strong></td><td>Not a linker concept (locals, function params)</td><td>Anything inside a function</td></tr>
+</tbody>
+</table>
+
+<p>In C++, anonymous namespaces give internal linkage too:</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>namespace {                   // anonymous: internal linkage
+    int helper_count = 0;
+    void helper() { ++helper_count; }
+}
+</code></pre>
+</div>
+
+<h2 id="odr">The One Definition Rule</h2>
+
+<p>The compiler emits a body for every function and gives storage to every variable. The linker then deduplicates. The rule is:</p>
+
+<ul>
+  <li>An <strong>external</strong>-linkage symbol must be defined exactly once across the program.</li>
+  <li>An <strong>internal</strong>-linkage or <code>inline</code> symbol may have multiple definitions, but they must be <em>identical token-for-token</em> (otherwise UB).</li>
+</ul>
+
+<p>Why so strict? Because the linker picks one and discards the others — if they differ, you've changed behaviour silently.</p>
+
+<h2 id="object-files">Object files (<code>.o</code>)</h2>
+
+<p>An object file is a partial binary: machine code plus tables that say "here are the symbols I define, here are the ones I need, here's where to patch addresses once you've placed me in memory".</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -c foo.c -o foo.o
+$ file foo.o
+foo.o: ELF 64-bit LSB relocatable, x86-64
+
+$ nm foo.o
+0000000000000000 T foo                # defined: T = text section, big endian by convention
+                 U printf             # undefined: needed from elsewhere
+0000000000000000 R msg                # defined: R = rodata
+</code></pre>
+</div>
+
+<p><code>nm</code>'s second column is the symbol type. Common letters:</p>
+<table>
+<tr><td><code>T</code> / <code>t</code></td><td>Code in <code>.text</code>; uppercase = external linkage</td></tr>
+<tr><td><code>D</code> / <code>d</code></td><td>Initialised data in <code>.data</code></td></tr>
+<tr><td><code>B</code> / <code>b</code></td><td>Uninitialised data in <code>.bss</code></td></tr>
+<tr><td><code>R</code> / <code>r</code></td><td>Read-only data in <code>.rodata</code></td></tr>
+<tr><td><code>U</code></td><td>Undefined — must be supplied by another object</td></tr>
+<tr><td><code>W</code> / <code>w</code></td><td>Weak — provided, but overridable</td></tr>
+</table>
+
+<h2 id="elf">ELF — what's in a binary</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ readelf -h ./hello | head
+ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 ...    # \x7f E L F
+  Class:                             ELF64
+  Type:                              DYN (Position-Independent Executable file)
+  Machine:                           Advanced Micro Devices X86-64
+  Entry point address:               0x...
+
+$ readelf -d ./hello                  # dynamic section
+0x0000000000000001 (NEEDED) Shared library: [libc.so.6]
+0x000000000000001d (RUNPATH) ...
+
+$ readelf -S ./hello                  # all sections
+[ 1] .text          PROGBITS  ...
+[ 2] .rodata        PROGBITS  ...
+[ 3] .data          PROGBITS  ...
+[ 4] .bss           NOBITS    ...
+[ 5] .symtab        SYMTAB    ...
+[ 6] .strtab        STRTAB    ...
+
+$ objdump -d ./hello | less          # disassemble
+$ ldd ./hello                        # what shared libs at runtime
+</code></pre>
+</div>
+
+<p>Real binaries you debug, you'll <code>nm</code>, <code>readelf</code>, <code>objdump</code>, <code>strings</code>, <code>strip</code>, <code>file</code> all the time. They're tiny and fast — keep them in muscle memory.</p>
+
+<h2 id="static-vs-shared">Static libs vs shared libs</h2>
+
+<table>
+<thead><tr><th></th><th>Static (<code>.a</code>)</th><th>Shared (<code>.so</code>)</th></tr></thead>
+<tbody>
+<tr><td>What is it</td><td>Archive of <code>.o</code>s — like a tar ball</td><td>Real ELF; loadable; resolved at runtime</td></tr>
+<tr><td>Linked when</td><td>At link time; copied into executable</td><td>Tagged at link, resolved at <code>execve</code></td></tr>
+<tr><td>Binary size</td><td>Larger</td><td>Smaller — code shared in memory across processes</td></tr>
+<tr><td>Update behaviour</td><td>Recompile to upgrade</td><td>Drop in a new <code>.so</code>; processes pick it up on restart</td></tr>
+<tr><td>Symbol visibility</td><td>One copy gets pulled in if any symbol is needed (per object)</td><td>Whole library mapped; symbols resolved on demand</td></tr>
+</tbody>
+</table>
+
+<p>Build them yourself:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Static library
+$ cc -c add.c sub.c              # → add.o sub.o
+$ ar rcs libmath.a add.o sub.o   # archive
+$ cc main.c -L. -lmath -o app    # links the .a in
+
+# Shared library — must build with -fPIC
+$ cc -fPIC -c add.c sub.c
+$ cc -shared -o libmath.so add.o sub.o -Wl,-soname,libmath.so.1
+$ cc main.c -L. -lmath -o app
+$ LD_LIBRARY_PATH=. ./app        # tell the loader where to find libmath.so
+</code></pre>
+</div>
+
+<p><code>-fPIC</code> = Position-Independent Code: required for shared libraries on most architectures so the same library can be loaded at different addresses in different processes. The price was historically a small slowdown; on x86_64 it's negligible thanks to RIP-relative addressing.</p>
+
+<h2 id="link-order">Link order matters</h2>
+
+<p>The traditional Unix linker is single-pass left-to-right and only pulls in archive members for symbols that are <em>currently undefined</em>. So:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -lmylib main.c       # WRONG on classical ld
+$ cc main.c -lmylib       # right — lib must come AFTER what needs it
+</code></pre>
+</div>
+
+<p>If two libs need each other, you may need to repeat them or use <code>--start-group … --end-group</code>.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc main.c -Wl,--start-group -lA -lB -Wl,--end-group
+</code></pre>
+</div>
+
+<p>Modern Linux mostly uses gold or lld; lld is more forgiving but you should still order your inputs correctly for portability.</p>
+
+<h2 id="undef-reference">"Undefined reference to X" — diagnosing it</h2>
+
+<ol>
+  <li><strong>Spell-check.</strong> Especially for C++ overloaded names; mangled names are very specific.</li>
+  <li><strong>Did the symbol get compiled?</strong> <code>nm libfoo.a | grep mysym</code>. If absent, the source defining it wasn't built or has the wrong name.</li>
+  <li><strong>Is it in the right archive?</strong> <code>ar t libfoo.a</code> shows members.</li>
+  <li><strong>Are you missing a library?</strong> <code>-lpthread</code>, <code>-lm</code>, <code>-ldl</code> for dlopen, etc.</li>
+  <li><strong>Order issue?</strong> Move the library after what needs it.</li>
+  <li><strong>C/C++ name mangling?</strong> A C++ caller of a C function needs <code>extern "C"</code> in the header.</li>
+  <li><strong>Static helper called from another TU?</strong> If it's <code>static</code>, it can't be referenced externally — drop the <code>static</code> or move the user.</li>
+  <li><strong>Templates not instantiated?</strong> The body must be visible at the call site (header), or you must explicitly instantiate.</li>
+</ol>
+
+<h2 id="visibility">Symbol visibility — keeping shared libs sane</h2>
+
+<p>By default on Linux, <em>every</em> external-linkage symbol in a shared library is exported. That's a maintenance nightmare and slows down link/load. Best practice:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -fvisibility=hidden -fPIC -c foo.c
+$ cc -shared -o libfoo.so foo.o
+</code></pre>
+</div>
+
+<p>And mark the few you actually want exposed:</p>
+
+<div class="code" data-lang="c">
+<pre><code>#define EXPORT __attribute__((visibility("default")))
+
+EXPORT int  public_api(int x);
+       int  internal(int x);            /* hidden — not in dynamic symbol table */
+</code></pre>
+</div>
+
+<p>Or use a linker-script / version-script. Hidden internal symbols means safer ABIs (you can change them), faster builds, smaller binaries.</p>
+
+<h2 id="abi">ABI — what's stable, what's not</h2>
+
+<p>An ABI (Application Binary Interface) defines how compiled code interoperates: function call conventions, struct layout, name mangling, exception model.</p>
+
+<p>For <strong>C ABI</strong>: stable across compilers on a platform. <code>extern "C"</code> functions, POD structs, simple types — interoperable.</p>
+
+<p>For <strong>C++ ABI</strong>: <em>not</em> stable across compilers historically (MSVC vs GCC, even GCC versions until ~5.0). Don't pass <code>std::string</code> or <code>std::vector</code> across a shared-library boundary unless both sides were built with the same compiler version. The Itanium C++ ABI (used by GCC, Clang on Linux) has been stable since GCC 5; pre-5 ABI break around the COW <code>std::string</code> change is the classic war story.</p>
+
+<p>Rule of thumb for shared-library APIs:</p>
+<ul>
+  <li>Expose <code>extern "C"</code> functions only.</li>
+  <li>Use opaque handles (<code>typedef struct Foo Foo;</code> in the public header).</li>
+  <li>Pass POD structs, not C++ classes.</li>
+  <li>Version your <code>.so</code>: <code>libfoo.so.1.2</code> with symlinks <code>libfoo.so.1 → libfoo.so.1.2</code>, <code>libfoo.so → libfoo.so.1</code>.</li>
+</ul>
+
+<h2 id="rpath">RPATH, RUNPATH, LD_LIBRARY_PATH</h2>
+
+<p>How the dynamic loader finds <code>.so</code>s:</p>
+
+<ol>
+  <li><code>DT_RPATH</code> in the binary (legacy, takes precedence over <code>LD_LIBRARY_PATH</code>).</li>
+  <li><code>LD_LIBRARY_PATH</code> environment variable.</li>
+  <li><code>DT_RUNPATH</code> in the binary (modern, after <code>LD_LIBRARY_PATH</code>).</li>
+  <li><code>/etc/ld.so.cache</code> from <code>/etc/ld.so.conf</code>.</li>
+  <li>Default: <code>/lib</code>, <code>/usr/lib</code>.</li>
+</ol>
+
+<p><code>$ORIGIN</code> in RPATH/RUNPATH is the binary's directory — useful for "ship the libs alongside the binary":</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc main.c -Wl,-rpath,'$ORIGIN/lib' -L./lib -lfoo -o app
+</code></pre>
+</div>
+
+<p><strong>Don't ship binaries that need <code>LD_LIBRARY_PATH</code> set</strong>; it's a footgun for users. Use RPATH/RUNPATH or static-link.</p>
+
+<h2 id="hands-on">Hands-on: build a tiny library</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · static and shared, side by side</div>
+<div class="hands-on-body">
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">math.h</span></div>
+<pre><code>#pragma once
+int add(int a, int b);
+int sub(int a, int b);
+</code></pre>
+</div>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">add.c &amp; sub.c</span></div>
+<pre><code>#include "math.h"
+int add(int a, int b) { return a + b; }
+/* ... */
+int sub(int a, int b) { return a - b; }
+</code></pre>
+</div>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">main.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+#include "math.h"
+int main(void) {
+    printf("%d %d\n", add(2, 3), sub(10, 4));
+    return 0;
+}
+</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code># Static
+$ cc -c add.c sub.c
+$ ar rcs libmath.a add.o sub.o
+$ cc main.c -L. -lmath -o static_app
+$ ./static_app                 # 5 6
+$ size static_app              # bigger because the lib is inside
+
+# Shared
+$ cc -fPIC -c add.c sub.c
+$ cc -shared -o libmath.so add.o sub.o
+$ cc main.c -L. -lmath -o shared_app -Wl,-rpath,'$ORIGIN'
+$ ./shared_app                 # 5 6
+$ size shared_app              # smaller; libmath.so loaded at runtime
+$ ldd shared_app               # shows libmath.so resolution
+</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Diagnose a link error</span>
+</div>
+<div class="exercise-body">
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc main.c -o app
+/usr/bin/ld: /tmp/cc...o: in function `main':
+main.c:(.text+0x12): undefined reference to `pthread_create'
+collect2: error: ld returned 1 exit status
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Missing <code>-lpthread</code>. <code>cc main.c -o app -lpthread</code>. Note the order: library after sources.</p>
+<p>Modern glibc (≥ 2.34) merges pthread into libc, so this error appears mostly on older toolchains and embedded.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why static</span>
+</div>
+<div class="exercise-body">
+<p>You have <code>helper.c</code> with <code>void log_line(const char *s) { ... }</code>. Two unrelated translation units in the same project both want a <code>log_line</code> with different bodies. What's the fix?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Make both <code>static</code> in their <code>.c</code> files — internal linkage, no clash. The linker doesn't see them at all from outside the TU.</p>
+<p>If both should also be visible inside the TU but you want a unified version externally, give them different names. Sharing one external function across the project is also valid (refactor into a common module).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Use <code>nm</code> to find a missing symbol</span>
+</div>
+<div class="exercise-body">
+<p>The linker complains about an undefined reference to <code>foo_init</code>. You have a static library you think defines it. How do you check, and what does the output tell you?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ nm libfoo.a | grep foo_init
+foo_module.o:
+0000000000000000 T foo_init
+</code></pre>
+</div>
+<p>Capital <code>T</code> = defined in text. Found. So the issue is link order or path. If you got <code>U foo_init</code> instead, the lib references it but doesn't define it — the source compiles a declaration only, not the body.</p>
+<p>If you got nothing, the source defining <code>foo_init</code> wasn't compiled into the library (typo, missed in build).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">C++ symbols look different</span>
+</div>
+<div class="exercise-body">
+<p>You have C++ code <code>int parse(const std::string&amp;);</code> in <code>parse.cpp</code>. From C, you try to call it. The link fails. Why, and how do you fix it?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>C++ mangles names to encode argument types so overloads can coexist. The symbol is something like <code>_Z5parseRKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE</code>. C looks for plain <code>parse</code>. The fix:</p>
+<ol>
+<li>Wrap the function in <code>extern "C"</code>, which forces unmangled C-style names. But then it can't accept <code>std::string</code>; pass <code>const char *</code> instead.</li>
+<li>Provide a C-friendly wrapper:</li>
+</ol>
+<div class="code" data-lang="cpp">
+<pre><code>// parse.cpp
+extern "C" int parse_c(const char *s) {
+    return parse(std::string(s));
+}
+</code></pre>
+</div>
+<div class="code" data-lang="c">
+<pre><code>/* parse.h — visible from C and C++ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+int parse_c(const char *s);
+#ifdef __cplusplus
+}
+#endif
+</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">RPATH detective</span>
+</div>
+<div class="exercise-body">
+<p>A binary works in dev but fails on a customer machine: <code>error while loading shared libraries: libfoo.so: cannot open shared object file</code>. The library is shipped alongside the binary in <code>./lib/</code>. What's wrong, and how do you fix it without telling the user to set <code>LD_LIBRARY_PATH</code>?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The binary doesn't know to look in <code>./lib/</code>. Bake an RPATH/RUNPATH:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc main.o -L./lib -lfoo -Wl,-rpath,'$ORIGIN/lib' -o app
+$ readelf -d app | grep -E 'RPATH|RUNPATH'
+0x000000000000001d (RUNPATH) Library runpath: [$ORIGIN/lib]
+</code></pre>
+</div>
+<p><code>$ORIGIN</code> is the binary's directory; the loader expands it at runtime. Now no matter where the user runs <code>./app</code> from, libraries are found relative to the binary.</p>
+<p>Quote the dollar to keep the shell from expanding it at build time. Use <code>patchelf --set-rpath</code> to retrofit an existing binary.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Pipeline: preprocessor → compiler → assembler → linker. The driver runs all four; each can be invoked alone.</li>
+  <li>Headers contain declarations (and inline/template/constexpr definitions). <code>.c</code>/<code>.cpp</code> contain the rest.</li>
+  <li>One Definition Rule: one external definition per program; identical inline definitions allowed.</li>
+  <li><code>nm</code>, <code>readelf</code>, <code>objdump</code>, <code>ldd</code> are your link-error toolkit.</li>
+  <li>Static <code>.a</code> = archive copied in. Shared <code>.so</code> = loaded at runtime; needs <code>-fPIC</code> and visibility discipline.</li>
+  <li>"Undefined reference" diagnostics: spell-check, <code>nm</code>, library order, missing <code>-l</code>, mangled names.</li>
+  <li>RPATH/RUNPATH with <code>$ORIGIN</code> for self-contained deployments; never ship requiring <code>LD_LIBRARY_PATH</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="03-memory-and-ub.html"><span class="lbl">← Prev</span><span class="ttl">Memory model &amp; UB</span></a>
+  <a href="05-linux-process-model.html" class="next"><span class="lbl">Next →</span><span class="ttl">Linux process model</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

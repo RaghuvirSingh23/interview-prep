@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · Recursive Make Considered Harmful — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 12</span>
+  Recursive Make Considered Harmful
+</h1>
+<p class="lede">
+  In 1997 Peter Miller published a paper that lays out exactly why the
+  recursive-Makefile-per-directory pattern — still the default in most
+  projects — is broken. This chapter summarises that paper, explains
+  the non-recursive alternative, and shows you how to migrate.
+</p>
+
+<blockquote>
+"The thesis of this paper is simple: recursive make produces
+incorrect or inefficient builds, and these problems cannot be fixed
+by adding more rules."
+<cite>— Peter Miller, 1997</cite>
+</blockquote>
+
+<h2 id="recursive-pattern">The pattern in question</h2>
+
+<p>Nearly every medium-sized project you've seen has a structure like this:</p>
+
+<div class="code" data-lang="text">
+<pre><code>project/
+├── Makefile
+├── src/
+│   └── Makefile
+├── lib/
+│   └── Makefile
+└── tests/
+    └── Makefile</code></pre>
+</div>
+
+<p>Top-level Makefile:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all
+all:
+	$(MAKE) -C lib
+	$(MAKE) -C src
+	$(MAKE) -C tests</code></pre>
+</div>
+
+<p>
+  "Each subdirectory has its own Makefile. The top-level Makefile
+  calls <code>make</code> recursively in each." Feels organised. Feels
+  modular. <strong>Is wrong.</strong>
+</p>
+
+<h2 id="problems">What goes wrong</h2>
+
+<h4 id="prob-1">Problem 1: incomplete dependency graph</h4>
+
+<p>
+  Each sub-Make only knows about the files in its directory. If
+  <code>src/main.c</code> <code>#include</code>s <code>lib/utils.h</code>,
+  that dependency can't be expressed in <code>src/Makefile</code> in
+  any clean way. Worse: <code>src/Makefile</code> has no way to know
+  when <code>lib/</code>'s outputs change.
+</p>
+
+<p>
+  The top-level Makefile "solves" this by always building <code>lib</code>
+  before <code>src</code>. But that's <em>order</em>, not a
+  <em>graph</em>. If <code>lib</code> is unchanged, the sub-Make runs
+  anyway, walks its own dir, concludes "nothing to do", and exits.
+  Wasteful. And when dependencies cross directories, Make can't help
+  you: it doesn't see the crossing.
+</p>
+
+<h4 id="prob-2">Problem 2: order serialises work that could parallelise</h4>
+
+<p>
+  <code>$(MAKE) -C lib</code> then <code>$(MAKE) -C src</code>: these
+  run sequentially. Within each dir, jobs are parallel; across dirs,
+  they're serial. In reality, most <code>src/</code> files don't
+  depend on anything in <code>lib/</code> — they're independent —
+  but recursive Make has no way to express that.
+</p>
+
+<h4 id="prob-3">Problem 3: redundant work</h4>
+
+<p>
+  Every sub-Make invocation is a new process: read Makefile, parse,
+  build graph, walk. For a project with 10 sub-Makefiles, you re-read
+  and re-parse everything 10 times per build.
+</p>
+
+<h4 id="prob-4">Problem 4: correctness bugs from repeated targets</h4>
+
+<p>
+  If both <code>lib/Makefile</code> and <code>tests/Makefile</code>
+  can produce <code>../build/libfoo.a</code>, parallel runs of the
+  two sub-Makes can race. No single Make instance sees both and
+  arbitrates.
+</p>
+
+<h4 id="prob-5">Problem 5: "phony" shenanigans</h4>
+
+<p>Since sub-Makes don't know if anything has changed cross-directory, the top-level Makefile often ends up doing things like:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: force
+subdirs: force
+	for d in lib src tests; do $(MAKE) -C $$d; done</code></pre>
+</div>
+
+<p>That is, declaring everything phony so sub-Makes always run. Which means the sub-Makes do all their <em>own</em> work of deciding what's up-to-date — exactly what Make is supposed to do globally.</p>
+
+<h2 id="the-fix">The non-recursive approach</h2>
+
+<p>
+  Peter Miller's proposal: <strong>one Makefile</strong> at the top
+  level that has access to the entire graph. Subdirectories contribute
+  <em>included fragments</em>, not independent Makefiles.
+</p>
+
+<div class="code" data-lang="text">
+<pre><code>project/
+├── Makefile            # full graph, drives everything
+├── src/
+│   ├── main.c
+│   └── subdir.mk       # contributes src-specific rules
+├── lib/
+│   ├── utils.c
+│   └── subdir.mk
+└── tests/
+    ├── test_main.c
+    └── subdir.mk</code></pre>
+</div>
+
+<p>Top-level <code>Makefile</code>:</p>
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:
+.SUFFIXES:
+
+SUBDIRS := lib src tests
+
+include $(addsuffix /subdir.mk,$(SUBDIRS))
+
+# Aggregate the global lists
+$(info all objects: $(OBJ))
+$(info all binaries: $(BIN))
+
+.PHONY: all clean
+all: $(BIN)
+
+build/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $&lt; -o $@
+
+clean: ; rm -rf build</code></pre>
+</div>
+
+<p><code>lib/subdir.mk</code>:</p>
+<div class="code" data-lang="make">
+<pre><code># Variables contributed by lib
+LIB_SRC := $(wildcard lib/*.c)
+LIB_OBJ := $(patsubst %.c,build/%.o,$(LIB_SRC))
+
+LIB := build/libmine.a
+
+$(LIB): $(LIB_OBJ)
+	ar crs $@ $^
+
+OBJ += $(LIB_OBJ)</code></pre>
+</div>
+
+<p><code>src/subdir.mk</code>:</p>
+<div class="code" data-lang="make">
+<pre><code>APP_SRC := $(wildcard src/*.c)
+APP_OBJ := $(patsubst %.c,build/%.o,$(APP_SRC))
+
+APP := build/hello
+
+$(APP): $(APP_OBJ) build/libmine.a
+	$(CC) $(APP_OBJ) build/libmine.a -o $@
+
+OBJ += $(APP_OBJ)
+BIN += $(APP)</code></pre>
+</div>
+
+<p><code>tests/subdir.mk</code>:</p>
+<div class="code" data-lang="make">
+<pre><code>TST_SRC := $(wildcard tests/*.c)
+TST_BIN := $(patsubst tests/%.c,build/tests/%,$(TST_SRC))
+
+.PHONY: check
+check: $(TST_BIN)
+	@for t in $^; do ./$$t || exit 1; done
+
+build/tests/%: tests/%.c build/libmine.a | build/tests
+	$(CC) $(CFLAGS) $&lt; build/libmine.a -o $@
+
+build/tests: ; mkdir -p $@
+
+BIN += $(TST_BIN)</code></pre>
+</div>
+
+<p>Now:</p>
+<ul>
+  <li>One Make process sees the <em>entire</em> graph.</li>
+  <li>Cross-directory dependencies are expressible directly: <code>$(APP): $(LIB)</code> in <code>src/subdir.mk</code>.</li>
+  <li>Parallel execution works across the whole project: an <code>app.o</code> and a <code>utils.o</code> compile in parallel even though they're in different dirs.</li>
+  <li>When you change nothing, <code>make</code> prints one "nothing to be done" instead of ten.</li>
+</ul>
+
+<h2 id="tradeoffs">What you give up</h2>
+
+<p>The non-recursive approach has real costs. Be honest:</p>
+
+<ul>
+  <li><strong>Top-level Makefile grows.</strong> It's 200-300 lines for a moderately-sized project. Split into many fragments, but the graph is in one process.</li>
+  <li><strong>Namespacing matters.</strong> You can't say <code>OBJ = …</code> in each fragment; you must say <code>LIB_OBJ</code>, <code>APP_OBJ</code>, etc. Conventions are enforced by convention, not language.</li>
+  <li><strong>Local builds need a trick.</strong> <code>cd src; make</code> doesn't work, because there's no Makefile there. You need <code>make -C ..</code> or a thin stub Makefile in each subdir that forwards to the top.</li>
+</ul>
+
+<p>That last point is a real ergonomic hit. A classic workaround:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">src/Makefile (stub)</span></div>
+<pre><code># Forward everything to the top-level build
+MAKEFLAGS += --no-print-directory
+.PHONY: all $(MAKECMDGOALS)
+all $(MAKECMDGOALS):
+	$(MAKE) -C .. $(patsubst %,src-%,$(MAKECMDGOALS))</code></pre>
+</div>
+
+<p>It's a hack. Most real-world projects eventually decide either:</p>
+<ul>
+  <li>"Run the top-level Make from anywhere" (you train people), or</li>
+  <li>Use stub Makefiles that forward, accepting some ergonomic weirdness.</li>
+</ul>
+
+<h2 id="when-recursive">When recursive <em>is</em> OK</h2>
+
+<p>Don't let this chapter make you dogmatic. Recursive Make is fine when:</p>
+<ul>
+  <li>Each subdirectory is genuinely independent: a monorepo of unrelated tools, each with its own build.</li>
+  <li>Sub-projects have different toolchains (one's C, one's Rust, one's Go) and don't share build-graph dependencies.</li>
+  <li>You want to vendor a third-party project whose Makefile you won't touch.</li>
+  <li>Your project is small enough that the waste doesn't matter.</li>
+</ul>
+
+<p>
+  The anti-pattern Miller attacks is recursive Make <em>for a single
+  project</em> whose components really <em>do</em> depend on each
+  other. That's the case where non-recursive wins.
+</p>
+
+<h2 id="migration">Migrating from recursive to non-recursive</h2>
+
+<p>If you inherit a recursive build and want to flatten it, the incremental plan:</p>
+<ol>
+  <li>Keep the top-level <code>Makefile</code>. Add <code>include</code>s instead of <code>$(MAKE) -C</code> calls.</li>
+  <li>Each sub-Makefile becomes a <code>subdir.mk</code> fragment. Rewrite references to use absolute-in-tree paths (<code>build/src/foo.o</code>, not <code>build/foo.o</code>).</li>
+  <li>Gather lists in global variables (<code>OBJ</code>, <code>BIN</code>) with <code>+=</code>.</li>
+  <li>Wire up cross-directory dependencies where they were implicit before. Use <code>$(info)</code> to verify the aggregated lists.</li>
+  <li>Run <code>make -j N</code>, measure the speedup. Fix anything that broke.</li>
+</ol>
+
+<p>You'll usually see a speedup of 1.5-3× on "clean build" and a bigger win on incremental (the null-rebuild case).</p>
+
+<h2 id="alt-tools">Alternatives to solving this in Make</h2>
+
+<p>
+  Miller's paper was from 1997. Since then, build tools have been
+  designed that sidestep the problem entirely:
+</p>
+
+<table>
+<thead><tr><th>Tool</th><th>Approach</th></tr></thead>
+<tbody>
+<tr><td><strong>ninja</strong></td><td>A minimal build executor. Rules come from a generator (CMake, Meson, or hand-written). No recursion — always one big graph.</td></tr>
+<tr><td><strong>bazel</strong></td><td>Hermetic, content-addressable. Every rule has explicit inputs and outputs. No mtimes.</td></tr>
+<tr><td><strong>tup</strong></td><td>Tracks filesystem changes via FUSE. Builds are always correct.</td></tr>
+<tr><td><strong>redo</strong></td><td>D.J. Bernstein's minimalist alternative. Per-target shell scripts. Hash-based.</td></tr>
+</tbody>
+</table>
+
+<p>Nonetheless, Make is still the most common build tool. Knowing how to do non-recursive Make correctly means your Makefiles will outlast most trendy alternatives.</p>
+
+<h2 id="hands-on">Hands-on: convert a small recursive tree</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · flattening a recursive build</div>
+<div class="hands-on-body">
+<p>Set up this tree:</p>
+<div class="code" data-lang="sh">
+<pre><code>ch12/
+├── Makefile
+├── lib/
+│   ├── Makefile
+│   └── util.c
+└── app/
+    ├── Makefile
+    └── main.c</code></pre>
+</div>
+<p>With contents:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile (recursive)</span></div>
+<pre><code>.PHONY: all clean
+all:
+	$(MAKE) -C lib
+	$(MAKE) -C app
+clean:
+	$(MAKE) -C lib clean
+	$(MAKE) -C app clean</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">lib/Makefile</span></div>
+<pre><code>libutil.a: util.o
+	ar crs $@ $&lt;
+util.o: util.c
+	cc -c $&lt; -o $@
+clean: ; rm -f *.o *.a
+.PHONY: clean</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">app/Makefile</span></div>
+<pre><code>hello: main.o ../lib/libutil.a
+	cc $^ -o $@
+main.o: main.c
+	cc -c $&lt; -o $@
+clean: ; rm -f *.o hello
+.PHONY: clean</code></pre>
+</div>
+<p>Notice the problem: <code>app/Makefile</code> depends on <code>../lib/libutil.a</code>, but can't build it. The top-level ordering saves us by running <code>lib</code> first.</p>
+<p>Now flatten:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile (non-recursive)</span></div>
+<pre><code>.PHONY: all clean
+.DELETE_ON_ERROR:
+
+include lib/subdir.mk
+include app/subdir.mk
+
+all: $(BIN)
+
+%.o: %.c
+	cc -c $&lt; -o $@
+
+clean: ; rm -f $(OBJ) $(BIN) lib/libutil.a</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">lib/subdir.mk</span></div>
+<pre><code>LIB_OBJ := lib/util.o
+lib/libutil.a: $(LIB_OBJ)
+	ar crs $@ $^
+
+OBJ += $(LIB_OBJ)</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">app/subdir.mk</span></div>
+<pre><code>APP_OBJ := app/main.o
+APP := app/hello
+
+$(APP): $(APP_OBJ) lib/libutil.a
+	cc $^ -o $@
+
+OBJ += $(APP_OBJ)
+BIN += $(APP)</code></pre>
+</div>
+<p>Build, modify, rebuild, measure. Compare with the recursive version.</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ time make -j 4     # with recursive Makefile
+$ time make -j 4     # with non-recursive Makefile</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Identify Miller's problems</span>
+</div>
+<div class="exercise-body">
+<p>Look at a recursive Makefile in a project you know. Find concrete examples of:</p>
+<ol>
+  <li>A cross-directory dependency that's not expressed in the build graph.</li>
+  <li>Work that <em>could</em> run in parallel but doesn't.</li>
+  <li>A sub-make that always runs, even when its directory hasn't changed.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Project-specific. You're looking for patterns like:</p>
+<ol>
+  <li><code>app/</code> links against <code>../lib/libfoo.a</code>, but the dep isn't declared — top-level ordering saves it.</li>
+  <li>Top-level runs <code>make -C lib; make -C app</code> sequentially, but <code>app/util.c</code> doesn't actually depend on anything in <code>lib/</code>.</li>
+  <li>A top-level <code>all: force; $(MAKE) -C subdir</code> using a <code>force</code> phony to re-invoke every time.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">The null-build test</span>
+</div>
+<div class="exercise-body">
+<p>
+  For a recursive Makefile, measure how long <code>make</code> takes
+  when nothing has changed. For the equivalent non-recursive version,
+  do the same. Where does the time go?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Recursive: each sub-Make reads its Makefile, parses, stats all its
+  targets, concludes "nothing to do", prints, exits. Sum across N
+  sub-Makes.
+</p>
+<p>
+  Non-recursive: one process, one parse, one walk, done. Usually 5-20×
+  faster for null builds.
+</p>
+<p>
+  Null-build speed matters because developers run <code>make</code>
+  constantly while editing. A sub-second null build feels alive. A
+  5-second null build feels broken.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Stub Makefile for subdirectory entry</span>
+</div>
+<div class="exercise-body">
+<p>
+  Write a stub Makefile that lives in <code>src/</code> so users can
+  run <code>cd src; make test</code> and have it "do the right thing"
+  against the top-level non-recursive Makefile.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code># src/Makefile — forward to top-level
+MAKEFLAGS += --no-print-directory
+
+.PHONY: FORCE
+% : FORCE
+	@$(MAKE) -C .. $@
+
+FORCE:</code></pre>
+</div>
+<p>
+  The catch-all pattern rule <code>%: FORCE</code> sends any target
+  name up a level. <code>FORCE</code> as a phony prerequisite forces
+  the recipe to always run. The result: from <code>src/</code>, you
+  can invoke any top-level target.
+</p>
+<p>
+  Drawback: you lose shell completion of targets unless the top-level
+  Makefile is also referenced somehow. Some projects ship a shell
+  helper to compensate.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Namespace discipline</span>
+</div>
+<div class="exercise-body">
+<p>
+  In a non-recursive project with 10 subdirectories, what naming
+  conventions prevent variable collisions between <code>subdir.mk</code>
+  fragments? Design a small convention and apply it.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Common conventions:</p>
+<ul>
+  <li><strong>Prefix-per-subdir.</strong> Every variable in <code>lib/subdir.mk</code> starts with <code>LIB_</code>. Simple, robust, verbose.</li>
+  <li><strong>Local-then-append.</strong> Use short local names (<code>src</code>, <code>obj</code>), <code>+=</code> into globals, then <code>undefine</code> the local names before the next include.</li>
+  <li><strong>Target-specific, not global.</strong> Attach flags to specific targets (<code>foo.o: CFLAGS += -DFOO</code>) so they don't leak.</li>
+</ul>
+<p>Example of approach 2:</p>
+<div class="code" data-lang="make">
+<pre><code># lib/subdir.mk
+d := lib
+srcs := $(wildcard $(d)/*.c)
+objs := $(srcs:.c=.o)
+
+OBJ += $(objs)
+
+undefine d srcs objs</code></pre>
+</div>
+<p>This is what the Linux kernel's Kbuild system does, with some additional macro magic.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Read Miller's original paper</span>
+</div>
+<div class="exercise-body">
+<p>
+  Read <a href="http://aegis.sourceforge.net/auug97.pdf">"Recursive
+  Make Considered Harmful"</a> (Peter Miller, 1997). Summarise the
+  three most important points that this chapter didn't cover. Find
+  one argument of Miller's that you disagree with and defend your
+  position.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>No single solution — the point is to read the original and form your own view. A few things you'll find Miller emphasising:</p>
+<ul>
+  <li>The "Directed Acyclic Graph" view — Make's entire job is to walk a DAG. Recursive Make fragments the DAG and loses information.</li>
+  <li>Miller's <code>cook</code> tool (his own answer to the problem) — he's not just critiquing, he's proposed a solution.</li>
+  <li>Specific failure modes he's seen in real projects with large recursive trees.</li>
+</ul>
+<p>A common disagreement: Miller presents non-recursive as unambiguously superior. In practice, vendored sub-projects, polyglot builds, and "monorepo of unrelated tools" scenarios are all cases where recursion is the right call. Your disagreement might be on that ergonomic / real-world note.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Recursive Make fragments the dependency graph. Each sub-Make has only a partial view.</li>
+  <li>Cross-directory dependencies can't be expressed cleanly — they're encoded in top-level ordering, which is a graph only if you squint.</li>
+  <li>Parallelism suffers — independent work in different dirs runs serially because Make doesn't see it as independent.</li>
+  <li>Null builds are N× slower, once per recursive level.</li>
+  <li>Non-recursive alternative: one top-level Makefile <code>include</code>s <code>subdir.mk</code> fragments. Entire graph is known. Parallelism works. Null builds are fast.</li>
+  <li>Costs of non-recursive: namespace discipline, larger top-level file, no native "cd subdir; make" without stubs.</li>
+  <li>Recursive is still fine for truly independent sub-projects, vendored code, polyglot trees.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="11-debugging.html"><span class="lbl">← Prev</span><span class="ttl">Debugging Make</span></a>
+  <a href="13-50-questions.html" class="next"><span class="lbl">Next →</span><span class="ttl">The 50 Questions</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · Helm, GitOps, Operators — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 12</span>
+  Helm, GitOps, Operators
+</h1>
+<p class="lede">
+  Three layers above raw manifests: <strong>Helm</strong> packages
+  templated YAML, <strong>GitOps</strong> declares what should be in
+  the cluster from a git repo, <strong>operators</strong> teach
+  Kubernetes new resource types via custom controllers. After this
+  chapter, the open-source ecosystem stops feeling alien.
+</p>
+
+<h2 id="helm">Helm — the package manager</h2>
+
+<p>Helm packages a set of Kubernetes manifests into a <strong>chart</strong>: a versioned bundle with templated YAML, a values file for customisation, and a dependency graph. Think of it as <code>apt</code> for Kubernetes.</p>
+
+<h4>Anatomy of a chart</h4>
+<div class="code" data-lang="text">
+<pre><code>my-app/
+├── Chart.yaml         # name, version, dependencies
+├── values.yaml        # default user-overridable values
+├── templates/
+│   ├── _helpers.tpl   # reusable Go-template fragments
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── ingress.yaml
+│   ├── configmap.yaml
+│   └── NOTES.txt      # printed after install
+└── charts/            # bundled subcharts</code></pre>
+</div>
+
+<h4>A minimal Chart.yaml</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: v2
+name: my-app
+description: My application
+type: application
+version: 0.1.0          # chart version (SemVer)
+appVersion: "1.2.3"     # the app's version (just metadata)
+dependencies:
+  - name: redis
+    version: "20.1.0"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled</code></pre>
+</div>
+
+<h4>values.yaml — user-overridable defaults</h4>
+<div class="code" data-lang="yaml">
+<pre><code>image:
+  repository: registry.example.com/my-app
+  tag: ""                       # overridden via --set or values file
+  pullPolicy: IfNotPresent
+
+replicas: 3
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   {              memory: 128Mi }
+
+ingress:
+  enabled: false
+  host: my-app.example.com
+
+redis:
+  enabled: false</code></pre>
+</div>
+
+<h4>A templated manifest</h4>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">templates/deployment.yaml</span></div>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "my-app.fullname" . }}
+  labels: {{- include "my-app.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "my-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "my-app.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 8080 }
+          resources: {{- toYaml .Values.resources | nindent 12 }}</code></pre>
+</div>
+
+<p>The Go-template syntax (<code>{{ ... }}</code>) lets you parametrise. The <code>checksum/config</code> annotation is the trick we covered in Chapter 8 — a hash of the rendered ConfigMap means changes there force a rolling restart.</p>
+
+<h4>The Helm CLI</h4>
+<div class="code terminal" data-lang="sh">
+<pre><code># Add a repo
+$ helm repo add bitnami https://charts.bitnami.com/bitnami
+$ helm repo update
+
+# Install
+$ helm install my-redis bitnami/redis --namespace data --create-namespace
+$ helm install my-app ./my-app --values values-prod.yaml
+
+# What did it install?
+$ helm list -A
+$ helm status my-app
+
+# See what would be applied (dry run + show)
+$ helm install --dry-run --debug my-app ./my-app
+$ helm template my-app ./my-app | less       # render to stdout
+
+# Upgrade in place
+$ helm upgrade my-app ./my-app --values values-prod.yaml --atomic --timeout 5m
+
+# Rollback to previous revision
+$ helm rollback my-app 1
+
+# Uninstall
+$ helm uninstall my-app
+
+# Lint the chart
+$ helm lint ./my-app</code></pre>
+</div>
+
+<p><code>--atomic</code> means: if the upgrade fails, automatically roll back. Combined with <code>--timeout</code>, it's the safest default for production deploys.</p>
+
+<h4>Values precedence</h4>
+<p>Highest to lowest:</p>
+<ol>
+  <li><code>--set foo=bar</code> on the command line.</li>
+  <li><code>--values file.yaml</code>, in order (later files win).</li>
+  <li>The chart's <code>values.yaml</code>.</li>
+</ol>
+
+<p>Common pattern: <code>values.yaml</code> is dev defaults, <code>values-staging.yaml</code> and <code>values-prod.yaml</code> override per environment.</p>
+
+<h4>Helm gotchas</h4>
+<ul>
+  <li><strong>Whitespace is awful.</strong> <code>nindent</code> and <code>indent</code> are your friends. Run <code>helm template</code> often to see the rendered output.</li>
+  <li><strong>Released CRDs are not upgraded</strong>. Helm v3 has an explicit <code>crds/</code> directory whose contents are installed once and not touched on upgrade. For evolving CRDs, you usually manage them separately.</li>
+  <li><strong>Hooks fire at install/upgrade time</strong> (<code>pre-install</code>, <code>post-install</code>, etc.). Use sparingly — they make releases harder to reason about.</li>
+  <li><strong>The values file is the user's API</strong>. Document defaults; don't break compatibility on minor bumps.</li>
+</ul>
+
+<h2 id="kustomize-vs-helm">Kustomize vs Helm — pick one</h2>
+
+<table>
+<thead><tr><th></th><th>Kustomize</th><th>Helm</th></tr></thead>
+<tbody>
+<tr><td>Idiom</td><td>Patches over a base</td><td>Templates with values</td></tr>
+<tr><td>Built into kubectl</td><td>Yes</td><td>Separate binary</td></tr>
+<tr><td>Best for</td><td>"Same app, slight env differences"</td><td>"Distributable package, lots of knobs"</td></tr>
+<tr><td>Templating</td><td>None — strategic merge</td><td>Go templates</td></tr>
+<tr><td>Distribution</td><td>Just YAML in git</td><td>Chart repos (OCI now), versioned</td></tr>
+</tbody>
+</table>
+
+<p>Rule of thumb: Kustomize for your own apps, Helm for third-party things you install (databases, monitoring stacks, ingress controllers). Mixing both is fine — Kustomize can post-process Helm output.</p>
+
+<h2 id="gitops">GitOps — git as the source of truth</h2>
+
+<p>The idea: the desired state of your cluster lives in a git repo. A controller in the cluster watches git, sees drift between git and reality, and reconciles. Same desired-state-vs-actual-state model as Kubernetes itself, applied to the cluster's manifests.</p>
+
+<p>Two leading tools:</p>
+<ul>
+  <li><strong>Argo CD</strong> — UI-heavy, easier to onboard humans, mature ecosystem.</li>
+  <li><strong>Flux</strong> — CLI/CR-heavy, more cloud-native feel, lighter footprint.</li>
+</ul>
+
+<p>Both implement the same idea differently. Capabilities are converging.</p>
+
+<h2 id="argo">Argo CD — basics</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Install
+$ kubectl create namespace argocd
+$ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# Get the initial admin password
+$ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+
+# Port-forward and log in
+$ kubectl -n argocd port-forward svc/argocd-server 8080:443
+# open https://localhost:8080</code></pre>
+</div>
+
+<p>Then declare an Application that points at git:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/myorg/k8s-config.git
+    targetRevision: main                 # branch, tag, or commit
+    path: apps/my-app/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated:
+      prune: true                        # delete resources removed from git
+      selfHeal: true                     # revert manual edits in cluster
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true</code></pre>
+</div>
+
+<p>Argo CD continuously compares the rendered manifests in git (Helm, Kustomize, plain YAML, all supported) to live cluster state, and applies the diff. If someone <code>kubectl edit</code>s a Deployment, Argo notices and reverts (<code>selfHeal</code>) — or alerts (without selfHeal). Drift is visible.</p>
+
+<h4>The "App of Apps" pattern</h4>
+<p>For dozens or hundreds of apps, you don't want to hand-create each Application. The "app of apps" pattern: one root Application points at a folder of <em>other</em> Applications. Add a folder, the root picks it up, the new app appears.</p>
+
+<h4>ApplicationSet — even better</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cluster-apps
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/myorg/k8s-config.git
+        revision: main
+        directories:
+          - path: apps/*
+  template:
+    metadata:
+      name: '{{path.basename}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/myorg/k8s-config.git
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{path.basename}}'
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions: [CreateNamespace=true]</code></pre>
+</div>
+
+<p>One ApplicationSet generates an Application for every directory under <code>apps/</code>. Onboard a new service by creating a folder; nothing else.</p>
+
+<h2 id="gitops-patterns">GitOps repo layout</h2>
+
+<p>The common pattern is two repos:</p>
+<ul>
+  <li><strong>Application repo</strong> (<code>my-app/</code>) — source code, Dockerfile, Helm chart or Kustomize base.</li>
+  <li><strong>Config repo</strong> (<code>k8s-config/</code>) — environment-specific values, secrets references, the YAML Argo CD watches.</li>
+</ul>
+
+<p>CI builds an image, pushes it to a registry, then opens a PR (or commits directly via a bot) to <code>k8s-config/</code> updating the image tag for the relevant environment. Argo CD picks up the change. Deploy is a git operation.</p>
+
+<div class="code" data-lang="text">
+<pre><code>k8s-config/
+├── apps/
+│   ├── my-app/
+│   │   ├── base/
+│   │   │   ├── kustomization.yaml
+│   │   │   └── deployment.yaml
+│   │   └── overlays/
+│   │       ├── staging/
+│   │       │   ├── kustomization.yaml
+│   │       │   └── values.yaml
+│   │       └── prod/
+│   │           ├── kustomization.yaml
+│   │           └── values.yaml
+│   └── another-app/...
+└── argocd/
+    └── apps.yaml         # ApplicationSet definition</code></pre>
+</div>
+
+<p>Auditable, reviewable, rollback-able. Same primitive as code.</p>
+
+<h2 id="secrets-gitops">Secrets in GitOps — three solutions</h2>
+
+<p>You can't put plain Secrets in a public repo, and even private repos shouldn't store rotateable creds. Three good approaches:</p>
+
+<h4>External Secrets Operator (recommended for teams)</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata: { name: vault, namespace: prod }
+spec:
+  provider:
+    vault:
+      server: https://vault.example.com
+      path: secret
+      version: v2
+      auth: { kubernetes: { mountPath: kubernetes, role: prod } }
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata: { name: db-creds, namespace: prod }
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { kind: SecretStore, name: vault }
+  target: { name: db-creds }
+  data:
+    - secretKey: password
+      remoteRef: { key: prod/db, property: password }</code></pre>
+</div>
+<p>The actual secret lives in Vault/AWS SM/GCP SM. ESO syncs it into a K8s Secret in the cluster. Git only sees the <em>reference</em>, never the value.</p>
+
+<h4>Sealed Secrets</h4>
+<p>Encrypt the Secret with the cluster's public key; commit the encrypted blob to git; an in-cluster controller decrypts. Fine for solo / small teams.</p>
+
+<h4>SOPS + age/KMS</h4>
+<p>Encrypt YAML files with SOPS (using age, GPG, or a cloud KMS). Decrypt at deploy time via Argo CD's plugin or Flux. Git stores ciphertext.</p>
+
+<h4>Cloud-native: IRSA / Workload Identity</h4>
+<p>For cloud credentials specifically, skip the K8s Secret altogether: use AWS IRSA or GCP/Azure Workload Identity to give a Pod's ServiceAccount a cloud IAM identity. The pod uses normal AWS/GCP SDKs; no secrets in K8s.</p>
+
+<h2 id="operators">Operators — extending Kubernetes</h2>
+
+<p>An <strong>operator</strong> is a custom controller for a custom resource. You teach Kubernetes a new <em>kind</em> (e.g. <code>PostgresCluster</code>, <code>KafkaTopic</code>, <code>FirmwareBuild</code>), and you ship a controller that watches that kind and does the work.</p>
+
+<h4>The CRD</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firmwarebuilds.factory.acme.com
+spec:
+  group: factory.acme.com
+  scope: Namespaced
+  names:
+    kind: FirmwareBuild
+    plural: firmwarebuilds
+    singular: firmwarebuild
+    shortNames: [fb]
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [machine, sourceRef]
+              properties:
+                machine:    { type: string, enum: [imx8, rpi4, qemu] }
+                sourceRef:  { type: object, properties: { sha: { type: string } } }
+                priority:   { type: string, enum: [low, normal, high], default: normal }
+            status:
+              type: object
+              properties:
+                phase:      { type: string }
+                imageRef:   { type: string }
+                durationSeconds: { type: integer }
+      additionalPrinterColumns:
+        - { name: Machine, type: string, jsonPath: .spec.machine }
+        - { name: Phase,   type: string, jsonPath: .status.phase }
+        - { name: Image,   type: string, jsonPath: .status.imageRef }
+        - { name: Age,     type: date,   jsonPath: .metadata.creationTimestamp }</code></pre>
+</div>
+
+<p>Once installed, users can:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl get firmwarebuilds
+NAME           MACHINE   PHASE       IMAGE                 AGE
+nightly-imx8   imx8      Succeeded   reg.acme/fw:abc123    2h
+$ kubectl describe fb nightly-imx8</code></pre>
+</div>
+
+<p>Your <em>controller</em> watches FirmwareBuild events, runs the build (probably as a K8s Job under the hood), and updates <code>status</code>. The user wrote ~10 lines of YAML; you handled the rest.</p>
+
+<h4>How to write a controller</h4>
+
+<p>Two main toolkits:</p>
+<ul>
+  <li><strong>Operator SDK</strong> / <strong>Kubebuilder</strong> in Go — most production operators. Generates scaffolding, types, controller boilerplate.</li>
+  <li><strong>Kopf</strong> in Python — decorator-style, fast to prototype, fits Python shops perfectly.</li>
+</ul>
+
+<p>Tiny Kopf example:</p>
+<div class="code" data-lang="python">
+<pre><code>import kopf, kubernetes.client as k8s
+from kubernetes import config
+
+config.load_incluster_config()
+batch = k8s.BatchV1Api()
+
+@kopf.on.create('factory.acme.com', 'v1', 'firmwarebuilds')
+def create_fn(spec, name, namespace, patch, **_):
+    job = build_job_manifest(name, namespace, spec)
+    batch.create_namespaced_job(namespace=namespace, body=job)
+    patch.status['phase'] = 'Building'
+
+@kopf.on.event('batch', 'v1', 'jobs', labels={'fb-owner': kopf.PRESENT})
+def job_event(body, status, labels, **_):
+    fb_name = labels['fb-owner']
+    namespace = body['metadata']['namespace']
+    api = k8s.CustomObjectsApi()
+    if status.get('succeeded'):
+        api.patch_namespaced_custom_object_status(
+            'factory.acme.com', 'v1', namespace, 'firmwarebuilds', fb_name,
+            {'status': {'phase': 'Succeeded'}})
+    elif status.get('failed'):
+        api.patch_namespaced_custom_object_status(
+            'factory.acme.com', 'v1', namespace, 'firmwarebuilds', fb_name,
+            {'status': {'phase': 'Failed'}})
+
+def build_job_manifest(name, ns, spec):
+    return {
+        'apiVersion': 'batch/v1',
+        'kind': 'Job',
+        'metadata': {'name': f'fb-{name}', 'namespace': ns,
+                     'labels': {'fb-owner': name}},
+        'spec': {
+            'backoffLimit': 1,
+            'ttlSecondsAfterFinished': 86400,
+            'template': {
+                'spec': {
+                    'restartPolicy': 'Never',
+                    'containers': [{
+                        'name': 'build',
+                        'image': 'reg.acme/builder:1.0',
+                        'args': ['--machine', spec['machine'],
+                                 '--sha', spec['sourceRef']['sha']],
+                    }],
+                },
+            },
+        },
+    }</code></pre>
+</div>
+
+<p>Package this as a Deployment running in the cluster with the right RBAC (it needs to read FirmwareBuilds and create Jobs in the namespace). Now <code>kubectl apply</code> on a FirmwareBuild manifest triggers a real build.</p>
+
+<h2 id="operator-good">When to write an operator</h2>
+
+<p>Sign you should: the lifecycle of <em>your domain object</em> involves multiple K8s resources, ordering, status reconciliation, and humans keep getting it wrong. Examples: managing a database cluster, provisioning IoT device fleets, modeling per-tenant infrastructure.</p>
+
+<p>Sign you shouldn't: a Helm chart + a couple of CronJobs is enough. Operators are powerful and invasive — they can break upgrades, leak resources, and exhibit subtle bugs. Don't write one for "I have three YAMLs that need to apply in order".</p>
+
+<h2 id="control-plane-vs-data-plane">Control plane vs data plane</h2>
+
+<p>The Kubernetes-shaped phrase you'll hear from operators authors and platform teams: <strong>declare desired state as data, separate from the controller that acts on it</strong>. Your YAML is the declarative API, your operator is the imperative implementation. Same shape as core K8s.</p>
+
+<p>This split scales: tens of CRDs sharing the same controller, multiple controllers on different concerns, all coexisting because the API surface is data and the implementation is owned per CRD.</p>
+
+<h2 id="hands-on">Hands-on: install Argo CD on kind</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · GitOps in 5 commands</div>
+<div class="hands-on-body">
+<div class="code terminal" data-lang="sh">
+<pre><code># Install
+$ kubectl create ns argocd
+$ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+$ kubectl -n argocd wait --for=condition=available deploy --all --timeout=180s
+
+# Login
+$ argocd admin initial-password -n argocd
+$ kubectl -n argocd port-forward svc/argocd-server 8080:443 &amp;
+$ argocd login localhost:8080 --insecure --username admin
+# (paste the password)
+
+# Create an Application from a public sample repo
+$ argocd app create guestbook \
+    --repo https://github.com/argoproj/argocd-example-apps.git \
+    --path guestbook \
+    --dest-server https://kubernetes.default.svc \
+    --dest-namespace default \
+    --sync-policy auto
+
+$ argocd app get guestbook
+$ argocd app sync guestbook
+$ kubectl get all                      # the resources Argo just synced</code></pre>
+</div>
+<p>Now edit the upstream manifests in your fork, push, watch Argo CD reconcile in seconds. That's GitOps.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Helm or Kustomize?</span>
+</div>
+<div class="exercise-body">
+<p>For each, pick: (a) installing Postgres from a community chart, (b) deploying your own app to dev/staging/prod with image tag differences, (c) packaging a tool you'll publish for others to install.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>(a) Helm — that's how community charts are distributed. (b) Kustomize — small overlays per env, no templating cruft. (c) Helm — the distribution story is much better.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Atomic upgrade</span>
+</div>
+<div class="exercise-body">
+<p>You upgrade a Helm release; one of the new pods crashes on startup. With <code>--atomic --timeout 5m</code>, what happens? Without?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>With <code>--atomic</code></strong>: Helm waits up to 5 minutes for resources to become healthy. The new ReplicaSet's pods stay in CrashLoopBackOff. After timeout, Helm rolls back to the previous revision. You're back where you started; no traffic served by broken pods.</p>
+<p><strong>Without</strong>: <code>helm upgrade</code> returns success after applying. The Deployment is broken; Service still routes to old pods (good — readiness gates them) but you've now got a stuck rollout that needs manual intervention.</p>
+<p>Use <code>--atomic</code> in CI for production releases. Always.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">GitOps drift</span>
+</div>
+<div class="exercise-body">
+<p>An engineer runs <code>kubectl edit deploy/api</code> in prod to bump replicas to 10. Argo CD has <code>selfHeal: true</code>. What happens, and what should the engineer have done?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Argo CD detects the drift (live state differs from git), reverts replicas to the value in git, logs the OutOfSync event. The "fix" lasts seconds.</p>
+<p>What the engineer should have done: open a PR against the config repo updating the values file, get it reviewed, merge. Argo CD applies the change. Audit log = git log. The constraint is the feature.</p>
+<p>For genuine emergencies, GitOps tools have a "break-glass" — temporarily disable auto-sync, make the change, then commit it back to git. Always closed-loop.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Should I write an operator?</span>
+</div>
+<div class="exercise-body">
+<p>For each, decide: write an operator, or skip?</p>
+<ol type="a">
+  <li>Provisioning a Kafka topic requires creating the topic, an ACL, and a Secret with credentials.</li>
+  <li>Deploying a Helm chart with different values per env.</li>
+  <li>Triggering a firmware build pipeline when a CR is created.</li>
+  <li>Sending a Slack message when a Pod crashes.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li><strong>Operator candidate</strong> — three coupled resources whose lifecycle should be atomic. Strimzi (Kafka operator) does exactly this.</li>
+<li><strong>Skip</strong>. That's what Helm + values files already do. Argo CD + Helm covers it.</li>
+<li><strong>Operator candidate</strong> — your own domain logic, multi-step, status to report. The capstone in Chapter 14 builds this kind of thing.</li>
+<li><strong>Skip</strong>. A simple "alerter" Deployment that watches Pod events is enough. No need for a CRD when you don't have an API to model.</li>
+</ol>
+<p>Heuristic: the operator's value comes from <em>declarative API for your domain</em>. If you don't have a noun worth naming, you don't need an operator.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Secrets without secrets in git</span>
+</div>
+<div class="exercise-body">
+<p>Design a secrets flow for a GitOps-managed cluster where: production DB password is rotated weekly, no human ever sees it, and nothing sensitive is in git. Sketch the components.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Components:</p>
+<ol>
+<li><strong>Vault</strong> (or AWS Secrets Manager) holds the actual password. Rotation is automated server-side weekly.</li>
+<li><strong>External Secrets Operator</strong> in the cluster, authenticated to Vault via Vault's Kubernetes auth method (cluster's ServiceAccount JWT proves identity).</li>
+<li><strong>SecretStore</strong> + <strong>ExternalSecret</strong> manifests in git, referencing the Vault path — no values, only paths.</li>
+<li><strong>Argo CD</strong> applies these manifests; ESO syncs the K8s Secret from Vault every hour.</li>
+<li>App Deployment mounts the K8s Secret normally.</li>
+</ol>
+<p>Net effect: rotation in Vault → ESO picks it up within an hour → K8s Secret updated → app rolling-restarted (via a sidecar like Reloader, or the app re-reads on each request). Git only ever has references and shape; humans see nothing sensitive.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Helm = packaged, templated, distributable Kubernetes manifests; <code>--atomic --timeout</code> for safe upgrades.</li>
+  <li>Kustomize = patches over a base, built into kubectl, no templating language. Mix freely with Helm.</li>
+  <li>GitOps = git is the source of truth, a controller (Argo CD / Flux) reconciles cluster to git.</li>
+  <li>App-of-Apps and ApplicationSets scale GitOps to dozens or hundreds of services.</li>
+  <li>Secrets in GitOps: External Secrets Operator + Vault is the production path; Sealed Secrets / SOPS for smaller teams.</li>
+  <li>Operators teach Kubernetes new resource types via CRDs + custom controllers. Write one only when your domain genuinely warrants a declarative API.</li>
+  <li>Kopf for Python operators; Operator SDK / Kubebuilder for Go.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="13-k8s-production.html"><span class="lbl">← Prev</span><span class="ttl">Production Patterns</span></a>
+  <a href="15-jenkins-on-k8s.html" class="next"><span class="lbl">Next →</span><span class="ttl">Jenkins on Kubernetes</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

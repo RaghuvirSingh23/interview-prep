@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3 · Memory model &amp; UB</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 03</span>
+  Memory model &amp; undefined behaviour
+</h1>
+<p class="lede">
+  The thing that separates "writes C/C++" from "writes <em>correct</em>
+  C/C++" is a working model of memory and undefined behaviour. This
+  chapter is the rules and the why-they-exist. Read it once carefully;
+  the rest of your debugging life is easier.
+</p>
+
+<h2 id="virtual">A process's address space</h2>
+
+<p>On Linux x86_64, a typical user-space process sees a 48-bit virtual address space (split low/high), laid out roughly:</p>
+
+<div class="code" data-lang="text">
+<pre><code>0x7fff'ffff'ffff  ┌──────────────────────────┐  high
+                  │   stack (grows down)     │
+                  │ ↓                        │
+                  │                          │
+                  │   ...                    │
+                  │                          │
+                  │ ↑                        │
+                  │   mmap region            │  <- shared libs, large mallocs
+                  │ ↑                        │
+                  │                          │
+                  │   heap (brk, grows up)   │
+                  ├──────────────────────────┤
+                  │   .bss   (zero-init)     │
+                  │   .data  (init data)     │
+                  │   .rodata (read-only)    │
+                  │   .text  (code)          │
+0x0000'0000'0000  └──────────────────────────┘  low (page 0 unmapped — NULL)
+</code></pre>
+</div>
+
+<p>Things to internalise:</p>
+<ul>
+  <li>Every byte of memory you touch goes through the MMU. A wild pointer often hits an unmapped page → SIGSEGV.</li>
+  <li><strong>The first page is never mapped</strong>, so any pointer in [0, 4096) — yes including <code>NULL</code> — segfaults on dereference. Useful: <code>NULL</code> derefs are loud.</li>
+  <li>Stack and heap grow toward each other (modern systems use guard pages and ASLR; the picture is approximate).</li>
+  <li>ASLR (Address Space Layout Randomisation) shuffles base addresses every run, so pointers in printouts won't match between runs.</li>
+</ul>
+
+<h2 id="storage">Storage classes</h2>
+
+<table>
+<thead><tr><th>Where</th><th>Lifetime</th><th>Init</th></tr></thead>
+<tbody>
+<tr><td>Global / <code>static</code> in TU</td><td>Whole program</td><td>Zero-initialised, then static initialisers run</td></tr>
+<tr><td>Static-local (<code>static</code> inside function)</td><td>Whole program; first init lazily</td><td>Zero, then once at first use (thread-safe in C++11+)</td></tr>
+<tr><td>Automatic (locals)</td><td>Function call frame</td><td>Indeterminate — use it before assigning and you have UB</td></tr>
+<tr><td>Heap (<code>malloc</code>/<code>new</code>)</td><td>Until <code>free</code>/<code>delete</code></td><td>Indeterminate (or zero with <code>calloc</code>/value-init)</td></tr>
+<tr><td>Thread-local (<code>thread_local</code>)</td><td>Thread lifetime</td><td>Zero, then per-thread init</td></tr>
+</tbody>
+</table>
+
+<div class="code" data-lang="c">
+<pre><code>int x;                /* global; zero-initialised */
+static int y = 42;    /* internal linkage; .data section */
+static int counter;   /* internal linkage; .bss section (zero) */
+
+void f(void) {
+    int a;            /* automatic; UNINITIALISED — reading is UB */
+    int b = 0;        /* fine */
+    static int n;     /* persists across calls; zero on first entry */
+}
+</code></pre>
+</div>
+
+<h2 id="ub">Undefined behaviour — what it really means</h2>
+
+<p>UB is not "the program might crash". UB is "the standard says nothing — the compiler can do anything". In practice, modern compilers <em>assume</em> UB doesn't happen and optimise on that assumption. The result of triggering UB can be:</p>
+
+<ul>
+  <li>The expected behaviour (your luck).</li>
+  <li>A silent miscalculation.</li>
+  <li>A crash now.</li>
+  <li>A crash next Tuesday at 03:00 in production.</li>
+  <li>A change in behaviour across compiler versions, optimisation levels, or unrelated edits.</li>
+</ul>
+
+<p>The compiler is <em>not</em> being mean. It's leveraging UB to optimise — e.g. dead-code elimination relies on "if I prove that path leads to UB, the path can't be taken, so skip it".</p>
+
+<h2 id="ub-list">The UB hit list</h2>
+
+<p>Roughly in order of "how often you'll hit it":</p>
+
+<h4>1 · Out-of-bounds access</h4>
+<div class="code" data-lang="c">
+<pre><code>int a[10];
+a[10] = 0;          /* UB — index 10 is one past the end */
+a[-1] = 0;          /* UB — too low */
+</code></pre>
+</div>
+<p>ASan catches this at the moment it happens.</p>
+
+<h4>2 · Dereference of NULL or invalid pointer</h4>
+<div class="code" data-lang="c">
+<pre><code>int *p = NULL;
+*p = 0;              /* UB — usually SIGSEGV; but the compiler may have already pruned */
+
+int *q;              /* uninitialised */
+*q = 0;              /* UB — q's value is whatever happened to be in that memory */
+</code></pre>
+</div>
+
+<h4>3 · Use after free</h4>
+<div class="code" data-lang="c">
+<pre><code>int *p = malloc(sizeof *p);
+*p = 7;
+free(p);
+*p = 8;              /* UB — you don't own that memory anymore */
+</code></pre>
+</div>
+<p>ASan catches it. <code>p = NULL;</code> after free is a cheap defensive habit.</p>
+
+<h4>4 · Signed integer overflow</h4>
+<div class="code" data-lang="c">
+<pre><code>int x = INT_MAX;
+int y = x + 1;       /* UB — signed overflow */
+</code></pre>
+</div>
+<p>UBSan catches it. Note: <strong>unsigned</strong> overflow is well-defined (wraps mod 2^N). Use unsigned for hashes and counters where wrap-around is intentional.</p>
+
+<h4>5 · Shift by too many bits</h4>
+<div class="code" data-lang="c">
+<pre><code>int x = 1 &lt;&lt; 32;     /* UB on 32-bit int */
+int y = -1 &lt;&lt; 1;     /* UB before C++14 / C99 — "left shift of negative value" */
+</code></pre>
+</div>
+
+<h4>6 · Strict aliasing violation</h4>
+<div class="code" data-lang="c">
+<pre><code>float f = 3.14f;
+int   i = *(int *)&amp;f;            /* UB — accessing a float through an int pointer */
+</code></pre>
+</div>
+<p>Use <code>memcpy</code> instead — guaranteed correct, optimises to nothing on modern compilers:</p>
+<div class="code" data-lang="c">
+<pre><code>int i;
+memcpy(&amp;i, &amp;f, sizeof i);        /* OK; bit-pattern reinterpretation */
+</code></pre>
+</div>
+<p>Or in C++20+: <code>std::bit_cast&lt;int&gt;(f)</code>.</p>
+
+<h4>7 · Misaligned access</h4>
+<div class="code" data-lang="c">
+<pre><code>char buf[100];
+double *p = (double *)(buf + 1); /* alignment violation if buf is not 8-aligned at +1 */
+*p = 3.14;                       /* UB — works on x86 (slow), faults on ARMv7 */
+</code></pre>
+</div>
+
+<h4>8 · Sequencing in expressions</h4>
+<div class="code" data-lang="c">
+<pre><code>int i = 0;
+i = i++ + 1;          /* UB pre-C11/C++17; even now smells. Don't. */
+
+a[i] = i++;           /* UB — same object modified twice between sequence points */
+printf("%d %d\n", i, ++i);  /* UB — i and ++i both read; order unspecified */
+</code></pre>
+</div>
+
+<h4>9 · Reading uninitialised memory</h4>
+<p>Including padding bytes in structs. MSan catches this exact case (Chapter 11).</p>
+
+<h4>10 · Data races (multi-threaded)</h4>
+<p>Two threads, no synchronisation, at least one writes — UB. TSan catches it.</p>
+
+<h2 id="aliasing">Strict aliasing — the rules</h2>
+
+<p>The compiler may assume that <strong>distinct types don't alias</strong> (don't refer to the same memory). This lets it cache values across operations on differently-typed pointers.</p>
+
+<p>The legal exceptions:</p>
+<ul>
+  <li>Access via <code>char*</code>, <code>signed char*</code>, or <code>unsigned char*</code> is always allowed (these can alias anything).</li>
+  <li>Access via the same type, including added cv-qualifiers (<code>const T*</code> can read what <code>T*</code> wrote).</li>
+  <li>Access via a "compatible" type as defined by C — same underlying tag, etc.</li>
+  <li><code>memcpy</code> between objects.</li>
+  <li>In C, a union's active member can be read; in C++ this is conditionally allowed.</li>
+</ul>
+
+<p><strong>The right way</strong> to reinterpret bits:</p>
+<div class="code" data-lang="c">
+<pre><code>uint32_t bits;
+float    f = ...;
+memcpy(&amp;bits, &amp;f, sizeof bits);     /* legal everywhere */
+</code></pre>
+</div>
+
+<p>C++20 adds <code>std::bit_cast&lt;T&gt;</code> which is a <code>constexpr</code>-friendly version of the same idea.</p>
+
+<h2 id="alignment">Alignment</h2>
+
+<p>Every type has an alignment requirement: <code>int</code> on a 4-byte boundary, <code>double</code> on 8, etc. <code>malloc</code> returns memory aligned for any standard type. Misaligned access is UB even though x86 is forgiving — ARMv7 happily traps. Get used to <code>alignas</code> when laying out structs for SIMD or hardware MMIO.</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdalign.h&gt;
+alignas(64) struct CacheLine { int counter; };
+</code></pre>
+</div>
+
+<h2 id="lifetime">Lifetime</h2>
+
+<p>An object's <strong>lifetime</strong> is the interval from when its storage is allocated and constructed to when it's destroyed. Reading or writing outside this interval is UB.</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>const std::string&amp; trap() {
+    return std::string("temp");      // temporary — destroyed at end of statement
+}
+const auto&amp; ref = trap();            // ref dangles
+puts(ref.c_str());                    // UB
+</code></pre>
+</div>
+
+<p>Common lifetime mistakes:</p>
+<ul>
+  <li>Returning a pointer/reference to a local.</li>
+  <li>Storing a <code>string_view</code> or <code>span</code> that outlives its source.</li>
+  <li>Iterator invalidation — push_back into a vector, your old iterators may dangle.</li>
+  <li>Capturing by reference in a lambda that's stored or posted to a thread.</li>
+</ul>
+
+<h2 id="iterator-invalidation">Iterator invalidation cheatsheet</h2>
+
+<table>
+<thead><tr><th>Container</th><th>Invalidates iterators on…</th></tr></thead>
+<tbody>
+<tr><td><code>vector</code></td>          <td>Anything that may reallocate (<code>push_back</code>, <code>insert</code>, <code>resize</code>, <code>reserve</code> only if it grows). <code>erase</code> invalidates from that point on.</td></tr>
+<tr><td><code>deque</code></td>           <td><code>push_front/back</code> invalidates iterators (but not pointers/refs to elements). <code>insert/erase</code> in the middle invalidates everything.</td></tr>
+<tr><td><code>list</code> / <code>forward_list</code></td><td>Only the iterators to erased elements.</td></tr>
+<tr><td><code>map</code> / <code>set</code></td>          <td>Only the iterators to erased elements.</td></tr>
+<tr><td><code>unordered_map</code> / <code>unordered_set</code></td><td>Rehash invalidates iterators (but not pointers to nodes). <code>erase</code> only invalidates erased.</td></tr>
+</tbody>
+</table>
+
+<h2 id="endianness">Endianness, sign bit, padding</h2>
+
+<p>Integer width and signedness are sized; representation isn't:</p>
+<ul>
+  <li>Endianness: little-endian on x86 and most ARM, big-endian on some embedded and network protocols.</li>
+  <li>Signed representation: two's-complement is the only representation in C++20 / C23 (older standards permitted ones'-complement and sign-magnitude — extinct).</li>
+  <li>Struct padding: the compiler inserts bytes between members to satisfy alignment. <code>memcmp</code>ing two structs is broken because of padding noise. Either zero-init both, or compare member-wise, or use <code>__attribute__((packed))</code> for wire formats (with care).</li>
+</ul>
+
+<div class="code" data-lang="c">
+<pre><code>uint32_t htobe32_v(uint32_t v) {        /* host → big-endian (network order) */
+    return ((v &amp; 0xff)         &lt;&lt; 24)
+         | ((v &amp; 0xff00)       &lt;&lt; 8)
+         | ((v &amp; 0xff'0000)    &gt;&gt; 8)
+         | ((v &amp; 0xff00'0000)  &gt;&gt; 24);
+}
+/* In real code: htonl(v) on POSIX, or __builtin_bswap32(v). */
+</code></pre>
+</div>
+
+<h2 id="stack">Stack: layout, growth, overflows</h2>
+
+<p>Each thread has a stack — typically 8 MiB on Linux. Each function call pushes a stack frame: saved registers, return address, locals, alignment padding, the next frame's args.</p>
+
+<p>Stack overflow happens when recursion is too deep or you put a giant array on the stack. The kernel's guard page makes the next access fault — usually SIGSEGV. <code>ulimit -s</code> shows the limit.</p>
+
+<div class="code" data-lang="c">
+<pre><code>void infinite(int x) { infinite(x + 1); }     /* stack overflow */
+
+void big_local(void) {
+    char huge[16 * 1024 * 1024];               /* 16 MiB on the stack — bang */
+}
+</code></pre>
+</div>
+
+<p>Use the heap or static storage for large buffers. Recursive algorithms with unbounded depth need iteration.</p>
+
+<h2 id="heap">Heap: allocators, fragmentation</h2>
+
+<p>The default allocator on Linux glibc is ptmalloc2 (a thread-local-arena variant). Alternative allocators in real production:</p>
+<ul>
+  <li><strong>jemalloc</strong>, <strong>tcmalloc</strong>, <strong>mimalloc</strong> — generally faster, better fragmentation.</li>
+  <li><strong>Custom arenas</strong> — preallocate, hand out from a region, reset all at once. Game engines, parsers, request handlers.</li>
+</ul>
+
+<p>The cost of <code>malloc</code> is non-trivial: a typical allocation is 100s of cycles. In hot paths, allocate once and reuse. <code>vector::reserve</code> before push-back loops. Pool small objects.</p>
+
+<h2 id="signed-overflow">Signed overflow — and why <code>-fwrapv</code></h2>
+
+<p>The compiler exploits "signed overflow doesn't happen" for optimisations. Two relevant flags:</p>
+
+<table>
+<tr><td><code>-fwrapv</code></td><td>Define signed overflow as 2's-complement wrap. Pessimises some loops; makes some bugs deterministic.</td></tr>
+<tr><td><code>-ftrapv</code></td><td>Trap on signed overflow at runtime. Heavy; useful in test builds.</td></tr>
+<tr><td><code>-fsanitize=signed-integer-overflow</code> (UBSan)</td><td>Catch and report at runtime. The right choice for dev/test.</td></tr>
+</table>
+
+<h2 id="hands-on">Hands-on: see UBSan in action</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · the compiler is not bluffing</div>
+<div class="hands-on-body">
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">overflow.c</span></div>
+<pre><code>#include &lt;limits.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    int x = INT_MAX;
+    int y = x + 1;            /* signed overflow */
+    printf("%d\n", y);
+    return 0;
+}
+</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -O2 overflow.c -o overflow &amp;&amp; ./overflow
+-2147483648                          # often prints this on x86, but UB
+
+$ cc -O2 -fsanitize=undefined overflow.c -o overflow &amp;&amp; ./overflow
+overflow.c:6:15: runtime error: signed integer overflow:
+2147483647 + 1 cannot be represented in type 'int'
+-2147483648
+</code></pre>
+</div>
+<p>UBSan tells you exactly where, with line and column. In a real bug report, that's three hours saved.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">UB census</span>
+</div>
+<div class="exercise-body">
+<p>List the UB(s) in this snippet:</p>
+<div class="code" data-lang="c">
+<pre><code>void f(int *a, size_t n) {
+    int *p;
+    for (size_t i = 0; i &lt; n; i++) {
+        p = &amp;a[i];
+        a[i+1] = *p;          // (1)
+    }
+    free(p);                  // (2)
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>The last iteration writes <code>a[n]</code> — one past the end of <code>a</code>. UB if <code>a</code> is sized exactly <code>n</code>.</li>
+<li>You're <code>free()</code>ing a pointer that wasn't returned from <code>malloc</code> — it's a pointer into the middle of <code>a</code>. UB.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">memcpy or punning?</span>
+</div>
+<div class="exercise-body">
+<p>Convert this strict-aliasing-violating type-pun to a safe equivalent:</p>
+<div class="code" data-lang="c">
+<pre><code>uint32_t bits = *(uint32_t *)&amp;float_value;
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="c">
+<pre><code>uint32_t bits;
+memcpy(&amp;bits, &amp;float_value, sizeof bits);
+</code></pre>
+</div>
+<p>Compilers reliably optimise this to a single load on every modern target. In C++20: <code>auto bits = std::bit_cast&lt;uint32_t&gt;(float_value);</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Optimisation removes my check</span>
+</div>
+<div class="exercise-body">
+<p>This null-check seems to disappear at <code>-O2</code>. Why?</p>
+<div class="code" data-lang="c">
+<pre><code>void f(int *p) {
+    int x = *p;            /* assume p != NULL */
+    if (p == NULL) abort();  /* defensive */
+    use(x);
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The compiler sees that the dereference <code>*p</code> would be UB if <code>p == NULL</code>. UB doesn't happen in well-defined programs, so the compiler concludes <code>p</code> can't be <code>NULL</code> at that point. The subsequent check is dead code — eliminated.</p>
+<p>Fix: check <em>before</em> dereferencing.</p>
+<div class="code" data-lang="c">
+<pre><code>void f(int *p) {
+    if (p == NULL) abort();
+    use(*p);
+}
+</code></pre>
+</div>
+<p>This is the canonical example of "UB-driven optimisation surprises". <code>-fsanitize=null</code> catches the original at runtime.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Iterator invalidation</span>
+</div>
+<div class="exercise-body">
+<p>Why does this segfault sometimes and not others?</p>
+<div class="code" data-lang="cpp">
+<pre><code>std::vector&lt;int&gt; v = {1, 2, 3};
+for (auto it = v.begin(); it != v.end(); ++it) {
+    if (*it == 2) v.push_back(99);
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>push_back</code> may reallocate — when capacity is exceeded, the vector copies into a new buffer and frees the old. Existing iterators (and pointers, references) into the old buffer dangle. The next <code>++it</code> or <code>*it</code> is UB.</p>
+<p>Whether it segfaults depends on whether reallocation happened, and whether the freed memory has been reused. Hence "sometimes".</p>
+<p>Fix one of:</p>
+<ul>
+<li><code>v.reserve(big)</code> before the loop, so no reallocation occurs.</li>
+<li>Collect the new items in a temp, append after.</li>
+<li>Index-based loop: <code>for (size_t i = 0; i &lt; v.size(); i++)</code>.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Why is signed-overflow UB but unsigned isn't?</span>
+</div>
+<div class="exercise-body">
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Historically, C had to support multiple representations of signed integers (two's complement, ones' complement, sign-magnitude). Defining overflow behaviour would have pinned the representation. Leaving it undefined preserved the option to compile efficiently on every machine.</p>
+<p>The modern reason: leaving signed overflow UB lets the compiler assume <code>i + 1 &gt; i</code> (no wrap), which is <em>essential</em> for many loop optimisations (e.g. proving termination, vectorising). Forcing wrap-around would prevent these.</p>
+<p>Unsigned has always had defined wrap-around because it's used as a discrete modular type — for hashing, bit-fiddling, indices.</p>
+<p>If you want signed wrap, use <code>-fwrapv</code> or do the arithmetic in unsigned and convert back. But know what you're trading.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>UB means the compiler can do anything — it will optimise on the assumption you don't trigger it.</li>
+  <li>The hit list: out-of-bounds, NULL/uninitialised deref, use-after-free, signed overflow, shift-by-too-much, strict aliasing, misalignment, sequence violations, uninitialised reads, data races.</li>
+  <li>Reinterpret bits via <code>memcpy</code> or <code>std::bit_cast</code>, never via differently-typed pointer dereference.</li>
+  <li>Lifetime: the most-foot-gunned bit of C++ — locals, temporaries, iterators, lambda captures.</li>
+  <li>Run dev builds with <code>-fsanitize=address,undefined</code>. Cost is small, payoff is enormous.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="02-cpp-refresher.html"><span class="lbl">← Prev</span><span class="ttl">C++ — modern subset</span></a>
+  <a href="04-build-and-link.html" class="next"><span class="lbl">Next →</span><span class="ttl">Build &amp; link</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

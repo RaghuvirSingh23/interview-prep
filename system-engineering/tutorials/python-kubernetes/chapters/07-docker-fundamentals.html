@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>7 · Docker — Fundamentals — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 07</span>
+  Docker — Fundamentals
+</h1>
+<p class="lede">
+  Containers are the runtime Kubernetes assumes you already understand.
+  This chapter goes from "what is an image, exactly?" through
+  Dockerfile, networking, volumes, and Compose. By the end, every
+  K8s YAML in the rest of the tutorial reads as "schedule one of
+  these containers, with these flags".
+</p>
+
+<h2 id="container-vs-vm">Container vs VM, in one paragraph</h2>
+
+<p>A virtual machine emulates a whole computer — its own kernel, its own boot sequence, its own filesystem from inode 1. A container shares the host's kernel and only isolates the bits that matter for an app: process tree (PID namespace), filesystem view (mount namespace), network stack (net namespace), users (user namespace), plus resource caps via cgroups. It's "Linux processes wearing a costume". Cheap, fast (start in milliseconds), but only as portable as the kernel ABI they target.</p>
+
+<h2 id="image-model">The image model</h2>
+
+<p>An <strong>image</strong> is an immutable, content-addressable bundle of:</p>
+<ul>
+  <li><strong>Layers</strong> — tarballs of filesystem changes, identified by SHA256.</li>
+  <li><strong>Config</strong> — environment, entrypoint, default command, exposed ports, working directory.</li>
+  <li><strong>Manifest</strong> — JSON document tying layers + config together by digest.</li>
+</ul>
+
+<p>A <strong>container</strong> is an image plus a thin writeable layer on top — when the container runs, writes go to that top layer; the image layers stay shared and read-only. Stop the container, throw the writeable layer away (unless you mount a volume).</p>
+
+<div class="code" data-lang="text">
+<pre><code>┌─────────────────────────────────────────┐
+│ writeable layer (per running container) │ ← /tmp/foo, /var/log/whatever
+├─────────────────────────────────────────┤
+│ layer N: COPY src/ /app                 │
+│ layer …: RUN pip install …               │
+│ layer 1: FROM python:3.12-slim           │ ← pulled from registry, content-addressed
+└─────────────────────────────────────────┘</code></pre>
+</div>
+
+<p>Layers are deduplicated across images. If two images share a base (<code>python:3.12-slim</code>), it's downloaded and stored once. This is why Docker images "feel small" even when they're notionally hundreds of MB.</p>
+
+<h2 id="oci">OCI — Docker isn't really "Docker" anymore</h2>
+
+<p>The image format and the container runtime are both standardised by the <strong>Open Container Initiative</strong>. Images you build with <code>docker build</code> work in <code>containerd</code>, <code>CRI-O</code>, <code>podman</code>, <code>buildah</code>, and Kubernetes. The "Docker" you use day-to-day is one front-end among many. Useful framing because:</p>
+<ul>
+  <li>Kubernetes nodes don't run Docker — they run containerd or CRI-O.</li>
+  <li>Many CI systems use <code>buildah</code>, <code>kaniko</code>, or <code>buildkit</code> (rootless) instead of Docker Engine.</li>
+  <li>The ecosystem talks about "OCI images" and "container runtimes" generically — same image, many engines.</li>
+</ul>
+
+<h2 id="install">Install &amp; first container</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker --version
+Docker version 27.0.3, build ...
+$ docker run --rm hello-world
+Unable to find image 'hello-world:latest' locally
+latest: Pulling from library/hello-world
+...
+Hello from Docker!
+This message shows that your installation appears to be working correctly.</code></pre>
+</div>
+
+<p>What just happened, in five lines:</p>
+<ol>
+  <li>CLI asked the daemon to run <code>hello-world:latest</code>.</li>
+  <li>Daemon didn't have it; pulled from Docker Hub.</li>
+  <li>Created a container — fresh PID/mount/net namespaces, set up the rootfs from layers.</li>
+  <li>Ran the image's default command (a tiny C program that prints the banner).</li>
+  <li>Process exited; <code>--rm</code> deleted the container; layers stay cached.</li>
+</ol>
+
+<h2 id="commands">Daily commands</h2>
+
+<table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>docker run …</code></td>          <td>Create + start a container.</td></tr>
+<tr><td><code>docker ps</code></td>             <td>List running containers. <code>-a</code> for all (incl. stopped).</td></tr>
+<tr><td><code>docker images</code></td>         <td>List local images.</td></tr>
+<tr><td><code>docker pull img:tag</code></td>   <td>Download an image.</td></tr>
+<tr><td><code>docker build -t name:tag .</code></td><td>Build from a Dockerfile.</td></tr>
+<tr><td><code>docker exec -it &lt;c&gt; sh</code></td><td>Shell inside a running container.</td></tr>
+<tr><td><code>docker logs -f &lt;c&gt;</code></td>  <td>Stream stdout/stderr.</td></tr>
+<tr><td><code>docker inspect &lt;c|img&gt;</code></td><td>Full JSON of every detail.</td></tr>
+<tr><td><code>docker stop &lt;c&gt;</code></td>    <td>SIGTERM, then SIGKILL after grace period.</td></tr>
+<tr><td><code>docker rm &lt;c&gt;</code></td>      <td>Delete a stopped container.</td></tr>
+<tr><td><code>docker rmi img:tag</code></td>    <td>Delete an image.</td></tr>
+<tr><td><code>docker system df</code></td>      <td>Disk used by images, containers, volumes, build cache.</td></tr>
+<tr><td><code>docker system prune -a</code></td><td>Aggressive cleanup of unused stuff.</td></tr>
+</tbody>
+</table>
+
+<h2 id="run-flags">docker run flags worth memorising</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># interactive shell
+$ docker run -it --rm ubuntu:24.04 bash
+
+# detached, named, port-publish, env, volume mount
+$ docker run -d \
+    --name web \
+    -p 8080:80 \
+    -e GREETING=hi \
+    -v $PWD/site:/usr/share/nginx/html:ro \
+    nginx:1.27-alpine
+
+# resource caps
+$ docker run --rm \
+    --cpus 0.5 \
+    --memory 256m \
+    --pids-limit 100 \
+    busybox sleep 5
+
+# user / read-only / no-new-privs (security)
+$ docker run --rm \
+    --user 10001:10001 \
+    --read-only \
+    --tmpfs /tmp:rw,size=64m \
+    --security-opt no-new-privileges:true \
+    --cap-drop=ALL \
+    my-app:1.0</code></pre>
+</div>
+
+<p>Conventions:</p>
+<ul>
+  <li><strong><code>-d</code></strong> detach — run in background, print the container ID.</li>
+  <li><strong><code>--rm</code></strong> auto-remove on exit. Use for one-shot commands; without it, stopped containers pile up.</li>
+  <li><strong><code>--name</code></strong> give a stable name; otherwise Docker invents one (<code>cranky_einstein</code>).</li>
+  <li><strong><code>-p HOST:CONTAINER</code></strong> publish a port. Without, the container's port is unreachable from the host.</li>
+  <li><strong><code>-e KEY=VALUE</code></strong> set env var. Use <code>--env-file path</code> for many.</li>
+  <li><strong><code>-v</code></strong> mount: bind, named volume, or tmpfs (more below).</li>
+</ul>
+
+<h2 id="dockerfile">Dockerfile, every directive</h2>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">dockerfile</span><span class="title">Dockerfile</span></div>
+<pre><code># Pinned base; comments start with #.
+FROM python:3.12-slim
+
+# Metadata for downstream tools (registries, K8s).
+LABEL org.opencontainers.image.source="https://github.com/myorg/promote-bot"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Build-time variable. Override at build with --build-arg APP_VERSION=...
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install OS deps in a single RUN to keep the layer small.
+# --no-install-recommends + cleanup avoids ~100MB of cruft.
+RUN apt-get update \
+ &amp;&amp; apt-get install --no-install-recommends -y curl ca-certificates \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+# Order matters! Things that change rarely come first for cache reuse.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Then the code, which changes every commit.
+COPY src/ ./src/
+
+# What user to run as.
+RUN useradd -r -u 10001 app
+USER 10001
+
+# Expose: pure documentation; doesn't actually publish anything.
+EXPOSE 8080
+
+# Where the container's "stop policy" sends signals (PID 1).
+STOPSIGNAL SIGTERM
+
+# Optional shallow self-test, run by the runtime.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -fsS http://localhost:8080/healthz || exit 1
+
+# How to start. Two parts:
+ENTRYPOINT ["python", "-m", "promote_bot"]
+CMD ["run"]                       # default args; user can override</code></pre>
+</div>
+
+<h4>Directive cheatsheet</h4>
+
+<table>
+<thead><tr><th>Directive</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>FROM</code></td>          <td>Base image. Always pinned (tag <em>and</em> digest in production).</td></tr>
+<tr><td><code>ARG</code></td>           <td>Build-time variable. Pass with <code>--build-arg</code>. Not in final image.</td></tr>
+<tr><td><code>ENV</code></td>           <td>Env var baked into the image, available at build and run.</td></tr>
+<tr><td><code>RUN</code></td>           <td>Run a command at build time, commit the resulting filesystem as a layer.</td></tr>
+<tr><td><code>COPY src dst</code></td>  <td>Copy from build context into the image. Honours <code>.dockerignore</code>.</td></tr>
+<tr><td><code>ADD</code></td>           <td>Like COPY but also auto-extracts tarballs and fetches URLs. Avoid; prefer COPY.</td></tr>
+<tr><td><code>WORKDIR</code></td>       <td>Set CWD for following directives and for the running container.</td></tr>
+<tr><td><code>USER</code></td>          <td>Switch user for following RUN and for the running container.</td></tr>
+<tr><td><code>EXPOSE</code></td>        <td>Documentation. Doesn't open a port. <code>-p</code> at run time does.</td></tr>
+<tr><td><code>VOLUME</code></td>        <td>"Treat this path as external"; if no volume mounted, an anonymous one is created.</td></tr>
+<tr><td><code>ENTRYPOINT</code></td>    <td>The command. Hard to override; <code>--entrypoint</code> can.</td></tr>
+<tr><td><code>CMD</code></td>           <td>Default arguments to ENTRYPOINT, overridable on the run line.</td></tr>
+<tr><td><code>HEALTHCHECK</code></td>   <td>Periodic command; pass/fail flips container's <code>healthy</code> status.</td></tr>
+<tr><td><code>STOPSIGNAL</code></td>    <td>Signal sent on stop (default SIGTERM).</td></tr>
+<tr><td><code>SHELL</code></td>         <td>Override the shell used for shell-form RUN.</td></tr>
+<tr><td><code>ONBUILD</code></td>       <td>Triggers in derived images. Niche; mostly leave alone.</td></tr>
+</tbody>
+</table>
+
+<h2 id="entrypoint-vs-cmd">ENTRYPOINT vs CMD — the canonical confusion</h2>
+
+<p>The two combine to form the final command, in this rule:</p>
+
+<div class="code" data-lang="text">
+<pre><code>ENTRYPOINT ["python", "-m", "promote_bot"]   # always part of the command
+CMD ["run"]                                  # default args, overridable
+
+# docker run my-app                  → python -m promote_bot run
+# docker run my-app status           → python -m promote_bot status
+# docker run --entrypoint sh my-app  → sh        (CMD becomes "run", but with sh it's just stray)</code></pre>
+</div>
+
+<p>The pattern: ENTRYPOINT carries the program's identity, CMD carries default arguments. <strong>Always use the JSON-array (exec) form</strong>, not the shell form — shell-form spawns <code>/bin/sh -c …</code> as PID 1, which doesn't forward signals to your real process. Result: <code>docker stop</code> waits 10 seconds and SIGKILLs you.</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Exec form vs shell form</div>
+<div class="code" data-lang="text">
+<pre><code># BAD — shell form. PID 1 is /bin/sh; SIGTERM doesn't reach python.
+ENTRYPOINT python -m my_app
+
+# GOOD — exec form. python is PID 1 directly; receives signals.
+ENTRYPOINT ["python", "-m", "my_app"]</code></pre>
+</div>
+<p>Always JSON arrays for ENTRYPOINT, CMD, and RUN where signals matter. Shell form is fine for one-shot RUNs at build time.</p>
+</div>
+
+<h2 id="layers-cache">Build cache &amp; layer ordering</h2>
+
+<p>Each Dockerfile directive creates (potentially) a new layer. Docker hashes the inputs (the directive + the files it COPY-ed + the RUN's command line) and reuses the layer from cache if the hash matches. <strong>Order directives so frequently-changing things come last.</strong></p>
+
+<div class="code" data-lang="text">
+<pre><code># BAD — every code change invalidates the pip install layer
+FROM python:3.12-slim
+WORKDIR /app
+COPY . .                            # invalidates whenever any file changes
+RUN pip install -r requirements.txt # re-runs every commit
+
+
+# GOOD — pip install cached unless requirements.txt itself changed
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY src/ ./src/                    # only this layer rebuilds on code change</code></pre>
+</div>
+
+<p>This single reordering is often a 10× build-time speedup on incremental builds.</p>
+
+<h2 id="dockerignore">.dockerignore — keep the build context small</h2>
+
+<p>The "build context" is everything in the directory passed to <code>docker build</code>. The whole context is sent to the daemon (or BuildKit) before the build starts. A 2 GB git repo with build artifacts ⇒ 2 GB transfer per build.</p>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">.dockerignore</span></div>
+<pre><code>.git
+.venv
+__pycache__/
+*.pyc
+node_modules/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+.env
+**/.DS_Store</code></pre>
+</div>
+
+<p>Treat <code>.dockerignore</code> like <code>.gitignore</code> — exclude everything that doesn't belong in the image. Side benefit: prevents accidentally COPYing a <code>.env</code> with secrets into the image.</p>
+
+<h2 id="tags-digests">Tags vs digests</h2>
+
+<p>An image reference looks like <code>registry/repo:tag</code> or <code>registry/repo@sha256:…</code>.</p>
+
+<ul>
+  <li><strong>Tags</strong> are mutable. <code>nginx:1.27</code> may point at one digest today, another tomorrow. Convenient, surprising in production.</li>
+  <li><strong>Digests</strong> are immutable. <code>nginx@sha256:abc…</code> is exactly one image, forever.</li>
+</ul>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker pull nginx:1.27
+$ docker inspect --format='{{index .RepoDigests 0}}' nginx:1.27
+nginx@sha256:c79f7e7b9a91c75b2c43...
+
+# Pin in a Dockerfile:
+FROM nginx:1.27@sha256:c79f7e7b9a91c75b2c43...</code></pre>
+</div>
+
+<p>Renovate / Dependabot can keep digest pins fresh via reviewable PRs. We dive deeper in Chapter 8.</p>
+
+<h2 id="networking">Networking — bridge, host, none</h2>
+
+<p>Each container gets a network namespace. Three drivers cover everyday use:</p>
+
+<table>
+<thead><tr><th>Network</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><strong>bridge</strong> (default)</td><td>Container has its own IP on a private virtual bridge. Reach others on the same bridge by IP. Reach the outside via NAT.</td></tr>
+<tr><td><strong>host</strong></td>            <td>Container shares the host's network namespace. Same IP as host, same ports. Linux only; not isolated.</td></tr>
+<tr><td><strong>none</strong></td>            <td>No network. Useful for pure-compute jobs.</td></tr>
+<tr><td><strong>user-defined bridge</strong></td><td>Same as bridge but with built-in DNS — containers find each other by name. Use this for multi-container apps.</td></tr>
+</table>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker network create app-net
+$ docker run -d --name db --network app-net postgres:16
+$ docker run -d --name api --network app-net -e DB_HOST=db my-api:1.0
+# from inside `api`, `db` resolves to db's IP automatically</code></pre>
+</div>
+
+<p>Publishing a port (<code>-p</code>) sets up a userland proxy / iptables rule so packets to the host's port are forwarded to the container. <code>-p 8080:80</code> means "host 8080 → container 80". <code>-p 127.0.0.1:8080:80</code> binds only to loopback — non-trivially safer for dev.</p>
+
+<h2 id="volumes">Volumes — the three kinds</h2>
+
+<table>
+<thead><tr><th>Kind</th><th>Mount with</th><th>Use for</th></tr></thead>
+<tbody>
+<tr><td><strong>Bind mount</strong></td>     <td><code>-v /host/path:/container/path</code></td><td>Dev — share source code with a running container.</td></tr>
+<tr><td><strong>Named volume</strong></td>   <td><code>-v myvol:/var/lib/data</code></td>     <td>Persistence the engine manages. Survives container removal.</td></tr>
+<tr><td><strong>tmpfs</strong></td>           <td><code>--tmpfs /tmp:size=64m</code></td>      <td>RAM-backed. Goes away on stop.</td></tr>
+</tbody>
+</table>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Bind: live-reload code into a running container
+$ docker run -it --rm \
+    -v $PWD:/app \
+    -w /app \
+    python:3.12-slim \
+    python -m my_app
+
+# Named volume: postgres data persists across `docker rm` and `docker run`
+$ docker volume create pgdata
+$ docker run -d --name db -v pgdata:/var/lib/postgresql/data postgres:16
+$ docker stop db &amp;&amp; docker rm db
+$ docker run -d --name db -v pgdata:/var/lib/postgresql/data postgres:16  # data still there</code></pre>
+</div>
+
+<p><strong>Read-only mounts</strong>: append <code>:ro</code>. Useful for passing in config without letting the container edit it: <code>-v $PWD/config:/etc/app:ro</code>.</p>
+
+<h2 id="logs-stop">Logs &amp; stop semantics</h2>
+
+<p>Convention: <strong>your app writes to stdout/stderr</strong>. The runtime captures and stores. Don't write to a log file inside the container — you'll lose it when the container is removed, and Kubernetes can't ship from random files.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker logs -f --tail 50 web
+$ docker logs --since 10m web</code></pre>
+</div>
+
+<p>Stop: <code>docker stop &lt;c&gt;</code> sends SIGTERM, waits up to 10 s (configurable: <code>-t 30</code>), then SIGKILL. <code>docker kill</code> is immediate SIGKILL — don't reach for it casually; you skip your app's graceful shutdown (Chapter 6's signal-handling pattern).</p>
+
+<h2 id="registries">Registries</h2>
+
+<p>An image lives at <code>&lt;registry&gt;/&lt;repo&gt;:&lt;tag&gt;</code>. If you omit the registry, <code>docker</code> defaults to Docker Hub.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Push to GitHub Container Registry
+$ docker login ghcr.io -u USER -p $GHCR_TOKEN
+$ docker tag my-app:1.0 ghcr.io/myorg/my-app:1.0
+$ docker push ghcr.io/myorg/my-app:1.0
+
+# Pull explicitly from a registry
+$ docker pull registry.example.com/team/my-app:1.0</code></pre>
+</div>
+
+<p>Common registries you'll meet: Docker Hub (<code>docker.io</code>), GitHub Container Registry (<code>ghcr.io</code>), AWS ECR, GCP Artifact Registry, Azure Container Registry, JFrog Artifactory, Harbor (self-hosted). All speak the OCI distribution spec; the auth handshake differs.</p>
+
+<h2 id="compose">Docker Compose — multi-container locally</h2>
+
+<p>Compose is a YAML file describing several containers as one logical unit. For local dev, integration tests, and small self-hosted apps, it beats hand-rolled <code>docker run</code> scripts.</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">compose.yaml</span></div>
+<pre><code>name: promote-stack
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        APP_VERSION: dev
+    image: promote-bot:dev
+    environment:
+      LOG_LEVEL: DEBUG
+      DB_URL: postgres://postgres:test@db:5432/postgres
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    develop:
+      watch:                              # 2024+, hot-reload friendly
+        - { path: src/, action: sync, target: /app/src }
+        - { path: requirements.txt, action: rebuild }
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: test
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker compose up -d           # build + start everything
+$ docker compose logs -f api
+$ docker compose exec api sh
+$ docker compose down            # stop + remove containers (volumes stay)
+$ docker compose down -v         # also remove volumes</code></pre>
+</div>
+
+<p>Compose is also extremely useful in tests — spin up a real Postgres in CI for integration suites. <code>testcontainers</code> (Chapter 6) does this from Python directly.</p>
+
+<h2 id="hands-on">Hands-on: containerise the promote-bot</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · build, run, inspect, ship</div>
+<div class="hands-on-body">
+<p>Take any small Python project (the Chapter 5 promote CLI works). Add this Dockerfile and <code>.dockerignore</code>:</p>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">dockerfile</span><span class="title">Dockerfile</span></div>
+<pre><code>FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir .
+
+RUN useradd -r -u 10001 app
+USER 10001
+
+ENTRYPOINT ["promote"]
+CMD ["--help"]</code></pre>
+</div>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">.dockerignore</span></div>
+<pre><code>.git
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+dist/</code></pre>
+</div>
+
+<p>Build, run, inspect, then push:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker build -t promote:0.1.0 .
+$ docker images promote
+REPOSITORY   TAG     IMAGE ID       SIZE
+promote      0.1.0   8c5d…          ~85MB
+
+$ docker run --rm promote:0.1.0
+Usage: promote [OPTIONS] COMMAND [ARGS]...
+...
+
+$ docker run --rm promote:0.1.0 hello --name Raghu
+hello, Raghu
+
+# Inspect what we built
+$ docker inspect promote:0.1.0 | jq '.[0].Config.{Entrypoint,Cmd,Env,User}'
+
+# History — see layers
+$ docker history --no-trunc promote:0.1.0
+
+# Tag &amp; push (replace with your registry)
+$ docker tag promote:0.1.0 ghcr.io/myuser/promote:0.1.0
+$ docker push ghcr.io/myuser/promote:0.1.0</code></pre>
+</div>
+
+<p>Now you've got an OCI image you can run locally and that Kubernetes can pull on a node. The K8s chapters that follow assume exactly this shape.</p>
+</div>
+</div>
+
+<h2 id="docker-vs-others">Docker vs containerd vs podman</h2>
+
+<table>
+<thead><tr><th></th><th>Daemon?</th><th>Root?</th><th>Common use</th></tr></thead>
+<tbody>
+<tr><td><strong>Docker Engine</strong></td><td>Yes (<code>dockerd</code>)</td><td>Yes (default)</td><td>Dev laptops, CI runners, traditional servers.</td></tr>
+<tr><td><strong>containerd</strong></td>   <td>Yes</td>                   <td>Yes</td>             <td>What Kubernetes uses on nodes; lower-level.</td></tr>
+<tr><td><strong>podman</strong></td>       <td>No (forks per command)</td><td>No (rootless first)</td><td>RHEL/Fedora world; drop-in CLI to Docker.</td></tr>
+<tr><td><strong>nerdctl</strong></td>      <td>(uses containerd)</td>     <td>Yes</td>             <td>Docker-flavoured CLI on top of containerd.</td></tr>
+</tbody>
+</table>
+
+<p>For Kubernetes work, the takeaway: your <code>docker build</code> output is consumed by <code>containerd</code> on K8s nodes. Same OCI image format; "Docker" is a frontend.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Cache-friendly Dockerfile</span>
+</div>
+<div class="exercise-body">
+<p>Reorder this Dockerfile so changing <code>src/</code> doesn't invalidate the dependency-install layer.</p>
+<div class="code" data-lang="text">
+<pre><code>FROM node:20-slim
+WORKDIR /app
+COPY . .
+RUN npm ci
+CMD ["node", "src/server.js"]</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<pre><code>FROM node:20-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY src/ ./src/
+CMD ["node", "src/server.js"]</code></pre>
+</div>
+<p>Now <code>npm ci</code> only re-runs when <code>package*.json</code> changes. Code edits invalidate just the small final layer.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">ENTRYPOINT vs CMD</span>
+</div>
+<div class="exercise-body">
+<p>For <code>ENTRYPOINT ["python", "-m", "tool"]</code> + <code>CMD ["status"]</code>, what do these run?</p>
+<ol>
+<li><code>docker run my-img</code></li>
+<li><code>docker run my-img build</code></li>
+<li><code>docker run --entrypoint sh my-img</code></li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><code>python -m tool status</code></li>
+<li><code>python -m tool build</code> — CMD is replaced by user args.</li>
+<li><code>sh status</code> — ENTRYPOINT replaced; CMD still appended (and <code>sh</code> ignores it). To clear CMD too: <code>--entrypoint sh my-img -c …</code> with explicit args.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Bind mount for hot reload</span>
+</div>
+<div class="exercise-body">
+<p>Run a Python container that re-uses your local <code>src/</code> directory without rebuilding the image. Show the command.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run -it --rm \
+    -v $PWD/src:/app/src \
+    -w /app \
+    -p 8080:8080 \
+    python:3.12-slim \
+    python -m src.server</code></pre>
+</div>
+<p>Edit any file in <code>./src</code>, the running container sees the change immediately. For a real watch+reload loop, use <code>uvicorn --reload</code> or <code>watchfiles</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Two containers on one network</span>
+</div>
+<div class="exercise-body">
+<p>Without Compose: start a Postgres and a one-off Python container that connects to it by name <code>db</code>. Show the commands.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker network create dev
+$ docker run -d --name db --network dev \
+    -e POSTGRES_PASSWORD=test postgres:16
+$ docker run --rm --network dev \
+    -e DB_URL='postgres://postgres:test@db:5432/postgres' \
+    python:3.12-slim \
+    sh -c 'pip install psycopg[binary] &amp;&amp; python -c "import psycopg, os; psycopg.connect(os.environ[\"DB_URL\"]); print(\"ok\")"'</code></pre>
+</div>
+<p>Default bridge doesn't auto-resolve names; user-defined bridges do. <code>db</code> is resolvable from any container on the <code>dev</code> network.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">.dockerignore audit</span>
+</div>
+<div class="exercise-body">
+<p>Run <code>docker build .</code> in a project that has none. Note the "Sending build context to daemon" size at the start. Add a <code>.dockerignore</code>; rebuild. By how much did the context shrink?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Project-specific. On a typical Python repo with <code>.git</code>, <code>.venv</code>, <code>__pycache__</code>, the context drops from hundreds of MB to a few MB. Faster builds, smaller risk of accidentally COPYing junk into the image.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Pin by digest</span>
+</div>
+<div class="exercise-body">
+<p>Pull <code>nginx:1.27-alpine</code>; find its digest; rewrite a Dockerfile to pin <code>FROM</code> by both tag and digest. Why both?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker pull nginx:1.27-alpine
+$ docker inspect --format='{{index .RepoDigests 0}}' nginx:1.27-alpine
+nginx@sha256:7a3f3e3d7a...</code></pre>
+</div>
+<div class="code" data-lang="text">
+<pre><code>FROM nginx:1.27-alpine@sha256:7a3f3e3d7a...</code></pre>
+</div>
+<p>Tag = human readable, makes diffs easy to interpret. Digest = immutable, guarantees byte-identical pulls. Renovate updates both atomically.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>An image is layers + config + manifest, content-addressed by SHA256. Layers are deduped across images.</li>
+  <li>OCI standardises the format; "Docker" is one of many frontends.</li>
+  <li>Order Dockerfile directives so frequently-changing things come last for cache reuse.</li>
+  <li>Always exec-form (JSON arrays) for ENTRYPOINT/CMD so signals reach PID 1.</li>
+  <li>Three volume kinds: bind (dev), named (persistent), tmpfs (RAM scratch).</li>
+  <li>User-defined bridge networks give DNS-by-name; the default bridge doesn't.</li>
+  <li>Pin by tag <em>and</em> digest in production. Renovate keeps both updated.</li>
+  <li>Docker Compose for local multi-container; testcontainers for Python integration tests.</li>
+  <li>Logs go to stdout/stderr; never to in-container files.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="06-automation-patterns.html"><span class="lbl">← Prev</span><span class="ttl">Automation Patterns</span></a>
+  <a href="08-docker-production.html" class="next"><span class="lbl">Next →</span><span class="ttl">Docker — Production</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

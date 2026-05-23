@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>8 · Docker — Production — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 08</span>
+  Docker — Production
+</h1>
+<p class="lede">
+  Multi-stage builds, BuildKit cache mounts, distroless &amp; scratch
+  base images, security hardening, signing &amp; SBOMs, scanning, CI
+  patterns, rootless and Kaniko alternatives, and the bridge to
+  Kubernetes. The "boring" chapter that pays off forever.
+</p>
+
+<h2 id="multi-stage">Multi-stage builds — small final images</h2>
+
+<p>Build tools (compilers, npm, pip with build deps) are big and have no business in production images. Multi-stage builds let you have a fat "build" stage and copy only the artifacts to a slim "runtime" stage. The final image carries the runtime, nothing else.</p>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">dockerfile</span><span class="title">Dockerfile — Python multi-stage</span></div>
+<pre><code># --- stage 1: builder ---
+FROM python:3.12 AS build
+WORKDIR /app
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml requirements.lock ./
+COPY src/ ./src/
+# Build a wheel; install into a venv we'll later copy out.
+RUN uv venv /opt/venv \
+ &amp;&amp; . /opt/venv/bin/activate \
+ &amp;&amp; uv pip install --no-cache --requirements requirements.lock \
+ &amp;&amp; uv pip install --no-cache .
+
+# --- stage 2: runtime ---
+FROM python:3.12-slim
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+COPY --from=build /opt/venv /opt/venv
+RUN useradd -r -u 10001 app
+USER 10001
+ENTRYPOINT ["python", "-m", "promote_bot"]
+CMD ["run"]</code></pre>
+</div>
+
+<p>Final image: ~80 MB. The build stage (~600 MB with toolchain, wheels, caches) is discarded entirely. <code>docker images</code> only shows the final tag.</p>
+
+<p>For Go / Rust / C++ apps the win is even bigger — compile in a fat builder, copy a single static binary into <code>scratch</code> or <code>distroless</code>:</p>
+
+<div class="code" data-lang="text">
+<pre><code>FROM golang:1.22 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/app ./cmd/app
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/app /app
+USER nonroot:nonroot
+ENTRYPOINT ["/app"]</code></pre>
+</div>
+
+<p>Final image: ~10 MB, zero shell, zero package manager, exact same binary. Pulled and started on K8s in milliseconds.</p>
+
+<h2 id="buildkit">BuildKit — the modern build engine</h2>
+
+<p>BuildKit is the build engine the modern Docker uses (and what <code>docker build</code> calls under the hood since 2020+). It gives you parallel build stages, better caching, secret mounts, SSH forwarding, and remote cache exports.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Confirm BuildKit
+$ docker buildx version
+github.com/docker/buildx v0.16.0 ...
+
+# Multi-platform build (linux/amd64 + linux/arm64)
+$ docker buildx create --name multi --use
+$ docker buildx build \
+    --platform linux/amd64,linux/arm64 \
+    -t ghcr.io/myorg/app:1.0 \
+    --push .                              # multi-arch manifest pushed</code></pre>
+</div>
+
+<h4>Cache mounts — build-time cache that doesn't bloat the image</h4>
+
+<p>BuildKit can mount a directory <em>during the RUN</em> that persists across builds but isn't baked into the image. Game-changing for package managers.</p>
+
+<div class="code" data-lang="text">
+<pre><code># syntax=docker/dockerfile:1.7
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -r requirements.txt
+COPY src/ ./src/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir .</code></pre>
+</div>
+
+<p>The pip wheel cache lives in BuildKit's cache, not in the layer. Subsequent builds re-use cached wheels even when the layer is invalidated. Same trick for apt (<code>/var/cache/apt</code>), npm (<code>/root/.npm</code>), Go modules (<code>/root/go/pkg/mod</code>), Cargo (<code>/usr/local/cargo</code>).</p>
+
+<h4>Secret mounts — credentials at build time without leaking them into the image</h4>
+
+<div class="code" data-lang="text">
+<pre><code># syntax=docker/dockerfile:1.7
+FROM python:3.12-slim
+WORKDIR /app
+COPY pyproject.toml .
+RUN --mount=type=secret,id=pypi_creds \
+    pip install --no-cache-dir \
+        --extra-index-url "$(cat /run/secrets/pypi_creds)" \
+        -e .</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ DOCKER_BUILDKIT=1 docker build \
+    --secret id=pypi_creds,src=$HOME/.pypi-creds \
+    -t my-app:1.0 .</code></pre>
+</div>
+
+<p>The secret is mounted into <code>/run/secrets/&lt;id&gt;</code> only during that RUN; it's not committed to a layer, doesn't appear in <code>docker history</code>, isn't accessible at runtime. The right way to handle private package indexes, vendor SDK auth, signed-package keys.</p>
+
+<h4>Remote cache</h4>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker buildx build \
+    --cache-from type=registry,ref=ghcr.io/myorg/app:cache \
+    --cache-to   type=registry,ref=ghcr.io/myorg/app:cache,mode=max \
+    -t ghcr.io/myorg/app:1.0 \
+    --push .</code></pre>
+</div>
+
+<p>CI runners are usually ephemeral; remote cache lets a fresh runner reuse the previous build's layers from a registry. Order-of-magnitude speedup for cold-cache CI.</p>
+
+<h2 id="size">Image size — strategies</h2>
+
+<table>
+<thead><tr><th>Base</th><th>Approx size</th><th>Trade-offs</th></tr></thead>
+<tbody>
+<tr><td><code>ubuntu:24.04</code></td>      <td>~80 MB</td>   <td>Familiar, full apt. Largest of these.</td></tr>
+<tr><td><code>debian:12-slim</code></td>     <td>~80 MB</td>   <td>Stable, apt-equipped.</td></tr>
+<tr><td><code>python:3.12-slim</code></td>   <td>~120 MB</td>  <td>Debian-slim + Python; the everyday Python base.</td></tr>
+<tr><td><code>python:3.12-alpine</code></td> <td>~50 MB</td>   <td>Smaller, but musl libc bites Python wheels — many native packages need compiling.</td></tr>
+<tr><td><code>gcr.io/distroless/python3</code></td><td>~50 MB</td><td>No shell, no pkg manager, runtime only. Painful to debug.</td></tr>
+<tr><td><code>gcr.io/distroless/static</code></td><td>~2 MB</td><td>For statically-linked binaries (Go, Rust). Nothing else.</td></tr>
+<tr><td><code>scratch</code></td>            <td>0 bytes</td>  <td>Empty image. You bring everything, including libc if needed.</td></tr>
+</tbody>
+</table>
+
+<div class="callout tip">
+<div class="callout-title">Alpine in Python — be careful</div>
+<p>Alpine uses musl libc instead of glibc. Most Python wheels on PyPI are built against glibc; Alpine forces source compilation, which means installing GCC, headers, etc. — often making the build slower and the final image bigger than a Debian-slim base. Use Debian-slim for Python by default; Alpine only if you've benchmarked it.</p>
+</div>
+
+<h2 id="security">Security hardening — the checklist</h2>
+
+<p>Every production container should pass this checklist. None of it is exotic; all of it gets skipped by accident if you don't have the list in front of you.</p>
+
+<h4>1 · Don't run as root</h4>
+<div class="code" data-lang="text">
+<pre><code>RUN useradd -r -u 10001 app
+USER 10001</code></pre>
+</div>
+<p>Default many base images run as root. Add a non-root user and switch. K8s' "restricted" Pod Security profile rejects images that don't.</p>
+
+<h4>2 · Read-only root filesystem</h4>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run --read-only --tmpfs /tmp:rw,size=64m my-app:1.0</code></pre>
+</div>
+<p>Apps that don't write should not have a writeable rootfs. Mount <code>/tmp</code> as tmpfs if needed. K8s achieves the same with <code>readOnlyRootFilesystem: true</code> (Chapter 13).</p>
+
+<h4>3 · Drop all capabilities, add only what's needed</h4>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE my-web:1.0</code></pre>
+</div>
+<p>Linux capabilities are a granular alternative to "root vs not root". Drop everything, add the specific cap (e.g. binding port &lt; 1024). Most apps need none.</p>
+
+<h4>4 · No new privileges</h4>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run --security-opt=no-new-privileges:true my-app:1.0</code></pre>
+</div>
+<p>Stops setuid binaries from gaining privileges mid-execution. Should be the default for any non-system-tooling container.</p>
+
+<h4>5 · Pin everything by digest</h4>
+<div class="code" data-lang="text">
+<pre><code>FROM python:3.12-slim@sha256:9f03a...</code></pre>
+</div>
+<p>Tags can be moved silently. Digests can't.</p>
+
+<h4>6 · Don't bake secrets into the image</h4>
+<p>Even if you delete a file in a later layer, the file is in the previous layer's tarball. Anyone with the image can extract it. Use BuildKit secret mounts at build, env / Secret mounts at runtime.</p>
+
+<h4>7 · Minimise the attack surface</h4>
+<p>Distroless or scratch where possible. No shell, no <code>curl</code>, no <code>wget</code>, nothing for an attacker to use.</p>
+
+<h4>8 · The <code>Dockerfile</code> as a security artefact</h4>
+<p>It's reviewed in PRs. Linters exist: <code>hadolint</code>, <code>dockle</code>. Wire them into CI.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ hadolint Dockerfile
+Dockerfile:5 DL3015 info: Avoid additional packages by specifying `--no-install-recommends`
+Dockerfile:9 DL3008 warning: Pin versions in apt-get install</code></pre>
+</div>
+
+<h2 id="scanning">Vulnerability scanning</h2>
+
+<p><strong>Trivy</strong>, <strong>Grype</strong>, and cloud-native scanners (Snyk, Wiz, Prisma) walk an image's layers, identify packages by SBOM, cross-reference against CVE databases. Run on every build.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ trivy image --severity HIGH,CRITICAL --exit-code 1 my-app:1.0
+my-app:1.0 (debian 12.5)
+========================================================
+Total: 4 (HIGH: 3, CRITICAL: 1)
+
+┌─────────────────┬──────────────────┬──────────┬─────────┬───────────────────┬────────────────────────────────────────────────────────┐
+│     Library     │  Vulnerability   │ Severity │ Status  │ Installed Version │                         Title                          │
+├─────────────────┼──────────────────┼──────────┼─────────┼───────────────────┼────────────────────────────────────────────────────────┤
+│ libssl3         │ CVE-2024-12345   │ HIGH     │ fixed   │ 3.0.11-1          │ openssl: ...                                           │
+...</code></pre>
+</div>
+
+<p>Wire <code>--exit-code 1</code> into CI to fail the build on findings above your bar (HIGH / CRITICAL is the usual gate). Allow-list known false positives via <code>.trivyignore</code> with a documented expiry date.</p>
+
+<h2 id="sbom">SBOM</h2>
+
+<p>A Software Bill of Materials lists every component in the image. Customers, regulators, and your future self need them. <strong>Syft</strong> generates one in seconds:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ syft my-app:1.0 -o spdx-json &gt; sbom.spdx.json
+$ syft my-app:1.0 -o cyclonedx-json &gt; sbom.cdx.json
+$ syft my-app:1.0 -o table | head -20
+NAME              VERSION         TYPE
+ca-certificates   20230311        deb
+libc6             2.36-9+deb12u9  deb
+python3           3.12.3          python
+requests          2.32.3          python
+...</code></pre>
+</div>
+
+<p>Ship the SBOM alongside the image as an OCI artefact, ideally signed. Modern registries (GHCR, ECR, Harbor) accept attestations linked to the image digest.</p>
+
+<h2 id="signing">Signing — Sigstore / cosign</h2>
+
+<p>"This image was built by us, on this commit, by this CI run." Cosign + Sigstore makes signing keyless: the CI's OIDC identity signs via Sigstore's public Fulcio CA; the certificate is logged in Rekor for transparency. No long-lived keys to rotate.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Sign (run in CI with id-token: write permission on GHA)
+$ cosign sign --yes ghcr.io/myorg/my-app@sha256:abc123
+
+# Sign an SBOM as an attestation linked to the image
+$ cosign attest --yes \
+    --predicate sbom.spdx.json \
+    --type spdxjson \
+    ghcr.io/myorg/my-app@sha256:abc123
+
+# Verify (consumer, e.g. K8s admission)
+$ cosign verify \
+    --certificate-identity-regexp '^https://github.com/myorg/.*$' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    ghcr.io/myorg/my-app@sha256:abc123</code></pre>
+</div>
+
+<p>Pair with a K8s admission webhook (cosign's policy-controller, Kyverno, OPA Gatekeeper) that refuses to start unsigned images. Production-grade supply-chain security in two lines of CI plus a policy.</p>
+
+<h2 id="ci-patterns">CI patterns — Docker in pipelines</h2>
+
+<p>Three problems Docker-in-CI tends to hit, and the modern answers:</p>
+
+<h4>1 · Cold cache on every run</h4>
+<p>Use BuildKit's registry cache (<code>--cache-from</code>/<code>--cache-to</code>) or GHA's <code>type=gha</code> cache. The first build is full; subsequent ones are fast.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>- uses: docker/setup-buildx-action@v3
+- uses: docker/build-push-action@v5
+  with:
+    context: .
+    push: true
+    tags: ghcr.io/myorg/app:${{ github.sha }}
+    cache-from: type=gha
+    cache-to:   type=gha,mode=max</code></pre>
+</div>
+
+<h4>2 · Need root, hate Docker-in-Docker</h4>
+<p>Three modern alternatives:</p>
+<ul>
+  <li><strong>Rootless BuildKit</strong> — <code>buildkitd</code> as a non-root daemon. Native; secure; first-class.</li>
+  <li><strong>Kaniko</strong> — Google's image builder that runs as an unprivileged container, building images by parsing Dockerfile in userspace. Common in K8s-based CI.</li>
+  <li><strong>Buildah</strong> — Red Hat's tool. Daemonless; rootless. Builds OCI images from Dockerfiles or scriptable from shell.</li>
+</ul>
+
+<h4>3 · Multi-arch builds</h4>
+<p>Use <code>buildx</code> with <code>--platform linux/amd64,linux/arm64</code>. QEMU emulation under the hood for cross-builds; native nodes preferred when you have them. ARM64 in CI is common in 2026 thanks to GitHub's free arm64 runners.</p>
+
+<h2 id="distroless-debug">Debugging distroless images</h2>
+
+<p>Distroless has no shell. <code>kubectl exec -it pod/X -- sh</code> fails. The modern fix: <strong>ephemeral debug containers</strong> (K8s 1.25+):</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl debug -it pod/web-abc123 \
+    --image=nicolaka/netshoot \
+    --target=web \
+    --share-processes</code></pre>
+</div>
+
+<p>Ephemeral container shares the Pod's network and process namespaces with the target. You get a shell with curl, dig, tcpdump, ss, even <code>strace</code> — without baking any of that into the production image. The "I can't debug distroless" objection is solved.</p>
+
+<h2 id="bridge-k8s">The bridge to Kubernetes</h2>
+
+<p>How does Kubernetes use your image?</p>
+<ol>
+  <li>You push <code>ghcr.io/myorg/my-app@sha256:abc</code> to a registry.</li>
+  <li>A Pod's container spec references that image (<code>spec.containers[].image</code>).</li>
+  <li>The kubelet on whichever node is scheduled tells the runtime (containerd / CRI-O) to pull and run.</li>
+  <li>The runtime invokes <code>runc</code> (or another OCI runtime) to instantiate the container — same OCI image format, same <code>config.json</code>, same Linux primitives.</li>
+</ol>
+
+<p>The container <code>command</code>/<code>args</code> in K8s YAML override the image's ENTRYPOINT/CMD respectively (different field names, same semantics):</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  containers:
+    - name: app
+      image: ghcr.io/myorg/my-app@sha256:abc...
+      command: ["python", "-m", "my_app"]    # overrides ENTRYPOINT
+      args:    ["run", "--config", "/etc/app/config.yaml"]  # overrides CMD</code></pre>
+</div>
+
+<p>Almost everything else (ports, env, volumes, healthchecks, resource limits) is set in the K8s manifest, not the image. Bake the right shape in the image; let manifests choose how to operate it.</p>
+
+<h2 id="image-pull">imagePullPolicy and pull secrets</h2>
+
+<p>Two K8s knobs you'll meet immediately:</p>
+
+<table>
+<thead><tr><th>Policy</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>Always</code></td>     <td>Pull every time the Pod starts. Default for images tagged <code>:latest</code>.</td></tr>
+<tr><td><code>IfNotPresent</code></td><td>Pull only if image isn't already on the node. Default for non-<code>:latest</code> tags.</td></tr>
+<tr><td><code>Never</code></td>      <td>Never pull. Image must be pre-loaded on the node.</td></tr>
+</tbody>
+</table>
+
+<p>For private registries: store credentials as a <code>kubernetes.io/dockerconfigjson</code> Secret and reference via <code>imagePullSecrets</code> on the Pod spec or the ServiceAccount. Or use IRSA (AWS) / Workload Identity (GCP) for keyless ECR/Artifact Registry access.</p>
+
+<h2 id="hands-on">Hands-on: a fully-hardened image</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · multi-stage, distroless-friendly, signed</div>
+<div class="hands-on-body">
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">dockerfile</span><span class="title">Dockerfile</span></div>
+<pre><code># syntax=docker/dockerfile:1.7
+ARG PY_VERSION=3.12-slim
+
+# --- builder ---
+FROM python:${PY_VERSION} AS build
+WORKDIR /app
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml requirements.lock ./
+COPY src/ ./src/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv /opt/venv \
+ &amp;&amp; . /opt/venv/bin/activate \
+ &amp;&amp; uv pip install --no-cache --requirements requirements.lock \
+ &amp;&amp; uv pip install --no-cache .
+
+# --- runtime ---
+FROM python:${PY_VERSION}@sha256:DIGEST_HERE
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+RUN useradd -r -u 10001 app
+COPY --from=build /opt/venv /opt/venv
+USER 10001
+
+ENTRYPOINT ["python", "-m", "promote_bot"]
+CMD ["run"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
+    CMD ["python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=2).status == 200 else 1)"]</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/release.yml</span></div>
+<pre><code>name: Release
+on: { push: { tags: ['v*'] } }
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          output-file: sbom.spdx.json
+      - uses: sigstore/cosign-installer@v3
+      - run: |
+          cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          cosign attest --yes --type spdxjson \
+            --predicate sbom.spdx.json \
+            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}</code></pre>
+</div>
+
+<p>This pipeline produces a multi-arch image, scanned for CVEs, accompanied by a signed SBOM, with no long-lived registry credentials. The K8s capstone (Chapter 16) consumes exactly this kind of image.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Convert to multi-stage</span>
+</div>
+<div class="exercise-body">
+<p>Rewrite this single-stage Dockerfile as multi-stage so the final image doesn't carry build tools.</p>
+<div class="code" data-lang="text">
+<pre><code>FROM golang:1.22
+WORKDIR /src
+COPY . .
+RUN go build -o /app ./cmd/app
+ENTRYPOINT ["/app"]</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<pre><code>FROM golang:1.22 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/app ./cmd/app
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/app /app
+USER nonroot:nonroot
+ENTRYPOINT ["/app"]</code></pre>
+</div>
+<p>Final image drops from ~900 MB to ~10 MB.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">BuildKit cache mount</span>
+</div>
+<div class="exercise-body">
+<p>Add a BuildKit cache mount so <code>npm ci</code> reuses the cache across builds even when <code>package-lock.json</code> changes.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<pre><code># syntax=docker/dockerfile:1.7
+FROM node:20-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline
+COPY . .
+CMD ["node", "src/server.js"]</code></pre>
+</div>
+<p>The cache survives across builds and is shared between layers; even when the layer rebuilds, individual package downloads are reused. Half-or-more reduction in CI build time on incremental builds.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why not just <code>RUN apt-get install</code>?</span>
+</div>
+<div class="exercise-body">
+<p>What's wrong with this RUN, and how do you fix it?</p>
+<div class="code" data-lang="text">
+<pre><code>RUN apt-get update
+RUN apt-get install -y curl gnupg
+RUN curl -fsSL https://example.com/install.sh | bash</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>Three layers where one would do — wastes cache headroom.</li>
+<li><code>apt-get update</code> in a separate layer than <code>install</code> means you can hit <code>install</code> with stale package lists from cache.</li>
+<li>No cleanup; the <code>/var/lib/apt/lists/*</code> remains in the image (~30 MB of nothing useful).</li>
+<li>Piping curl into bash is uncached; if the URL changes content, Docker has no idea.</li>
+</ol>
+<div class="code" data-lang="text">
+<pre><code>RUN apt-get update \
+ &amp;&amp; apt-get install --no-install-recommends -y curl gnupg \
+ &amp;&amp; curl -fsSL https://example.com/install.sh | bash \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*</code></pre>
+</div>
+<p>For better integrity, fetch the install script with a known SHA, verify, then run.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Trim the attack surface</span>
+</div>
+<div class="exercise-body">
+<p>Adapt this Python image to: non-root user, read-only rootfs (use a tmpfs for <code>/tmp</code> at runtime), all caps dropped, no-new-privileges. Show the Dockerfile changes and the <code>docker run</code> flags.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<pre><code>FROM python:3.12-slim
+RUN useradd -r -u 10001 app
+WORKDIR /app
+COPY src/ ./src/
+USER 10001
+ENTRYPOINT ["python", "-m", "src"]</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run --rm \
+    --read-only \
+    --tmpfs /tmp:rw,size=64m \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges:true \
+    my-app:1.0</code></pre>
+</div>
+<p>K8s achieves the same with <code>securityContext</code> in the Pod spec; this <code>docker run</code> form is exactly what the K8s "restricted" PSA profile generates.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Sign &amp; verify</span>
+</div>
+<div class="exercise-body">
+<p>Sign an image with cosign keyless, then write the verify command a downstream consumer would use to enforce "this came from our org's GHA workflow".</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code># Sign (in GHA, with permissions: id-token: write)
+$ cosign sign --yes ghcr.io/myorg/app@sha256:abc
+
+# Verify (consumer)
+$ cosign verify \
+    --certificate-identity-regexp '^https://github.com/myorg/[^/]+/\.github/workflows/.*$' \
+    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+    ghcr.io/myorg/app@sha256:abc</code></pre>
+</div>
+<p>The verify checks Sigstore's transparency log (Rekor) for a signature where the signer's OIDC identity matches the regex (a GHA workflow inside <code>myorg</code>). No long-lived keys involved on either side.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Multi-arch in one command</span>
+</div>
+<div class="exercise-body">
+<p>Build the same Dockerfile for amd64 and arm64, push as a single multi-arch tag. Show the buildx commands.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker buildx create --use --name multi   # create a multi-arch builder
+$ docker buildx inspect --bootstrap          # ensure QEMU emulators are loaded
+$ docker buildx build \
+    --platform linux/amd64,linux/arm64 \
+    --tag ghcr.io/myorg/app:1.0 \
+    --push .</code></pre>
+</div>
+<p>The push results in a manifest list at the tag; pulling on amd64 fetches the amd64 image, on arm64 the arm64 one. Same digest URL for both. Run on a native arm64 runner if you have one — QEMU emulation works but is slow.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Multi-stage builds keep build tools out of final images. Distroless or scratch for static binaries; Debian-slim for Python.</li>
+  <li>BuildKit cache mounts speed up package-manager steps without bloating layers.</li>
+  <li>Secret mounts keep build-time credentials out of the image and out of <code>docker history</code>.</li>
+  <li>Security checklist: non-root, read-only rootfs, drop caps, no-new-privs, pin by digest, lint with <code>hadolint</code>.</li>
+  <li>Scan with <code>trivy</code>, generate SBOMs with <code>syft</code>, sign with cosign keyless.</li>
+  <li>CI patterns: registry cache, multi-arch via buildx, rootless / Kaniko / Buildah for K8s-based runners.</li>
+  <li>Debug distroless via <code>kubectl debug</code> ephemeral containers.</li>
+  <li>K8s consumes OCI images; <code>command</code>/<code>args</code> in YAML override ENTRYPOINT/CMD.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="07-docker-fundamentals.html"><span class="lbl">← Prev</span><span class="ttl">Docker — Fundamentals</span></a>
+  <a href="09-k8s-mental-model.html" class="next"><span class="lbl">Next →</span><span class="ttl">Kubernetes — Mental Model</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

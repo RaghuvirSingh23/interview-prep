@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>7 · Threads &amp; concurrency</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 07</span>
+  Threads &amp; concurrency
+</h1>
+<p class="lede">
+  Multi-threading in C/C++ is where the easy bugs become expensive
+  and the expensive ones become career-defining. This chapter:
+  pthreads, std::thread, mutexes, condition variables, atomics with
+  the right memory order, false sharing, the data race, and the
+  patterns that survive code review.
+</p>
+
+<h2 id="threads">Threads — pthreads, std::thread, std::jthread</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;thread&gt;
+#include &lt;chrono&gt;
+#include &lt;iostream&gt;
+
+void worker(int id) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cout &lt;&lt; "worker " &lt;&lt; id &lt;&lt; "\n";
+}
+
+int main() {
+    std::thread t1(worker, 1);
+    std::thread t2(worker, 2);
+    t1.join();
+    t2.join();   // forget this and the destructor calls std::terminate
+    // C++20: std::jthread joins automatically and supports cancellation
+}
+</code></pre>
+</div>
+
+<p>For C, pthreads:</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;pthread.h&gt;
+#include &lt;stdio.h&gt;
+
+static void *worker(void *arg) {
+    int id = *(int *)arg;
+    printf("worker %d\n", id);
+    return NULL;
+}
+
+int main(void) {
+    pthread_t t1, t2;
+    int a = 1, b = 2;
+    pthread_create(&amp;t1, NULL, worker, &amp;a);
+    pthread_create(&amp;t2, NULL, worker, &amp;b);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    return 0;
+}
+</code></pre>
+</div>
+
+<p>Compile with <code>-pthread</code> (defines macros and links the right runtime). Modern glibc folds pthread into libc; older systems need <code>-lpthread</code> at link.</p>
+
+<p><code>std::jthread</code> (C++20) auto-joins on destruction, supports <code>stop_token</code> for cooperative cancellation. Prefer it.</p>
+
+<h2 id="races">The data race — what's actually going on</h2>
+
+<p>A <strong>data race</strong> is two threads accessing the same memory location, at least one writing, with no synchronisation between them. It's UB in C and C++ — the standard makes no guarantees. Concrete consequences on real CPUs:</p>
+
+<ul>
+  <li><strong>Torn reads/writes</strong> — a 64-bit write isn't atomic on 32-bit hardware; you can read half-old, half-new.</li>
+  <li><strong>Stale values</strong> — the compiler caches the value in a register; doesn't re-read.</li>
+  <li><strong>Reordering</strong> — both compiler and CPU may reorder loads and stores around your code.</li>
+  <li><strong>Write tearing in registers</strong> — non-atomic stores on x86 are atomic for aligned values up to 64 bits, but the compiler may still split larger stores.</li>
+</ul>
+
+<div class="code" data-lang="c">
+<pre><code>/* Classic broken pattern */
+volatile bool stop = false;
+/* thread A */
+while (!stop) work();
+
+/* thread B */
+stop = true;
+</code></pre>
+</div>
+
+<p><code>volatile</code> is <strong>not enough</strong>. It tells the compiler "don't optimise away accesses" — it does NOT add memory barriers, doesn't synchronise with other threads, doesn't prevent CPU reordering. Use <code>volatile</code> for memory-mapped I/O and signal-handler flags. For thread communication, use atomics or mutexes.</p>
+
+<h2 id="mutex">Mutex — the basic synchronisation</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;mutex&gt;
+
+class Counter {
+    mutable std::mutex m_;
+    long n_ = 0;
+public:
+    void inc() {
+        std::lock_guard&lt;std::mutex&gt; lk(m_);   // RAII — unlocks on scope exit
+        ++n_;
+    }
+    long get() const {
+        std::lock_guard&lt;std::mutex&gt; lk(m_);
+        return n_;
+    }
+};
+</code></pre>
+</div>
+
+<p>Three lock guards, all RAII:</p>
+
+<table>
+<thead><tr><th>Type</th><th>Use when</th></tr></thead>
+<tbody>
+<tr><td><code>std::lock_guard</code></td>      <td>Simple lock for one scope; can't be moved or unlocked early</td></tr>
+<tr><td><code>std::unique_lock</code></td>     <td>Need to unlock early, transfer ownership, use with condvar, or defer the lock</td></tr>
+<tr><td><code>std::scoped_lock</code> (C++17)</td><td>Lock multiple mutexes deadlock-free in one go</td></tr>
+</table>
+
+<p>Rules:</p>
+<ol>
+  <li><strong>Always RAII</strong> — never bare <code>m.lock()</code>/<code>m.unlock()</code>; an exception will leave it locked.</li>
+  <li><strong>Hold the smallest scope possible</strong> — but never call code that may take another lock while holding this one, unless ordering is total.</li>
+  <li><strong>Lock multiple mutexes in a fixed order</strong> across the program, or use <code>std::scoped_lock(m1, m2)</code> which uses deadlock-avoidance.</li>
+  <li><strong>Don't recurse into a locked region</strong> with the same non-recursive mutex. <code>std::recursive_mutex</code> exists; using it is a code smell.</li>
+</ol>
+
+<div class="callout pitfall">
+<div class="callout-title">Deadlock — the canonical recipe</div>
+<p>Thread A locks M1, then needs M2. Thread B locks M2, then needs M1. Both wait forever. Always lock in the same order, everywhere. <code>std::scoped_lock(m1, m2)</code> uses an algorithm that avoids the cycle.</p>
+</div>
+
+<h2 id="condvar">Condition variables — wait for state changes</h2>
+
+<p>Mutexes give "only one at a time"; condition variables let a thread sleep until something becomes true.</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;mutex&gt;
+#include &lt;condition_variable&gt;
+#include &lt;queue&gt;
+
+template &lt;class T&gt;
+class Channel {
+    std::mutex              m_;
+    std::condition_variable not_empty_;
+    std::queue&lt;T&gt;           q_;
+    bool                    closed_ = false;
+public:
+    void send(T v) {
+        {
+            std::lock_guard lk(m_);
+            q_.push(std::move(v));
+        }
+        not_empty_.notify_one();
+    }
+    bool recv(T&amp; out) {
+        std::unique_lock lk(m_);
+        not_empty_.wait(lk, [this]{ return !q_.empty() || closed_; });
+        if (q_.empty()) return false;          // closed, drained
+        out = std::move(q_.front()); q_.pop();
+        return true;
+    }
+    void close() {
+        { std::lock_guard lk(m_); closed_ = true; }
+        not_empty_.notify_all();
+    }
+};
+</code></pre>
+</div>
+
+<p>The crucial idiom: <code>cv.wait(lk, predicate)</code>. It atomically releases the lock and sleeps; on wakeup, re-acquires the lock and re-checks the predicate. <strong>Never wait without a predicate</strong> — spurious wakeups happen and you must re-check anyway.</p>
+
+<p><code>notify_one</code> wakes one waiter; <code>notify_all</code> wakes all. Notify after releasing the lock if you can — wakees would just block on the lock you still hold.</p>
+
+<h2 id="atomics">Atomics — the right primitive for shared flags and counters</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;atomic&gt;
+
+std::atomic&lt;bool&gt; stop = false;
+std::atomic&lt;long&gt; counter = 0;
+
+void worker() {
+    while (!stop.load(std::memory_order_acquire)) {
+        counter.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void stopper() {
+    stop.store(true, std::memory_order_release);
+}
+</code></pre>
+</div>
+
+<p>Atomics are lock-free for typical sizes (1, 2, 4, 8 bytes on x86_64). They're fast — no syscall, no kernel involvement — and they prevent the data-race UB. The catch: you must pick a memory order.</p>
+
+<h4>Memory orderings, briefly</h4>
+
+<table>
+<thead><tr><th>Ordering</th><th>What it gives you</th><th>When</th></tr></thead>
+<tbody>
+<tr><td><code>memory_order_relaxed</code></td>  <td>Atomic only — no ordering with other ops</td>             <td>Counters where you only need the final total</td></tr>
+<tr><td><code>memory_order_acquire</code></td>  <td>This load synchronises with a release store; sees prior writes by the storer</td><td>Reading a "ready" flag</td></tr>
+<tr><td><code>memory_order_release</code></td>  <td>This store publishes prior writes; the matching acquire sees them</td><td>Writing the "ready" flag last</td></tr>
+<tr><td><code>memory_order_acq_rel</code></td>  <td>Both</td>                                                  <td>RMW like <code>fetch_add</code> when ordering matters both ways</td></tr>
+<tr><td><code>memory_order_seq_cst</code> (default)</td><td>Sequentially consistent — total order across all threads</td><td>The safe default; what you want unless profiling says otherwise</td></tr>
+</table>
+
+<p>The mental model: <strong>release is "publish"</strong>, <strong>acquire is "subscribe"</strong>. The store-release on one thread plus the matching load-acquire on another guarantees that everything written before the release is visible after the acquire.</p>
+
+<p>Default to <code>seq_cst</code>. Use <code>acquire</code>/<code>release</code> when you've measured a hot path and need to relax. Use <code>relaxed</code> only for "just count something; final value is all I care about". Wrong memory orders are subtle bugs that pass tests for years.</p>
+
+<h2 id="cas">Compare-and-swap, lock-free patterns</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>std::atomic&lt;int&gt; v{0};
+
+/* CAS — atomically: if v == expected, set v = desired; return success/failure
+   On failure, expected is updated to current value. Loop is the standard pattern. */
+int cur = v.load();
+do {
+    /* compute new based on cur */
+} while (!v.compare_exchange_weak(cur, cur + 1));   // spurious failures allowed
+
+/* compare_exchange_strong: no spurious failures, slightly slower; use outside loops. */
+</code></pre>
+</div>
+
+<p>CAS is the heart of lock-free algorithms. <code>compare_exchange_weak</code> in a loop, <code>strong</code> when you're not looping. The implementation is <code>cmpxchg</code> on x86, <code>ldrex/strex</code> (load-linked / store-conditional) on ARM.</p>
+
+<p><strong>Lock-free is hard.</strong> ABA problem, memory reclamation, the Treiber stack vs the Michael-Scott queue — these are research-paper-level. Use <code>std::atomic&lt;std::shared_ptr&lt;T&gt;&gt;</code> (C++20), Folly's <code>UnboundedQueue</code>, or just a <code>mutex + std::queue</code>. Profile first, lock-free later.</p>
+
+<h2 id="false-sharing">False sharing</h2>
+
+<p>CPU caches operate at cache-line granularity (typically 64 bytes). Two atomic counters on the same cache line cause threads to ping-pong the line between caches — much slower than if they were apart.</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>// BAD — counters share a cache line
+struct Bad {
+    std::atomic&lt;long&gt; a;
+    std::atomic&lt;long&gt; b;   // probably in the same 64-byte line as a
+};
+
+// GOOD — pad to separate lines
+struct alignas(64) Counter { std::atomic&lt;long&gt; v; char _pad[64 - sizeof(v)]; };
+struct Good { Counter a; Counter b; };
+</code></pre>
+</div>
+
+<p>Or use <code>std::hardware_destructive_interference_size</code> (C++17) instead of the literal 64. False sharing is the #1 reason "I added a thread and got slower".</p>
+
+<h2 id="patterns">Patterns that survive review</h2>
+
+<h4>Producer-consumer</h4>
+<div class="code" data-lang="cpp">
+<pre><code>BoundedQueue&lt;Job&gt; q(64);
+
+void producer() {
+    while (auto job = next_job()) q.push(*job);
+    q.close();
+}
+
+void consumer() {
+    Job j;
+    while (q.pop(j)) process(j);
+}
+</code></pre>
+</div>
+
+<h4>Worker pool</h4>
+<div class="code" data-lang="cpp">
+<pre><code>std::vector&lt;std::jthread&gt; workers;
+for (int i = 0; i &lt; N; i++)
+    workers.emplace_back([&amp;](std::stop_token st) {
+        Job j;
+        while (!st.stop_requested() &amp;&amp; q.pop(j)) process(j);
+    });
+// Destruction joins all jthreads automatically.
+</code></pre>
+</div>
+
+<h4>Read-mostly state</h4>
+<p>For data read often, written rarely, <code>std::shared_mutex</code>:</p>
+<div class="code" data-lang="cpp">
+<pre><code>std::shared_mutex sm;
+std::unordered_map&lt;K, V&gt; data;
+
+V get(const K&amp; k) {
+    std::shared_lock lk(sm);                 // many readers
+    return data.at(k);
+}
+void set(K k, V v) {
+    std::unique_lock lk(sm);                 // exclusive writer
+    data[std::move(k)] = std::move(v);
+}
+</code></pre>
+</div>
+
+<p>Don't reach for shared_mutex by default — it's heavier than a regular mutex per op. Only use when the read:write ratio is genuinely high.</p>
+
+<h2 id="thread-locals">Thread-local storage</h2>
+
+<div class="code" data-lang="cpp">
+<pre><code>thread_local int tls_value = 0;
+thread_local std::vector&lt;int&gt; per_thread_buffer;
+</code></pre>
+</div>
+
+<p>Every thread has its own copy. Useful for per-thread caches and arenas. <strong>Costs:</strong> first access on a thread initialises (slow), threading models that pool threads carry old TLS state into new uses, fork doesn't reinitialise child's TLS.</p>
+
+<h2 id="rcu">A note on RCU and userspace</h2>
+
+<p>For really hot read-mostly data structures, RCU (Read-Copy-Update) lets readers proceed without locks. The Linux kernel uses it pervasively. In userspace: <code>liburcu</code>. Complex to use right; reach for it only when profiling shows shared-mutex contention as the bottleneck.</p>
+
+<h2 id="async-signal">Threads and signals — the rules</h2>
+
+<ol>
+  <li>A signal sent to a process can be delivered to any thread that doesn't have it blocked.</li>
+  <li>Mask signals in worker threads, handle them in one designated thread.</li>
+  <li><code>pthread_sigmask</code> / <code>signalfd</code> are the modern way.</li>
+  <li>Async-signal-safe rules apply per signal handler — same as in single-threaded.</li>
+</ol>
+
+<div class="code" data-lang="cpp">
+<pre><code>// At program start, before spawning threads:
+sigset_t set;
+sigemptyset(&amp;set);
+sigaddset(&amp;set, SIGTERM);
+sigaddset(&amp;set, SIGINT);
+pthread_sigmask(SIG_BLOCK, &amp;set, nullptr);
+// New threads inherit this mask. One designated thread does sigwait().
+
+std::thread signaller([set]{
+    int sig;
+    sigwait(&amp;set, &amp;sig);
+    request_stop();
+});
+</code></pre>
+</div>
+
+<h2 id="tsan">TSan — race detection that works</h2>
+
+<p>ThreadSanitizer instruments every memory access with shadow-memory bookkeeping; on a race it prints both stacks. Cost is ~5–15× slowdown — fine for tests.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ c++ -std=c++20 -O1 -g -fsanitize=thread race.cpp -o race
+$ ./race
+==================
+WARNING: ThreadSanitizer: data race (pid=12345)
+  Write of size 4 at 0x... by thread T1:
+    #0 worker race.cpp:12
+
+  Previous read of size 4 at 0x... by thread T2:
+    #0 reader race.cpp:18
+
+  Location is global 'counter' of size 4 at 0x...
+==================
+</code></pre>
+</div>
+
+<p>Run your tests under TSan in CI. Every race it finds is real.</p>
+
+<h2 id="hands-on">Hands-on: a counter that breaks</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · see TSan in action</div>
+<div class="hands-on-body">
+<div class="code" data-lang="cpp">
+<pre><code>#include &lt;thread&gt;
+#include &lt;vector&gt;
+#include &lt;cstdio&gt;
+
+long counter = 0;
+
+void worker() {
+    for (int i = 0; i &lt; 1'000'000; i++) counter++;
+}
+
+int main() {
+    std::vector&lt;std::thread&gt; ts;
+    for (int i = 0; i &lt; 8; i++) ts.emplace_back(worker);
+    for (auto&amp; t : ts) t.join();
+    std::printf("counter = %ld (expected %d)\n", counter, 8'000'000);
+}
+</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ c++ -O2 -std=c++20 race.cpp -o race &amp;&amp; ./race
+counter = 1325617 (expected 8000000)            # arbitrary low number — lost increments
+
+$ c++ -O1 -g -fsanitize=thread race.cpp -o race &amp;&amp; ./race
+WARNING: ThreadSanitizer: data race ...
+counter = ... (expected 8000000)
+</code></pre>
+</div>
+<p>Now make it correct: change <code>long counter</code> to <code>std::atomic&lt;long&gt; counter{0}</code> and <code>counter++</code> works (atomic RMW). The result is exactly 8,000,000.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Why isn't volatile enough?</span>
+</div>
+<div class="exercise-body">
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>volatile</code> means "the compiler must read/write the variable as written; no caching in registers". It does <strong>not</strong>:</p>
+<ul>
+<li>Make accesses atomic. A 64-bit write may still tear on 32-bit hardware.</li>
+<li>Insert memory barriers — CPU reordering can still happen.</li>
+<li>Establish a happens-before relationship — other writes around the volatile aren't ordered by it.</li>
+</ul>
+<p>Use <code>std::atomic</code> (C++) or <code>_Atomic</code> (C11). Use <code>volatile</code> for memory-mapped I/O registers and <code>sig_atomic_t</code> flags from signal handlers — that's all.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Spurious wakeup</span>
+</div>
+<div class="exercise-body">
+<p>Why does <code>cv.wait(lk)</code> need a predicate?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Two reasons:</p>
+<ol>
+<li><strong>Spurious wakeups</strong>: the implementation is allowed to wake a waiter even when no one notified. Without a predicate, you'd treat noise as signal.</li>
+<li><strong>Stolen wakeups</strong>: another thread won the race after notify and consumed the resource (e.g. queue went empty between notify and your wakeup). You'd return without data.</li>
+</ol>
+<p>The predicate-version <code>cv.wait(lk, [&amp;]{ return ready; })</code> handles both — re-checks the condition after each wakeup, sleeps again if false.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Memory order for a flag</span>
+</div>
+<div class="exercise-body">
+<p>One thread builds a struct, then sets a "ready" flag. Another thread polls the flag, reads the struct on true. What memory orders make this correct?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="cpp">
+<pre><code>std::atomic&lt;bool&gt; ready{false};
+Big data;
+
+// Producer
+data = build_big();
+ready.store(true, std::memory_order_release);
+
+// Consumer
+while (!ready.load(std::memory_order_acquire)) std::this_thread::yield();
+use(data);
+</code></pre>
+</div>
+<p>The release-acquire pair guarantees that everything the producer wrote before the store is visible to the consumer after the acquire. Without those orders (or with relaxed), the consumer can read <code>ready=true</code> but stale or partial <code>data</code> — UB-flavoured race even with atomic ready.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Deadlock-free multi-mutex</span>
+</div>
+<div class="exercise-body">
+<p>You have <code>Account a, b</code>. <code>transfer(a, b, 10)</code> needs to lock both. Calls happen in any order. Show two ways to avoid deadlock.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>(1) Address ordering:</strong></p>
+<div class="code" data-lang="cpp">
+<pre><code>void transfer(Account&amp; a, Account&amp; b, int amount) {
+    auto* lo = std::min(&amp;a, &amp;b);
+    auto* hi = std::max(&amp;a, &amp;b);
+    std::lock_guard l1(lo-&gt;m);
+    std::lock_guard l2(hi-&gt;m);
+    a.balance -= amount;
+    b.balance += amount;
+}
+</code></pre>
+</div>
+<p><strong>(2) <code>std::scoped_lock</code></strong> (C++17) — uses an algorithm that avoids cycles:</p>
+<div class="code" data-lang="cpp">
+<pre><code>void transfer(Account&amp; a, Account&amp; b, int amount) {
+    std::scoped_lock lk(a.m, b.m);
+    a.balance -= amount;
+    b.balance += amount;
+}
+</code></pre>
+</div>
+<p><code>scoped_lock</code> is the modern default — readable and correct.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">False sharing benchmark</span>
+</div>
+<div class="exercise-body">
+<p>Write a benchmark with two threads each incrementing their own counter 100M times. Compare: counters in same struct (no padding) vs aligned to 64 bytes. Why is the difference what you see?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Without padding, both counters land in the same cache line. Each increment makes that line dirty, the other CPU's cache invalidates, and the line ping-pongs between cores at memory-system speed. Throughput collapses by 5–10×.</p>
+<p>With <code>alignas(64)</code> or explicit padding, the counters sit on separate lines. Each thread keeps its line in its L1 cache; no coherence traffic; near-linear speedup.</p>
+<p>Measure with <code>perf stat -e cache-misses,L1-dcache-load-misses</code>. The difference is dramatic and a real-world cause of "added a thread, got slower".</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Data races are UB — even with <code>volatile</code>. Use atomics or mutexes.</li>
+  <li>RAII for every mutex (<code>lock_guard</code>, <code>unique_lock</code>, <code>scoped_lock</code>). Lock multiple in fixed order or via scoped_lock.</li>
+  <li>Condition variables: always loop on a predicate; notify after releasing the mutex.</li>
+  <li>Atomics with seq_cst by default; learn release/acquire when profiling demands it.</li>
+  <li>False sharing causes inexplicable slowdowns; pad shared atomics to cache-line size.</li>
+  <li>Use TSan in CI. Every report is real.</li>
+  <li>Mask signals in workers; handle them via <code>signalfd</code> or one designated thread.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="06-files-and-io.html"><span class="lbl">← Prev</span><span class="ttl">Files &amp; I/O</span></a>
+  <a href="08-ipc-and-sockets.html" class="next"><span class="lbl">Next →</span><span class="ttl">IPC &amp; sockets</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

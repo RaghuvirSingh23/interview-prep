@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>7 · Phony &amp; Special Targets — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 07</span>
+  Phony &amp; Special Targets
+</h1>
+<p class="lede">
+  <code>.PHONY</code>, order-only prerequisites, <code>::</code>
+  double-colon rules, grouped targets, and the full set of
+  <code>.SPECIAL</code> targets Make knows about. This is where your
+  Makefiles go from "works on my machine" to "works correctly and
+  predictably".
+</p>
+
+<h2 id="phony-recap">Phony, properly</h2>
+
+<p>
+  We met <code>.PHONY</code> in Chapter 3: it tells Make that a target
+  isn't a file. Let's do it thoroughly.
+</p>
+
+<p>
+  A target is <strong>phony</strong> when its name should not be
+  treated as a file name. Its recipe is always run, timestamps are
+  irrelevant, and Make never tries to find a file with that name.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all clean test install release docs help
+
+all: hello
+clean: ; rm -f hello *.o
+test: hello; ./hello
+# …</code></pre>
+</div>
+
+<p>Why does this matter?</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ touch clean           # create a file called "clean"
+$ make clean
+make: 'clean' is up to date.</code></pre>
+</div>
+
+<p>If <code>clean</code> weren't phony, Make checks for a file named <code>clean</code>, finds one, has no prerequisites, declares "up to date", and does nothing. Disaster narrowly averted by <code>.PHONY</code>.</p>
+
+<p>There's a less-obvious second benefit: <strong>phony targets also opt out of implicit rule matching</strong>. If your target is <code>test</code>, Make might otherwise try to run a built-in rule like "compile test.c to test" and surprise you. <code>.PHONY: test</code> shuts that down.</p>
+
+<p>
+  <strong>Rule of thumb:</strong> every action target goes in
+  <code>.PHONY</code>. No exceptions. Grow the list as you add targets.
+</p>
+
+<h2 id="phony-trick">The compact <code>.PHONY</code> idiom</h2>
+
+<p>
+  Scattering <code>.PHONY: name</code> above each rule is noisy.
+  Consolidate at the top:
+</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all clean test install
+
+all: hello
+clean: ; rm -f hello *.o
+test: hello; ./hello
+install: hello; cp hello /usr/local/bin/</code></pre>
+</div>
+
+<p>Or, if you like, per-rule in shorter Makefiles:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all
+all: hello
+
+.PHONY: clean
+clean: ; rm -f hello *.o</code></pre>
+</div>
+
+<p>Pick one style. I prefer consolidated at the top because it's a single place to audit.</p>
+
+<h2 id="order-only">Order-only prerequisites</h2>
+
+<p>
+  Problem: you want a build directory to exist before compiling, but
+  you don't want the build directory's <em>mtime</em> triggering
+  rebuilds. On Unix, a directory's mtime changes whenever files are
+  added to it — so every new output would retrigger every other output.
+</p>
+
+<p>Solution: <strong>order-only prerequisites</strong>, separated by a <code>|</code>:</p>
+
+<div class="code" data-lang="make">
+<pre><code>build/%.o: src/%.c | build
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+build:
+	mkdir -p $@</code></pre>
+</div>
+
+<p>
+  Read: "<code>build/foo.o</code> depends on <code>src/foo.c</code>
+  <em>and</em> the directory <code>build</code> must exist. But
+  <code>build</code>'s mtime doesn't count — don't rebuild
+  <code>foo.o</code> just because the directory was touched".
+</p>
+
+<p>Order-only prerequisites are in <code>$|</code> (their own automatic variable), not <code>$^</code>.</p>
+
+<div class="callout tip">
+<div class="callout-title">Canonical use: directory creation</div>
+<p>
+  Any time you need "make sure this directory exists before producing
+  a file in it", use an order-only prerequisite. It's cleaner than
+  <code>mkdir -p</code> on every line of every recipe, and it
+  composes correctly with parallel builds.
+</p>
+</div>
+
+<h2 id="grouped">Grouped targets (<code>&amp;:</code>)</h2>
+
+<p>
+  Sometimes <em>one recipe produces multiple files simultaneously</em>
+  — think of a yacc generating both <code>parser.c</code> and
+  <code>parser.h</code>. Traditional Makefile tricks to handle this are
+  all wrong (they either rebuild N times in parallel, or miss the
+  dependency entirely).
+</p>
+
+<p>GNU Make 4.3+ has <strong>grouped targets</strong>:</p>
+
+<div class="code" data-lang="make">
+<pre><code>parser.c parser.h &amp;: parser.y
+	yacc -d parser.y
+	mv y.tab.c parser.c
+	mv y.tab.h parser.h</code></pre>
+</div>
+
+<p>
+  Note the <code>&amp;:</code> — one ampersand, one colon. It means
+  "this recipe produces <em>all</em> of these files when run <em>once</em>".
+  If either <code>parser.c</code> or <code>parser.h</code> is missing or
+  stale, the recipe fires exactly once and produces both.
+</p>
+
+<p>Contrast the classic form:</p>
+<div class="code" data-lang="make">
+<pre><code>parser.c parser.h: parser.y        # WRONG in parallel builds
+	yacc -d parser.y
+	# …</code></pre>
+</div>
+<p>That declares two independent rules sharing a recipe. With <code>-j</code>, Make may try to run the recipe twice simultaneously. The <code>&amp;:</code> form fixes it.</p>
+
+<h2 id="double-colon">Double-colon rules</h2>
+
+<p>
+  A regular (single-colon) rule: you can have <em>one</em> recipe per
+  target. Multiple rules add prerequisites.
+</p>
+
+<p>
+  A double-colon (<code>::</code>) rule: each <code>::</code> rule is
+  independent. The target is rebuilt if <em>any</em> of its
+  <code>::</code> rules has an out-of-date prerequisite. Each rule's
+  recipe runs independently.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>doc.html :: content.md
+	pandoc content.md -o doc.html
+
+doc.html :: styles.css
+	touch doc.html     # just update its mtime when CSS changes</code></pre>
+</div>
+
+<p>
+  When do you want this? Rarely. Two legitimate uses:
+</p>
+<ul>
+  <li><strong>"Update if any of these changes"</strong> where each change needs a different handler. Above: content change means full rebuild, CSS change means just re-timestamp so downstream dependents notice.</li>
+  <li><strong>Multi-file generation with distinct recipes per trigger</strong> — occasionally shows up in research pipelines.</li>
+</ul>
+
+<p>For 99% of cases, single-colon rules and pattern rules suffice.</p>
+
+<h2 id="special-targets">The full set of <code>.SPECIAL</code> targets</h2>
+
+<p>
+  Make reserves a handful of "target names that aren't really targets"
+  — they configure Make's behaviour. You've met <code>.PHONY</code>
+  already. Here's the full set.
+</p>
+
+<h3 id="phony-full"><code>.PHONY: names…</code></h3>
+<p>Marks names as phony. Always run recipe. Don't check for files. Don't apply implicit rules.</p>
+
+<h3 id="delete-on-error"><code>.DELETE_ON_ERROR:</code></h3>
+<p>
+  If a recipe fails, Make deletes the target it was trying to build.
+  Without this, a failed recipe can leave a half-written file that's
+  newer than its prerequisites — and Make will think it's up to date
+  next time.
+</p>
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:
+
+report.pdf: report.tex data.csv
+	pdflatex report.tex        # if this fails, report.pdf is deleted</code></pre>
+</div>
+<p>
+  <strong>Put this in every non-trivial Makefile.</strong> It has no
+  downside for correctness.
+</p>
+
+<h3 id="intermediate-precious"><code>.INTERMEDIATE</code>, <code>.SECONDARY</code>, <code>.PRECIOUS</code></h3>
+
+<p>These three control how Make treats intermediate files.</p>
+
+<table>
+<thead><tr><th>Target</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>.INTERMEDIATE: names…</code></td><td>These files are treated as intermediate — created if needed, <em>deleted</em> when Make finishes.</td></tr>
+<tr><td><code>.SECONDARY: names…</code></td><td>Don't delete these when Make finishes — but treat them as intermediate for dependency purposes (don't rebuild if they're missing and something else in the chain is up to date).</td></tr>
+<tr><td><code>.PRECIOUS: names…</code></td><td>If a recipe is interrupted (Ctrl-C or signal), don't delete these files. Without this, Make deletes targets on interrupt.</td></tr>
+</tbody>
+</table>
+
+<div class="code" data-lang="make">
+<pre><code>.PRECIOUS: %.o                    # keep .o files on interrupt
+.SECONDARY:                       # with no args, applies to all intermediates</code></pre>
+</div>
+
+<p>
+  When Make chains rules (e.g. <code>foo → foo.o → foo.c</code>), any
+  file not explicitly asked for becomes intermediate. By default
+  intermediate files are <em>deleted</em> at the end of the build.
+  <code>.SECONDARY:</code> with no arguments prevents this — very
+  common in Makefiles that chain generators.
+</p>
+
+<h3 id="oneshell-silent-etc"><code>.ONESHELL</code>, <code>.SILENT</code>, <code>.IGNORE</code></h3>
+<p>
+  <code>.ONESHELL:</code> — run each recipe as a single shell (Chapter 3).
+</p>
+<p>
+  <code>.SILENT:</code> — don't echo recipes. With no arguments:
+  globally; with arguments: only for those targets.
+</p>
+<p>
+  <code>.IGNORE:</code> — ignore exit status. Equivalent to prefixing
+  every recipe line with <code>-</code>.
+</p>
+
+<h3 id="notparallel"><code>.NOTPARALLEL:</code></h3>
+<p>
+  Force sequential execution even with <code>-j</code>. Use when one of
+  your recipes fundamentally can't be parallelised.
+</p>
+<div class="code" data-lang="make">
+<pre><code>.NOTPARALLEL:
+# Nothing in this Makefile will run in parallel, regardless of -j</code></pre>
+</div>
+<p>You can also scope it to specific targets in GNU Make 4.4+:</p>
+<div class="code" data-lang="make">
+<pre><code>.NOTPARALLEL: release     # only release runs non-parallel</code></pre>
+</div>
+
+<h3 id="suffixes"><code>.SUFFIXES:</code></h3>
+<p>
+  Historic mechanism for "suffix rules" (the ancestor of pattern rules).
+  Mostly obsolete. You'll sometimes see:
+</p>
+<div class="code" data-lang="make">
+<pre><code>.SUFFIXES:                       # clear the list — disable suffix rules</code></pre>
+</div>
+<p>This disables Make's old <code>.c.o:</code>-style rules. Usually safe and occasionally removes surprising behavior.</p>
+
+<h3 id="default-goal"><code>.DEFAULT_GOAL</code></h3>
+<p>
+  Not a target — a <em>variable</em>. Set it to control which target
+  runs when you type <code>make</code> with no argument:
+</p>
+<div class="code" data-lang="make">
+<pre><code>.DEFAULT_GOAL := all
+
+clean: ; rm -f *.o
+all: hello
+# Even though clean is listed first, `make` builds `all`.</code></pre>
+</div>
+
+<h3 id="default"><code>.DEFAULT:</code></h3>
+<p>
+  A target with no name that provides a recipe for <em>any</em> target
+  that has no rule. Very rarely useful; usually a sign of a Makefile
+  that's trying to be too clever.
+</p>
+
+<h3 id="export-all"><code>.EXPORT_ALL_VARIABLES:</code></h3>
+<p>Make's version of <code>set -a</code>: every Make variable becomes an environment variable for child processes.</p>
+
+<h3 id="recipeprefix"><code>.RECIPEPREFIX</code></h3>
+<p>
+  <em>This</em> one is a peace offering from GNU Make. If the tab
+  character has driven you insane, change it:
+</p>
+<div class="code" data-lang="make">
+<pre><code>.RECIPEPREFIX := &gt;
+hello:
+&gt; echo "Now recipe lines start with > instead of tab"
+&gt; echo "and tab is just a regular whitespace"</code></pre>
+</div>
+<p>
+  GNU Make 3.82+. Few Makefiles use it (Make users are masochists who
+  have accepted their fate) but it exists. Don't deploy this in a
+  codebase where newcomers might be confused — stick with tabs in
+  shared projects.
+</p>
+
+<h3 id="posix"><code>.POSIX:</code></h3>
+<p>
+  Declares that the Makefile wants POSIX conformance. Changes some
+  behavior subtly (mostly around shell invocation). Honest opinion:
+  rarely needed; if you want POSIX-portable Make, use BSD Make
+  directly.
+</p>
+
+<h3 id="secondexpansion"><code>.SECONDEXPANSION:</code></h3>
+<p>
+  Big gun — enables a second pass of variable expansion for rule
+  prerequisites. We give it its own section in Chapter 8.
+</p>
+
+<h3 id="lowres"><code>.LOW_RESOLUTION_TIME</code></h3>
+<p>
+  Targets listed here use seconds-granularity time comparisons
+  instead of sub-second. Useful if you're building on a filesystem
+  (FAT32) that doesn't support sub-second mtimes. Rarely needed.
+</p>
+
+<h2 id="hands-on">Hands-on: order-only in action</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · why order-only matters</div>
+<div class="hands-on-body">
+<p>Create this Makefile:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>.PHONY: all clean
+
+all: build/a.txt build/b.txt
+
+build/a.txt: | build
+	echo "a" &gt; $@
+
+build/b.txt: | build
+	echo "b" &gt; $@
+
+build:
+	mkdir -p $@
+
+clean: ; rm -rf build</code></pre>
+</div>
+<p>Run:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+mkdir -p build
+echo "a" &gt; build/a.txt
+echo "b" &gt; build/b.txt
+$ make
+make: Nothing to be done for 'all'.</code></pre>
+</div>
+<p>Now remove the <code>|</code> and make <code>build</code> a regular prerequisite, then touch <code>build</code>:</p>
+<div class="code" data-lang="make">
+<pre><code>build/a.txt: build          # regular, not order-only
+	echo "a" &gt; $@</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ touch build
+$ make
+echo "a" &gt; build/a.txt
+echo "b" &gt; build/b.txt    # rebuilt — unnecessarily!</code></pre>
+</div>
+<p>
+  With a regular prereq, writing <code>build/a.txt</code> modified
+  <code>build</code>'s mtime, which would then trigger
+  <code>build/b.txt</code>'s recipe, and so on. Order-only breaks this
+  cycle.
+</p>
+</div>
+</div>
+
+<h2 id="checklist">Every Makefile checklist</h2>
+
+<p>Here's my short list of "always include these" in real projects:</p>
+
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:                              # clean up failed targets
+.SUFFIXES:                                     # kill suffix-rule surprises
+MAKEFLAGS += --warn-undefined-variables        # catch typos
+MAKEFLAGS += --no-builtin-rules                # predictability
+SHELL       := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.ONESHELL:
+
+.DEFAULT_GOAL := all
+
+.PHONY: all clean test install release help</code></pre>
+</div>
+
+<p>Most of these come up in later chapters — treat the list as a forward reference.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Why does this fail?</span>
+</div>
+<div class="exercise-body">
+<p>
+  A user reports: "My <code>make install</code> target stopped working
+  — it just says 'Nothing to do for install'." You look at the
+  Makefile:
+</p>
+<div class="code" data-lang="make">
+<pre><code>install: hello
+	cp hello /usr/local/bin/</code></pre>
+</div>
+<p>You notice there's a file called <code>install</code> in the project root. Explain what happened and give a one-line fix.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  The file <code>install</code> is newer than <code>hello</code> (or
+  always up-to-date because it has no prereqs with rules), so Make
+  thinks the "target" is already built.
+</p>
+<p>Fix: add <code>.PHONY: install</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Why always DELETE_ON_ERROR?</span>
+</div>
+<div class="exercise-body">
+<p>
+  Give a specific example where <code>.DELETE_ON_ERROR:</code> saves
+  you from a silent wrong-build.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>report.pdf: report.tex
+	pandoc report.tex -o report.pdf</code></pre>
+</div>
+<p>
+  Suppose <code>pandoc</code> fails halfway through, leaving a partially-written
+  <code>report.pdf</code>. Its mtime is newer than
+  <code>report.tex</code>. Next time you run <code>make</code>, it sees
+  <code>report.pdf</code> is "up to date" and silently succeeds —
+  except the PDF is corrupt. You discover this at 3 AM before a
+  deadline.
+</p>
+<p>With <code>.DELETE_ON_ERROR:</code>, Make removes <code>report.pdf</code> on failure. Next run rebuilds cleanly. You sleep.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Grouped vs shared</span>
+</div>
+<div class="exercise-body">
+<p>You have:</p>
+<div class="code" data-lang="make">
+<pre><code>parser.c parser.h: parser.y
+	yacc -d $&lt;
+	mv y.tab.c parser.c
+	mv y.tab.h parser.h
+
+main.o: parser.h
+scanner.o: parser.c</code></pre>
+</div>
+<p>Under what circumstances does this produce a wrong build? Fix it.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  With <code>make -j 2</code>, Make may notice both <code>parser.c</code>
+  and <code>parser.h</code> are needed and start the recipe
+  <em>twice</em> simultaneously. The two instances race for
+  <code>y.tab.c</code> and <code>y.tab.h</code>; you can get
+  duplicated commands, truncated files, and spurious errors.
+</p>
+<p>Fix: grouped target.</p>
+<div class="code" data-lang="make">
+<pre><code>parser.c parser.h &amp;: parser.y
+	yacc -d $&lt;
+	mv y.tab.c parser.c
+	mv y.tab.h parser.h</code></pre>
+</div>
+<p>Now the recipe runs exactly once, no matter which of the two files (or both) trigger it.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Implement a <code>help</code> target</span>
+</div>
+<div class="exercise-body">
+<p>Write a phony <code>help</code> target that prints a list of available actions with one-line descriptions. Bonus: auto-generate from annotations in the Makefile so it stays in sync.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Simple static version:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: help
+help:
+	@echo "Targets:"
+	@echo "  all       — build everything"
+	@echo "  test      — run tests"
+	@echo "  install   — install to /usr/local"
+	@echo "  clean     — remove build artifacts"</code></pre>
+</div>
+<p>Auto-generated from annotations (this is the idiom in many modern Makefiles):</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: help
+help:  ## show this help
+	@awk 'BEGIN {FS=":.*##"} /^[a-zA-Z_-]+:.*##/ { \
+	    printf "  %-15s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+.PHONY: all test install clean
+all:     ## build everything
+	…
+test:    ## run tests
+	…
+install: ## install to /usr/local
+	…
+clean:   ## remove build artifacts
+	…</code></pre>
+</div>
+<p>Running <code>make help</code>:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make help
+  help            show this help
+  all             build everything
+  test            run tests
+  install         install to /usr/local
+  clean           remove build artifacts</code></pre>
+</div>
+<p>The awk one-liner extracts all lines of the form <code>target: ... ## description</code>. A common pattern — worth stealing for every project.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Keeping intermediates</span>
+</div>
+<div class="exercise-body">
+<p>
+  A build chain produces <code>foo.a → foo.b → foo.c</code>. When you
+  ask for <code>foo.c</code>, the <code>foo.a</code> and
+  <code>foo.b</code> are created and then deleted automatically
+  because they're intermediate. You want to keep them for debugging.
+  How?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Option 1 — catch-all:</p>
+<div class="code" data-lang="make">
+<pre><code>.SECONDARY:       # keep every intermediate</code></pre>
+</div>
+<p>Option 2 — specific:</p>
+<div class="code" data-lang="make">
+<pre><code>.SECONDARY: foo.a foo.b</code></pre>
+</div>
+<p>Option 3 — add them as explicit goals so Make doesn't consider them intermediate:</p>
+<div class="code" data-lang="make">
+<pre><code>all: foo.c foo.b foo.a</code></pre>
+</div>
+<p>Most codebases go with <code>.SECONDARY:</code> — simple, safe.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Never parallelise tests</span>
+</div>
+<div class="exercise-body">
+<p>
+  Your test suite writes to a shared resource (say, a database) and
+  <em>must</em> run sequentially, but your compilation can happily
+  parallelise. How do you let the user run <code>make -j 8 all test</code>
+  such that compilation is parallel but tests run one at a time?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Use <code>.NOTPARALLEL</code> targeted at the test target, or have the test target invoke Make recursively with <code>-j 1</code>:</p>
+<div class="code" data-lang="make">
+<pre><code># GNU Make 4.4+ — scoped .NOTPARALLEL
+.NOTPARALLEL: test
+
+.PHONY: all test
+all: $(BINARIES)
+
+test: $(TEST_BINS)
+	@for t in $^; do ./$$t || exit 1; done</code></pre>
+</div>
+<p>Or portable for older Makes, use a sub-make:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: test
+test:
+	$(MAKE) -j 1 do-test
+
+do-test: $(TEST_BINS)
+	@for t in $^; do ./$$t || exit 1; done</code></pre>
+</div>
+<p>Spawning a new <code>make</code> with <code>-j 1</code> overrides the inherited jobserver and forces sequential execution of <code>do-test</code>'s prerequisites.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.7</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Investigate a real Makefile</span>
+</div>
+<div class="exercise-body">
+<p>
+  Pick any moderately-sized open-source project (the Linux kernel,
+  Redis, Git, PostgreSQL). Find its top-level Makefile. Identify:
+</p>
+<ul>
+  <li>Which targets are phony?</li>
+  <li>Which <code>.SPECIAL</code> targets does it use, and why?</li>
+  <li>Does it use order-only prerequisites? For what?</li>
+  <li>Any double-colon rules?</li>
+</ul>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>No single solution. Some things you're likely to find:</p>
+<ul>
+  <li>Git's <code>Makefile</code> uses <code>.PHONY</code> extensively and <code>.DELETE_ON_ERROR:</code>.</li>
+  <li>Redis uses <code>.PHONY</code> on all action targets and careful <code>.NOTPARALLEL</code> placement.</li>
+  <li>The Linux kernel's <code>Makefile</code> uses order-only prereqs extensively for output directories (it has a "build outside the tree" mode you've probably used: <code>make O=/tmp/kernel-build</code>).</li>
+</ul>
+<p>The point of the exercise isn't any one "right" answer — it's to make your eyes more fluent in real Make code.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>.PHONY</code> for every action target. Always.</li>
+  <li>Order-only prerequisites (<code>|</code>) for "must exist" dependencies whose mtime shouldn't trigger rebuilds. Canonical: output directories.</li>
+  <li>Grouped targets (<code>&amp;:</code>) when one recipe produces multiple outputs.</li>
+  <li>Double-colon rules when you want multiple independent recipes for the same target — rarely useful.</li>
+  <li><code>.DELETE_ON_ERROR:</code> belongs in every non-trivial Makefile.</li>
+  <li><code>.SECONDARY:</code> keeps intermediates around.</li>
+  <li><code>.PRECIOUS:</code> keeps files on interrupt.</li>
+  <li><code>.NOTPARALLEL:</code> for recipes that can't share resources.</li>
+  <li><code>.SUFFIXES:</code> disables legacy suffix rules — turn it on in modern Makefiles.</li>
+  <li><code>.DEFAULT_GOAL</code>, <code>.RECIPEPREFIX</code>, <code>.EXPORT_ALL_VARIABLES</code> round out your toolkit.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="06-functions.html"><span class="lbl">← Prev</span><span class="ttl">Functions</span></a>
+  <a href="08-metaprogramming.html" class="next"><span class="lbl">Next →</span><span class="ttl">Metaprogramming</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

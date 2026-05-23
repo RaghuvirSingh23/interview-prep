@@ -3,7 +3,7 @@
  * Problem: Shortest Path Between Two Nodes in Binary Tree
  * ============================================================================
  * Difficulty: Medium
- * Source: NextHop.AI Interview Guidelines
+ * Source: Interview practice guidelines
  * Time: 30-40 minutes
  * 
  * DESCRIPTION:

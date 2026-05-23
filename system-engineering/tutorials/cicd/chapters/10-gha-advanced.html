@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · GitHub Actions — Advanced — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 10</span>
+  GitHub Actions — Advanced
+</h1>
+<p class="lede">
+  Reusable workflows, composite actions, matrix strategies with
+  <code>include</code>/<code>exclude</code>, environments, concurrency
+  control, and OIDC-based cloud authentication that eliminates
+  long-lived credentials. Plus writing your own actions.
+</p>
+
+<h2 id="reusable">Reusable workflows</h2>
+
+<p>
+  Reusable workflows let one workflow <em>call</em> another. Define
+  once, call from many repos or jobs. The called workflow lives at a
+  normal path (<code>.github/workflows/X.yml</code>) and declares
+  <code>on: workflow_call</code>:
+</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/reusable-test.yml</span></div>
+<pre><code>name: Reusable Test
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "20"
+      run-e2e:
+        type: boolean
+        default: false
+    secrets:
+      NPM_TOKEN:
+        required: false
+    outputs:
+      coverage:
+        description: "Coverage %"
+        value: ${{ jobs.test.outputs.cov }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      cov: ${{ steps.cov.outputs.pct }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ inputs.node-version }} }
+      - run: npm ci
+      - run: npm test
+      - id: cov
+        run: echo "pct=$(cat coverage/summary.txt)" &gt;&gt; $GITHUB_OUTPUT
+      - if: ${{ inputs.run-e2e }}
+        run: npm run e2e</code></pre>
+</div>
+
+<p>Caller:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>jobs:
+  test-20:
+    uses: ./.github/workflows/reusable-test.yml
+    with:
+      node-version: "20"
+      run-e2e: true
+    secrets: inherit
+
+  # Call from another repo
+  test-shared:
+    uses: myorg/shared-workflows/.github/workflows/test.yml@v1
+    with:
+      node-version: "18"
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+</code></pre>
+</div>
+
+<p>Notes:</p>
+<ul>
+  <li>Callers pass <code>with:</code> for inputs, <code>secrets:</code> (or <code>secrets: inherit</code>).</li>
+  <li>Reference a reusable workflow in another repo with <code>owner/repo/.github/workflows/name.yml@ref</code>.</li>
+  <li>Up to 4 levels of nesting; you can call a workflow that calls another.</li>
+  <li>Reusable workflows run as their own jobs — separate runners, separate logs.</li>
+</ul>
+
+<h2 id="composite">Composite actions</h2>
+
+<p>
+  Reusable workflows wrap <em>jobs</em>. Composite actions wrap
+  <em>steps</em>. Define at <code>.github/actions/&lt;name&gt;/action.yml</code>:
+</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/actions/setup-pipeline/action.yml</span></div>
+<pre><code>name: "Setup pipeline"
+description: "Checkout, install Node, cache, install deps"
+inputs:
+  node-version:
+    description: "Node major"
+    default: "20"
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+    - run: npm ci
+      shell: bash</code></pre>
+</div>
+
+<p>Use inline in a job's steps:</p>
+<div class="code" data-lang="yaml">
+<pre><code>steps:
+  - uses: ./.github/actions/setup-pipeline
+    with: { node-version: "20" }
+  - run: npm test</code></pre>
+</div>
+
+<p>
+  Shared across a single repo trivially; across repos, publish the
+  action in its own repo. Composite actions are the go-to for
+  "several steps I always do together".
+</p>
+
+<div class="callout tip">
+<div class="callout-title">Reusable workflow vs composite action — how to choose</div>
+<ul>
+<li>Need to define entire jobs (with <code>runs-on</code>, concurrency, matrix)? → Reusable workflow.</li>
+<li>Need a block of steps inside an existing job? → Composite action.</li>
+<li>Need conditional logic in input handling? Either — composite is usually lighter.</li>
+</ul>
+</div>
+
+<h2 id="matrix-advanced">Matrix — include, exclude, failures</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  test:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        os:   [ubuntu-latest, macos-latest]
+        node: [18, 20, 22]
+        include:
+          - os: windows-latest
+            node: 20
+            special: "add to matrix"
+        exclude:
+          - os: macos-latest
+            node: 18
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ matrix.node }} }
+      - run: npm test</code></pre>
+</div>
+
+<p>Walking the shape:</p>
+<ul>
+  <li>Base: 2 × 3 = 6 combinations.</li>
+  <li><code>exclude</code> removes the (macos, 18) pair → 5 combinations.</li>
+  <li><code>include</code> appends 1 extra: (windows, 20) with an extra <code>special</code> variable → 6 total.</li>
+  <li><code>fail-fast: false</code> lets every matrix cell run to completion; default <code>true</code> cancels siblings on first failure.</li>
+  <li><code>max-parallel: 4</code> caps concurrent matrix cells.</li>
+</ul>
+
+<h2 id="concurrency">Concurrency — cancelling old runs</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true</code></pre>
+</div>
+
+<p>
+  Every run with the same <code>group</code> string competes for a
+  single "slot". If <code>cancel-in-progress</code> is true, a new run
+  cancels the old one. Perfect for PR workflows: push twice quickly,
+  the first run is cancelled in favour of the second.
+</p>
+
+<p>Common patterns:</p>
+<ul>
+  <li><code>group: ${{ github.workflow }}-${{ github.ref }}</code> — one run per workflow per branch.</li>
+  <li><code>group: deploy-prod</code> — serialise all prod deploys globally, never cancel them.</li>
+  <li><code>cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}</code> — auto-cancel on PRs but queue on main.</li>
+</ul>
+
+<h2 id="environments">Environments</h2>
+
+<p>
+  A GitHub <strong>environment</strong> is a named deploy target with
+  its own secrets and protection rules. Configure in Settings →
+  Environments. Then in a job:
+</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://example.com
+    needs: [test]
+    steps:
+      - run: ./deploy.sh</code></pre>
+</div>
+
+<p>Environment features:</p>
+<ul>
+  <li><strong>Required reviewers</strong> — a job targeting this environment waits until a listed user clicks approve.</li>
+  <li><strong>Wait timer</strong> — enforce a cooldown period.</li>
+  <li><strong>Deployment branches</strong> — limit which branches can deploy (e.g. only <code>main</code> or <code>release/*</code>).</li>
+  <li><strong>Environment-scoped secrets</strong> — separate prod vs staging credentials; only jobs targeting that environment can access them.</li>
+</ul>
+
+<p>
+  This is the primary approval mechanism in GHA. Set up
+  <code>production</code> with required reviewers and you've built a
+  gated deploy without writing any code.
+</p>
+
+<h2 id="oidc">OIDC to the cloud — no long-lived credentials</h2>
+
+<p>
+  The old way: a long-lived <code>AWS_ACCESS_KEY_ID</code> +
+  <code>AWS_SECRET_ACCESS_KEY</code> stored in GitHub secrets,
+  rotated… sometimes. The token exists in multiple places; losing it
+  is bad.
+</p>
+
+<p>
+  The new way: GitHub issues a short-lived <strong>OIDC</strong> token
+  per workflow run. Your cloud trusts GitHub's OIDC issuer. The token
+  is exchanged for cloud credentials that expire in an hour. Nothing
+  long-lived ever touches a secret store.
+</p>
+
+<h4>AWS example</h4>
+<div class="code" data-lang="yaml">
+<pre><code>permissions:
+  id-token: write      # required to get the OIDC token
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-deploy
+          aws-region: us-east-1
+      - run: aws s3 sync dist/ s3://my-bucket --delete</code></pre>
+</div>
+
+<p>You also create an IAM OIDC provider and role on AWS that trusts GitHub, scoped to specific repos/branches. Same pattern exists for GCP (Workload Identity Federation), Azure (OIDC login), and Vault.</p>
+
+<p><strong>Rule:</strong> new integrations should use OIDC. Don't store long-lived cloud keys in GitHub secrets unless no alternative exists.</p>
+
+<h2 id="own-action">Writing your own action</h2>
+
+<p>Three flavors — JavaScript, Docker, Composite. JavaScript is the most versatile (runs on Linux/macOS/Windows).</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">action.yml (JavaScript action)</span></div>
+<pre><code>name: "Greet"
+description: "Prints a greeting"
+inputs:
+  who:
+    description: "Name"
+    required: true
+outputs:
+  greeting:
+    description: "The printed greeting"
+runs:
+  using: "node20"
+  main: "dist/index.js"</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">js</span><span class="title">src/index.js</span></div>
+<pre><code>const core = require('@actions/core');
+try {
+  const who = core.getInput('who');
+  const msg = `Hello, ${who}!`;
+  console.log(msg);
+  core.setOutput('greeting', msg);
+} catch (e) {
+  core.setFailed(e.message);
+}</code></pre>
+</div>
+
+<p>
+  You bundle <code>src/</code> + <code>node_modules/</code> into
+  <code>dist/index.js</code> with <code>@vercel/ncc</code>; commit the
+  bundle; tag a release. Consumers do
+  <code>uses: myorg/greet-action@v1</code>.
+</p>
+
+<p>For a one-off team tool, prefer a composite action — no bundling dance.</p>
+
+<h2 id="jobs-as-matrix">Dynamic matrix from previous job</h2>
+
+<p>Sometimes the matrix isn't known at author time — you want it computed per run:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  find-packages:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set
+        run: |
+          echo 'matrix={"pkg":["alpha","beta","gamma"]}' &gt;&gt; "$GITHUB_OUTPUT"
+
+  build:
+    needs: find-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.find-packages.outputs.matrix) }}
+    steps:
+      - run: echo "Building ${{ matrix.pkg }}"</code></pre>
+</div>
+
+<p>
+  The first job computes a JSON matrix. <code>fromJSON</code> parses
+  it in the second job's <code>strategy.matrix</code>. Powerful for
+  monorepos.
+</p>
+
+<h2 id="services">Service containers</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: &gt;-
+          --health-cmd "pg_isready"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          export DATABASE_URL="postgres://postgres:test@localhost:5432/postgres"
+          pip install -r requirements.txt
+          pytest tests/integration/</code></pre>
+</div>
+
+<p>Services run as Docker containers alongside the job. <code>options:</code> lets you pass Docker-run flags; health-check settings let GHA wait for the service to be ready before the job starts.</p>
+
+<h2 id="artifacts-adv">Artifacts v4 — scoped &amp; immutable</h2>
+
+<p>Upload-artifact v4 changed semantics from v3:</p>
+<ul>
+  <li>Artifacts are now <strong>immutable</strong> — you cannot upload to the same artifact name twice.</li>
+  <li>Each upload becomes a distinct artifact. Merge with <code>actions/upload-artifact/merge@v4</code> if needed.</li>
+  <li>Up to 10× faster uploads/downloads.</li>
+</ul>
+
+<p>If you had a pattern like "each matrix cell appends to the same artifact", refactor: upload a per-cell artifact, then merge in a final job.</p>
+
+<h2 id="summary">Job summaries</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>- name: Report
+  run: |
+    {
+      echo "## Test results"
+      echo ""
+      echo "| Suite | Passed | Failed |"
+      echo "|-------|--------|--------|"
+      echo "| unit  | 120    | 0      |"
+      echo "| integ | 45     | 2      |"
+    } &gt;&gt; "$GITHUB_STEP_SUMMARY"</code></pre>
+</div>
+
+<p><code>$GITHUB_STEP_SUMMARY</code> is a file that supports Markdown; contents show up as a rich summary on the job page. Underrated feature — ship human-readable reports for free.</p>
+
+<h2 id="self-hosted">Self-hosted runners done right</h2>
+
+<p>Quick setup: Repo → Settings → Actions → Runners → "New self-hosted runner". GitHub gives a script. Run it on your machine:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ mkdir actions-runner &amp;&amp; cd actions-runner
+$ curl -o actions-runner-linux-x64-2.317.0.tar.gz -L \
+     https://github.com/actions/runner/releases/download/v2.317.0/actions-runner-linux-x64-2.317.0.tar.gz
+$ tar xzf actions-runner-linux-x64-2.317.0.tar.gz
+$ ./config.sh --url https://github.com/owner/repo --token ABCD
+$ ./run.sh</code></pre>
+</div>
+
+<p>For production, you want:</p>
+<ul>
+  <li><strong>Ephemeral runners.</strong> One job → one VM → destroyed. Use <em>actions-runner-controller</em> on Kubernetes.</li>
+  <li><strong>Auto-scaling.</strong> Spin up on queue depth, down when idle. ARC supports this natively.</li>
+  <li><strong>Fleet isolation.</strong> Don't run untrusted PRs on self-hosted runners that touch your infra — fork PRs get <em>limited</em> secrets but a malicious script can still abuse compute.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">Never use persistent self-hosted runners for public repos</div>
+<p>
+  A PR from a fork can introduce malicious code. If your runner is
+  persistent (not ephemeral), that code can poison subsequent jobs —
+  stealing secrets from other runs, installing backdoors, etc. Use
+  ephemeral runners (ARC, Philips' actions-runner-controller, or
+  GitHub's own) for anything public-facing.
+</p>
+</div>
+
+<h2 id="act">Local testing with <code>act</code></h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ brew install act        # or: curl -fsSL https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+$ act pull_request        # simulate a pull_request event locally
+$ act -j test             # run only the "test" job
+$ act -l                  # list jobs</code></pre>
+</div>
+
+<p>
+  <a href="https://github.com/nektos/act">act</a> runs your workflows
+  in Docker locally. Not pixel-perfect (services/actions don't all
+  work identically) but saves dozens of "commit-push-wait" cycles
+  when authoring a workflow.
+</p>
+
+<h2 id="hands-on">Hands-on: a production-grade pipeline</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · reusable + environments + OIDC</div>
+<div class="hands-on-body">
+<p>Composite action:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/actions/py-setup/action.yml</span></div>
+<pre><code>name: Python setup
+inputs:
+  python-version:
+    default: "3.11"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: pip
+    - run: pip install -r requirements.txt
+      shell: bash</code></pre>
+</div>
+<p>Reusable workflow:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/_test.yml</span></div>
+<pre><code>on:
+  workflow_call:
+    inputs:
+      python-version: { type: string, required: true }
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/py-setup
+        with: { python-version: ${{ inputs.python-version }} }
+      - run: pytest --junitxml=report.xml
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ inputs.python-version }}
+          path: report.xml</code></pre>
+</div>
+<p>Top-level workflow:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    uses: ./.github/workflows/_test.yml
+    with:
+      python-version: ${{ matrix.python-version }}
+
+  deploy-staging:
+    needs: test-matrix
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: aws s3 sync dist/ s3://staging-bucket/ --delete</code></pre>
+</div>
+<p>Push this to a repo; configure the environments and OIDC trust in AWS. Observe how the reusable workflow shows up as separate job cards per matrix cell.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Cancel on new push</span>
+</div>
+<div class="exercise-body">
+<p>Write concurrency config that keeps the latest PR run and cancels older ones.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true</code></pre>
+</div>
+<p>Include <code>github.workflow</code> so different workflows on the same ref don't cancel each other.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Extract a composite action</span>
+</div>
+<div class="exercise-body">
+<p>Three workflows all do "checkout → setup-node → npm ci → cache". Extract into a local composite action and rewrite one workflow to use it.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/actions/node-setup/action.yml</span></div>
+<pre><code>name: Node setup
+inputs:
+  node-version: { default: "20" }
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+    - run: npm ci
+      shell: bash</code></pre>
+</div>
+<p>Consumer:</p>
+<div class="code" data-lang="yaml">
+<pre><code>steps:
+  - uses: ./.github/actions/node-setup
+  - run: npm test</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Dynamic matrix</span>
+</div>
+<div class="exercise-body">
+<p>A job should run tests only for packages changed in the PR. Sketch the workflow: one job computes the list, next runs per-package in a matrix.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  changed:
+    runs-on: ubuntu-latest
+    outputs:
+      pkgs: ${{ steps.list.outputs.pkgs }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: list
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+                    | grep -oE '^packages/[^/]+' | sort -u \
+                    | jq -R -s 'split("\n") | map(select(length&gt;0))')
+          echo "pkgs=$changed" &gt;&gt; "$GITHUB_OUTPUT"
+
+  test:
+    needs: changed
+    if: ${{ fromJSON(needs.changed.outputs.pkgs)[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.changed.outputs.pkgs) }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd ${{ matrix.pkg }} &amp;&amp; npm ci &amp;&amp; npm test</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">OIDC to AWS</span>
+</div>
+<div class="exercise-body">
+<p>Describe, in order, the pieces you need to set up OIDC-based deploy from GHA to AWS. List GitHub side, AWS side.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>AWS side:</strong></p>
+<ol>
+<li>Create an IAM OIDC identity provider with URL <code>https://token.actions.githubusercontent.com</code> and audience <code>sts.amazonaws.com</code>.</li>
+<li>Create an IAM role with a trust policy restricting to specific <code>repo:owner/repo:ref:refs/heads/main</code> (use the <code>sub</code> claim).</li>
+<li>Grant that role the IAM permissions your deploy needs (S3, ECR, ECS, etc.).</li>
+</ol>
+<p><strong>GitHub side:</strong></p>
+<ol>
+<li><code>permissions: { id-token: write, contents: read }</code> in the workflow.</li>
+<li>Use <code>aws-actions/configure-aws-credentials@v4</code> with <code>role-to-assume: arn:…</code>.</li>
+<li>Run AWS CLI / SDK commands normally — they pick up the short-lived credentials.</li>
+</ol>
+<p>Net effect: no <code>AWS_*</code> secrets in GitHub, credentials are per-run and expire in an hour.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Job summaries for coverage</span>
+</div>
+<div class="exercise-body">
+<p>Write a step that reads <code>coverage.txt</code> and renders a Markdown table into the job summary.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>- name: Coverage summary
+  run: |
+    {
+      echo "## Coverage"
+      echo ""
+      echo '```'
+      cat coverage.txt
+      echo '```'
+    } &gt;&gt; "$GITHUB_STEP_SUMMARY"</code></pre>
+</div>
+<p>Everything written to <code>$GITHUB_STEP_SUMMARY</code> is rendered as Markdown on the job page. No plugin needed.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Reusable workflows wrap jobs; composite actions wrap steps; choose based on scope.</li>
+  <li>Matrix includes/excludes and <code>fail-fast</code> control the test grid.</li>
+  <li><code>concurrency</code> + <code>cancel-in-progress</code> saves runner minutes on rapid pushes.</li>
+  <li>Environments give you approvals, scoped secrets, deploy branches.</li>
+  <li>OIDC to cloud providers eliminates long-lived credentials — use it for all new integrations.</li>
+  <li>Dynamic matrix via <code>fromJSON</code> + outputs is the monorepo escape hatch.</li>
+  <li><code>$GITHUB_STEP_SUMMARY</code> for rich per-job Markdown reports.</li>
+  <li>Self-hosted runners: ephemeral, isolated, never persistent for public repos.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="09-gha-intro.html"><span class="lbl">← Prev</span><span class="ttl">GitHub Actions — Fundamentals</span></a>
+  <a href="11-security.html" class="next"><span class="lbl">Next →</span><span class="ttl">Security &amp; Secrets</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

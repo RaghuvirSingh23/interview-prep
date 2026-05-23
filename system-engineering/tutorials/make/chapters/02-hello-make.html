@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2 · Hello, Make — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 02</span>
+  Hello, Make
+</h1>
+<p class="lede">
+  Time to write something. In this chapter you'll install Make, write
+  your first Makefile, and meet the single most infamous gotcha in the
+  entire tool — the tab character. By the end, you'll have a working
+  build that rebuilds only what it needs to.
+</p>
+
+<h2 id="install">Installing GNU Make</h2>
+
+<p>
+  You almost certainly have some version of <code>make</code> already.
+  This tutorial assumes <strong>GNU Make 4.0 or newer</strong>. Check:
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make --version
+GNU Make 4.4.1
+Built for x86_64-pc-linux-gnu
+Copyright (C) 1988-2023 Free Software Foundation, Inc.</code></pre>
+</div>
+
+<p>If the banner doesn't say "GNU Make", or the version is under 4.0, install it.</p>
+
+<h4>macOS</h4>
+<p>
+  Apple ships GNU Make 3.81 (from 2006!) because of a licence change.
+  Install the modern one via Homebrew:
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ brew install make
+$ gmake --version                    # note: "gmake", not "make"
+GNU Make 4.4.1</code></pre>
+</div>
+<p>
+  Homebrew installs it as <code>gmake</code> to avoid colliding with
+  system <code>make</code>. Through this tutorial I'll say
+  <code>make</code>; if you're on macOS with Homebrew, substitute
+  <code>gmake</code> mentally, or add this to your shell rc:
+</p>
+<div class="code" data-lang="sh">
+<pre><code>alias make=gmake</code></pre>
+</div>
+
+<h4>Linux</h4>
+<p>Already installed on every distro. Upgrade if you're on something ancient:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ sudo apt install make         # Debian/Ubuntu
+$ sudo dnf install make         # Fedora
+$ sudo pacman -S make           # Arch</code></pre>
+</div>
+
+<h4>Windows</h4>
+<p>
+  Use WSL. You'll have a real Linux with a real Make. Native Windows
+  has <code>nmake</code> (Microsoft's variant) but this tutorial is
+  about GNU Make specifically.
+</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Not all <code>make</code>s are GNU Make</div>
+<p>
+  BSD systems (OpenBSD, FreeBSD, NetBSD, and macOS) ship a different
+  implementation called <strong>BSD Make</strong>. Its syntax for
+  anything beyond the most basic rules is different. A Makefile written
+  for GNU Make will often fail on BSD Make, and vice versa.
+</p>
+<p>
+  GitHub repos that say <code>make ...</code> in their README almost
+  always mean GNU Make. If you hit baffling parse errors on macOS, it's
+  probably because you're invoking the old BSD-ish stub. Switch to
+  <code>gmake</code>.
+</p>
+</div>
+
+<h2 id="first-makefile">Your first Makefile</h2>
+
+<p>Create an empty directory:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ mkdir -p ~/learning-make/ch02 &amp;&amp; cd ~/learning-make/ch02</code></pre>
+</div>
+
+<p>Create a file named exactly <code>Makefile</code> (capital M, no extension) with this content:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>hello:
+	echo "Hello, Make!"</code></pre>
+</div>
+
+<div class="callout pitfall">
+<div class="callout-title">The line starting with <code>echo</code> MUST begin with a TAB</div>
+<p>
+  Not four spaces. Not two spaces. Not a mix. A single literal tab
+  character. If your editor inserts spaces, find the "show whitespace"
+  option and turn it on. If your editor is VS Code, make sure the tab
+  width is a tab for <code>*.mk</code> / <code>Makefile</code>.
+</p>
+<p>
+  Why? Feldman himself called this "the Make braindamage". He wanted
+  recipes to be visually distinct from target lines, so he required
+  a tab. He has said publicly he'd fix it if he could, but by the
+  time it was clearly a mistake there were already too many Makefiles
+  in the world. We're stuck with it.
+</p>
+<p>
+  If you get <code>Makefile:2: *** missing separator. Stop.</code> —
+  that's your tab-vs-spaces mistake.
+</p>
+</div>
+
+<p>In this tutorial, tabs at the start of recipe lines are rendered as a grey <code>→</code> glyph so you can see them. When you copy a code block, the copy button replaces the glyph with a real tab.</p>
+
+<p>Now run it:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+echo "Hello, Make!"
+Hello, Make!</code></pre>
+</div>
+
+<p>
+  Two lines of output. Make <em>echoes</em> each recipe line before
+  running it (that's the first line), then shows the output of the
+  command (the second line). You can silence the echoing with
+  <code>@</code> — more on that in Chapter 3.
+</p>
+
+<h2 id="a-real-build">A slightly more real build</h2>
+
+<p>
+  Let's do the C build from Chapter 1 for real. We need three trivial
+  source files.
+</p>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">main.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+
+void greet(const char *who);
+
+int main(void) {
+    greet("world");
+    return 0;
+}</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">greet.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+
+void greet(const char *who) {
+    printf("Hello, %s!\n", who);
+}</code></pre>
+</div>
+
+<p>And the Makefile:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>hello: main.o greet.o
+	cc main.o greet.o -o hello
+
+main.o: main.c
+	cc -c main.c -o main.o
+
+greet.o: greet.c
+	cc -c greet.c -o greet.o
+
+clean:
+	rm -f hello main.o greet.o</code></pre>
+</div>
+
+<p>Now try this sequence:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+cc -c main.c -o main.o
+cc -c greet.c -o greet.o
+cc main.o greet.o -o hello
+$ ./hello
+Hello, world!
+$ make
+make: 'hello' is up to date.
+$ touch greet.c
+$ make
+cc -c greet.c -o greet.o
+cc main.o greet.o -o hello</code></pre>
+</div>
+
+<p>Read this carefully. It demonstrates the whole point of Make:</p>
+<ul>
+  <li>First <code>make</code>: builds everything from nothing.</li>
+  <li>Second <code>make</code>: nothing to do — files are up to date.</li>
+  <li>After <code>touch greet.c</code>: Make notices <code>greet.c</code> is newer than <code>greet.o</code>, rebuilds <code>greet.o</code>, notices <code>hello</code>'s prerequisites changed, relinks. <strong>Does not</strong> recompile <code>main.c</code>.</li>
+</ul>
+
+<p>Try it. Then type <code>make clean</code> and watch it remove the outputs.</p>
+
+<h2 id="invocation">How to invoke Make</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make                    # build the default goal (first target)
+$ make hello              # build a specific target
+$ make clean              # run a target named "clean"
+$ make hello clean        # several goals, one after the other
+$ make -f build.mk        # use a different file (not "Makefile")
+$ make -j 4               # parallel: up to 4 jobs at once
+$ make -n                 # DRY RUN: print what would run, don't execute
+$ make -B                 # force a full rebuild (ignore timestamps)
+$ make -s                 # silent: don't echo recipes
+$ make --debug=basic      # show Make's decisions
+$ make VAR=value          # override a variable from the command line</code></pre>
+</div>
+
+<p>
+  The ones you'll use 99% of the time are <code>make</code>,
+  <code>make clean</code>, <code>make -j</code>, and occasionally
+  <code>make -n</code> when something looks off.
+</p>
+
+<h2 id="filenames">Which files Make reads</h2>
+
+<p>When you run <code>make</code>, it looks (in order) for:</p>
+<ol>
+  <li><code>GNUmakefile</code></li>
+  <li><code>makefile</code></li>
+  <li><code>Makefile</code></li>
+</ol>
+<p>
+  Almost everyone uses <code>Makefile</code>. The <code>GNUmakefile</code>
+  name is useful only when you want your Makefile to be ignored by BSD
+  Make and picked up only by GNU Make. You can also force a specific
+  file with <code>-f</code>:
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -f debug.mk</code></pre>
+</div>
+
+<p>
+  Includes other than the three above are found via <code>include</code>
+  directives inside the Makefile — we'll meet those in Chapter 8.
+</p>
+
+<h2 id="comments">Comments and line continuations</h2>
+<p>Comments start with <code>#</code>. They go until end-of-line.</p>
+<div class="code" data-lang="make">
+<pre><code># This is a comment.
+hello:       # so is this
+	echo hi  # this is passed to the shell as "echo hi  "; the shell sees the #</code></pre>
+</div>
+
+<p>
+  Long lines can be continued with <code>\</code> at end-of-line. Make
+  strips the backslash, replaces the newline with a space, and joins
+  the next line:
+</p>
+<div class="code" data-lang="make">
+<pre><code>SOURCES = main.c \
+          greet.c \
+          util.c</code></pre>
+</div>
+
+<h2 id="echo-and-silence">Echo and silence</h2>
+
+<p>
+  By default, Make prints each recipe line before executing it. This is
+  good for debugging, annoying for polished builds. Three ways to
+  suppress:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>hello:
+	@echo "quiet — the @ tells Make not to echo this line"
+	echo "loud — this line is echoed"</code></pre>
+</div>
+
+<p>You can also pass <code>-s</code> on the command line, or add <code>.SILENT:</code> as a special target:</p>
+
+<div class="code" data-lang="make">
+<pre><code>.SILENT:
+hello:
+	echo "this would be silenced despite no @"</code></pre>
+</div>
+
+<p>
+  Most hand-written Makefiles are <em>loud</em>. You want to see what's
+  being run. Reserve <code>@</code> for <code>echo</code> lines that
+  print human-readable status:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>hello: main.o greet.o
+	@echo "  LINK   hello"
+	cc main.o greet.o -o hello</code></pre>
+</div>
+
+<h2 id="exit-status">Exit status and error handling</h2>
+
+<p>
+  Each recipe line is run in its own subshell. If any line exits
+  non-zero, Make stops and prints:
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+false
+make: *** [Makefile:2: hello] Error 1</code></pre>
+</div>
+
+<p>This is what you want. If you <em>deliberately</em> want to ignore the exit status of a line, prefix it with <code>-</code>:</p>
+
+<div class="code" data-lang="make">
+<pre><code>clean:
+	-rm -f hello main.o greet.o</code></pre>
+</div>
+
+<p>
+  Without the <code>-</code>, <code>rm -f</code> is already OK because
+  <code>-f</code> makes it never fail — but as an illustration, the
+  leading <code>-</code> tells Make "I don't care if this command
+  fails". Use sparingly.
+</p>
+
+<h2 id="hands-on">Hands-on: feel the laziness</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · do this now</div>
+<div class="hands-on-body">
+<p>
+  1. Still in <code>~/learning-make/ch02</code>, make sure you have the
+  <code>main.c</code>, <code>greet.c</code>, and Makefile from above.
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ls
+Makefile  greet.c  main.c</code></pre>
+</div>
+<p>2. Build twice. The second build should do nothing.</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+cc -c main.c -o main.o
+cc -c greet.c -o greet.o
+cc main.o greet.o -o hello
+$ make
+make: 'hello' is up to date.</code></pre>
+</div>
+<p>3. Touch only <code>main.c</code>. Predict what will rebuild. Then run <code>make</code> to check.</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ touch main.c
+$ make
+cc -c main.c -o main.o
+cc main.o greet.o -o hello</code></pre>
+</div>
+<p>
+  It rebuilt <code>main.o</code> (because <code>main.c</code> is
+  newer) and relinked <code>hello</code> (because <code>main.o</code>
+  is newer than <code>hello</code>), but skipped <code>greet.o</code>.
+  Good.
+</p>
+<p>4. Now touch <em>the binary itself</em> and watch what happens.</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ touch hello
+$ make
+make: 'hello' is up to date.</code></pre>
+</div>
+<p>
+  <code>hello</code> is now newer than all its prerequisites, so Make
+  is satisfied. This is exactly what you'd expect from a pure
+  timestamp model — and exactly the "bug" from Exercise 1.3.
+</p>
+<p>5. Clean up and re-check.</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make clean
+rm -f hello main.o greet.o
+$ ls
+Makefile  greet.c  main.c</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Deliberately break the tab rule</span>
+</div>
+<div class="exercise-body">
+<p>
+  Edit your <code>Makefile</code> and replace the tab before the
+  <code>cc main.o greet.o -o hello</code> line with four spaces. Save.
+  Run <code>make clean &amp;&amp; make</code>. What error do you get?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+Makefile:2: *** missing separator.  Stop.</code></pre>
+</div>
+<p>
+  Make sees a recipe line that isn't tab-indented, concludes that it
+  must be a malformed rule, and bails. This error message has probably
+  wasted more collective human lifetime than any other in computing.
+  Memorise what it means: <em>spaces where a tab should be</em>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Change the default goal</span>
+</div>
+<div class="exercise-body">
+<p>
+  In the current Makefile, the first target is <code>hello</code>, so
+  <code>make</code> by itself builds it. Rearrange the file so that
+  <code>clean</code> is the first target. Then type <code>make</code>
+  with no arguments. What happens?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Make will run <code>clean</code>. Almost certainly not what you want
+  — which is why <code>clean</code> is conventionally near the bottom
+  of a Makefile, not the top. If you <em>really</em> want a specific
+  target to be the default regardless of position, set the
+  <code>.DEFAULT_GOAL</code> variable:
+</p>
+<div class="code" data-lang="make">
+<pre><code>.DEFAULT_GOAL := hello
+
+clean:
+	rm -f hello main.o greet.o
+
+hello: main.o greet.o
+	cc main.o greet.o -o hello
+
+# … etc</code></pre>
+</div>
+<p>Now <code>make</code> with no args builds <code>hello</code>, even though <code>clean</code> appears first.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.3</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Add a third source file</span>
+</div>
+<div class="exercise-body">
+<p>
+  Add a new file <code>farewell.c</code> that defines
+  <code>void farewell(const char *who)</code> printing
+  "Goodbye, NAME!". Call it from <code>main</code>. Update the Makefile
+  so <code>make</code> builds everything. Don't copy the existing rules
+  blindly — think about what rules the new file needs.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">farewell.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+
+void farewell(const char *who) {
+    printf("Goodbye, %s!\n", who);
+}</code></pre>
+</div>
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">main.c (updated)</span></div>
+<pre><code>void greet(const char *who);
+void farewell(const char *who);
+
+int main(void) {
+    greet("world");
+    farewell("world");
+    return 0;
+}</code></pre>
+</div>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>hello: main.o greet.o farewell.o
+	cc main.o greet.o farewell.o -o hello
+
+main.o: main.c
+	cc -c main.c -o main.o
+
+greet.o: greet.c
+	cc -c greet.c -o greet.o
+
+farewell.o: farewell.c
+	cc -c farewell.c -o farewell.o
+
+clean:
+	rm -f hello main.o greet.o farewell.o</code></pre>
+</div>
+<p>
+  Notice how repetitive this is. By Chapter 5 we'll replace all four
+  compile rules with <em>one</em> pattern rule.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Dry-run and force-rebuild</span>
+</div>
+<div class="exercise-body">
+<p>
+  Without modifying any files, use <code>make -n</code> to see what
+  Make would do if one particular file were out of date. Hint: you
+  can't make Make "pretend" a file is stale with <code>-n</code> alone
+  — but you can combine it with <code>-W</code>
+  (<code>--what-if</code>). Look up what <code>-W</code> does and
+  use it to ask "what would happen if I touched <code>greet.c</code>?"
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  <code>make -W file</code> tells Make to pretend <code>file</code> was
+  just modified, without actually touching it. Combine with
+  <code>-n</code> and you get "dry-run: what would happen if this file
+  changed?":
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -n -W greet.c
+cc -c greet.c -o greet.o
+cc main.o greet.o farewell.o -o hello</code></pre>
+</div>
+<p>
+  No files touched. No commands run. But you now know that modifying
+  <code>greet.c</code> would trigger exactly those two steps. This is
+  golden for sanity-checking complex Makefiles before a big edit.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Observe parallelism</span>
+</div>
+<div class="exercise-body">
+<p>
+  With a clean tree (<code>make clean</code>), run <code>make</code>
+  and note the order of the <code>.o</code> compilations. Then run
+  <code>make clean &amp;&amp; make -j 4</code>. Does the order change?
+  Why?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Without <code>-j</code>, recipes run sequentially in the order Make
+  discovers them during the graph walk (depth-first from the root
+  goal). You'll typically see <code>main.o</code>, then
+  <code>greet.o</code>, then <code>farewell.o</code>, then the link.
+</p>
+<p>
+  With <code>-j 4</code>, the three compilations are independent of
+  each other — none depends on another — so Make schedules them to run
+  concurrently. The interleaved output may look messy. The link step
+  must wait until all three <code>.o</code>s are present, because the
+  link rule lists them as prerequisites.
+</p>
+<p>
+  This is the payoff of Make's <em>declarative</em> model: you told it
+  <em>what</em> depends on <em>what</em>, and it figured out <em>when</em>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">What happens with a missing source?</span>
+</div>
+<div class="exercise-body">
+<p>
+  <code>rm greet.c</code>. Now <code>make clean &amp;&amp; make</code>.
+  What error do you get, and at what stage? Why doesn't Make notice
+  before running the first compilation? (Hint: it's about the order of
+  graph traversal.)
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make clean
+rm -f hello main.o greet.o farewell.o
+$ make
+cc -c main.c -o main.o
+make: *** No rule to make target 'greet.c', needed by 'greet.o'.  Stop.</code></pre>
+</div>
+<p>
+  Make does notice before running <em>the compile for greet.o</em> —
+  but by then, <code>main.o</code> has already been built. That's
+  because Make walks the graph and schedules work as it goes. Without
+  parallel execution, it starts with the first prerequisite of the
+  root (<code>main.o</code>), realises it's achievable, runs it, and
+  only then moves to the second prerequisite (<code>greet.o</code>)
+  which depends on a file that doesn't exist.
+</p>
+<p>
+  Lesson: Make's error detection for missing files is
+  <em>lazy</em>. It doesn't pre-validate the whole graph.
+</p>
+<p>
+  Side note: in parallel mode (<code>-j</code>), Make may have started
+  multiple compilations before hitting the error. You'll still get the
+  "No rule to make target" error, but your output ordering will be
+  interleaved.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Makefiles are named <code>Makefile</code> (or <code>GNUmakefile</code>, or whatever you pass to <code>-f</code>).</li>
+  <li>Every recipe line begins with a literal tab — not spaces. <code>missing separator</code> is tab-vs-spaces.</li>
+  <li>Each recipe line runs in its own subshell. Non-zero exit halts the build unless you prefix the line with <code>-</code>.</li>
+  <li>Make prints each recipe line before running. Prefix with <code>@</code> to silence just one; use <code>-s</code> or <code>.SILENT:</code> globally.</li>
+  <li>Useful CLI flags: <code>-n</code> (dry run), <code>-W file</code> (pretend file is fresh), <code>-B</code> (force rebuild), <code>-j N</code> (parallel).</li>
+  <li>The first target in the file is the default goal, unless you set <code>.DEFAULT_GOAL</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="01-why-make.html"><span class="lbl">← Prev</span><span class="ttl">Why Make Exists</span></a>
+  <a href="03-anatomy-of-a-rule.html" class="next"><span class="lbl">Next →</span><span class="ttl">Anatomy of a Rule</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

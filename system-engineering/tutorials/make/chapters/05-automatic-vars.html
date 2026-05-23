@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5 · Automatic Vars &amp; Pattern Rules — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 05</span>
+  Automatic Vars &amp; Pattern Rules
+</h1>
+<p class="lede">
+  Remember how in Exercise 2.3 we had to write four near-identical
+  compile rules? This chapter shows you how to replace all of them with
+  <em>one</em>. By the end you'll be writing Makefiles that feel like
+  Lisp macros.
+</p>
+
+<h2 id="the-seven">The automatic variables, in one table</h2>
+
+<p>
+  <strong>Automatic variables</strong> are set by Make inside a recipe.
+  They let you refer to the target and prerequisites of the rule
+  currently being executed without hardcoding their names.
+</p>
+
+<table>
+<thead><tr><th>Var</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>$@</code></td><td>The target file name.</td></tr>
+<tr><td><code>$&lt;</code></td><td>The first prerequisite.</td></tr>
+<tr><td><code>$^</code></td><td>All prerequisites, space-separated, duplicates removed.</td></tr>
+<tr><td><code>$+</code></td><td>All prerequisites, with duplicates preserved, in order.</td></tr>
+<tr><td><code>$?</code></td><td>Prerequisites newer than the target.</td></tr>
+<tr><td><code>$*</code></td><td>The "stem" of a pattern rule match (the part that <code>%</code> matched).</td></tr>
+<tr><td><code>$|</code></td><td>All order-only prerequisites (see Chapter 7).</td></tr>
+</tbody>
+</table>
+
+<p>There are also <code>D</code> and <code>F</code> variants that give directory and file parts:</p>
+<table>
+<tr><td><code>$(@D)</code> <code>$(@F)</code></td><td>dir and file of <code>$@</code></td></tr>
+<tr><td><code>$(&lt;D)</code> <code>$(&lt;F)</code></td><td>dir and file of <code>$&lt;</code></td></tr>
+<tr><td>… and so on</td></tr>
+</table>
+
+<p>
+  You'll use <code>$@</code>, <code>$&lt;</code>, and <code>$^</code>
+  every day. The others come up in more advanced recipes.
+</p>
+
+<h2 id="rewrite">Rewriting the link rule</h2>
+
+<p>Here's our Chapter 2 Makefile, rewritten:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — with automatic vars</span></div>
+<pre><code>hello: main.o greet.o farewell.o
+	cc $^ -o $@
+
+main.o: main.c
+	cc -c $&lt; -o $@
+
+greet.o: greet.c
+	cc -c $&lt; -o $@
+
+farewell.o: farewell.c
+	cc -c $&lt; -o $@</code></pre>
+</div>
+
+<p>
+  Small improvement — but now the <code>.o</code> rules are identical
+  <em>except for the file name</em>. That's a job for a pattern rule.
+</p>
+
+<h2 id="patterns">Pattern rules</h2>
+
+<p>
+  A <strong>pattern rule</strong> has a <code>%</code> in its target.
+  <code>%</code> matches any non-empty string (the <em>stem</em>). The
+  same stem is substituted into prerequisites.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>%.o: %.c
+	cc -c $&lt; -o $@</code></pre>
+</div>
+
+<p>This says: "to build anything-dot-o, I need a same-named dot-c, and here's how".</p>
+
+<p>With this single rule, the whole Makefile collapses:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — with pattern rule</span></div>
+<pre><code>hello: main.o greet.o farewell.o
+	cc $^ -o $@
+
+%.o: %.c
+	cc -c $&lt; -o $@
+
+clean:
+	rm -f hello *.o
+
+.PHONY: clean</code></pre>
+</div>
+
+<p>
+  Add a fifth, sixth, fiftieth source file and you don't touch the
+  pattern rule — only the prerequisite list of <code>hello</code>.
+</p>
+
+<div class="callout tip">
+<div class="callout-title">The <code>%</code> is not a regex</div>
+<p>
+  <code>%</code> is a single wildcard meaning "any string, including
+  empty". There's no <code>*.*</code>, no character classes, no
+  alternation. Two percents are not allowed in the same target.
+  Prerequisites can contain multiple <code>%</code>s only if the rule
+  target has one — and they all expand to the <em>same</em> stem.
+</p>
+</div>
+
+<h2 id="inference">How Make picks a pattern rule</h2>
+
+<p>
+  When Make needs to build <code>foo.o</code>, it looks through its
+  pattern rule database for something that matches <code>%.o</code>. It
+  tries them in order and uses the first one whose prerequisites
+  <em>exist or can themselves be built</em>. If nothing fits, it falls
+  back to the built-in rules (more on those in a moment).
+</p>
+
+<p>
+  Multiple pattern rules can match. Make picks the one whose stem is
+  shortest — the most "specific" match. This is the
+  <strong>stem-length tiebreaker</strong>, and it's why
+  <code>foo%.o: foo%.c</code> (match anything starting with "foo") wins
+  over <code>%.o: %.c</code> (match anything) for a file like
+  <code>foobar.o</code>.
+</p>
+
+<h2 id="static-patterns">Static pattern rules</h2>
+
+<p>
+  A regular pattern rule applies to <em>any</em> target matching the
+  pattern. Sometimes you want to restrict it to a specific list.
+  That's a <strong>static pattern rule</strong>:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>OBJ := main.o greet.o farewell.o
+
+$(OBJ): %.o: %.c
+	cc -c $&lt; -o $@</code></pre>
+</div>
+
+<p>
+  Three colons! The form is <code>targets: target-pattern: prereq-pattern</code>.
+  Read: "for each file in <code>OBJ</code>, if it matches
+  <code>%.o</code>, look for the same-stem <code>%.c</code> and run the
+  recipe". This rule applies <em>only</em> to the listed targets, not to
+  every <code>.o</code> in the universe.
+</p>
+
+<p>When do you want this? Whenever you've got a heterogeneous project and want different rules for different groups:</p>
+
+<div class="code" data-lang="make">
+<pre><code>LIB_OBJ := foo.o bar.o
+APP_OBJ := main.o cli.o
+
+$(LIB_OBJ): %.o: %.c
+	cc -fPIC -c $&lt; -o $@
+
+$(APP_OBJ): %.o: %.c
+	cc -c $&lt; -o $@</code></pre>
+</div>
+
+<h2 id="implicit">Built-in implicit rules</h2>
+
+<p>
+  Make ships with a pile of pattern rules baked in — compile C, compile
+  C++, link objects, run yacc, run lex, process tangle, run awk,
+  and so on. You can see them all with <code>make -p</code>.
+</p>
+
+<p>One important implicit rule is roughly:</p>
+<div class="code" data-lang="make">
+<pre><code>%.o: %.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+
+<p>Another is:</p>
+<div class="code" data-lang="make">
+<pre><code>%: %.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $&lt; $(LOADLIBES) $(LDLIBS) -o $@</code></pre>
+</div>
+
+<p>Which means <em>this Makefile works</em>:</p>
+<div class="code" data-lang="make">
+<pre><code># Yes, really. This is a complete Makefile.
+hello: hello.c</code></pre>
+</div>
+
+<p>Or even less:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ls
+hello.c
+$ make hello
+cc     hello.c   -o hello
+$ ls
+hello  hello.c</code></pre>
+</div>
+
+<p>
+  Make didn't need a Makefile at all. It saw <code>hello.c</code>, knew
+  the built-in rule <code>%: %.c</code>, and just ran it. This is
+  wonderful for quick hacks and occasionally surprising when you didn't
+  intend it.
+</p>
+
+<div class="callout hood">
+<div class="callout-title">The implicit rule variables</div>
+<p>The built-in compile rule uses these variables — they are the standard names:</p>
+<table>
+<tr><td><code>CC</code></td><td>C compiler (default: <code>cc</code>)</td></tr>
+<tr><td><code>CXX</code></td><td>C++ compiler (default: <code>g++</code>)</td></tr>
+<tr><td><code>CFLAGS</code></td><td>C compile flags</td></tr>
+<tr><td><code>CXXFLAGS</code></td><td>C++ compile flags</td></tr>
+<tr><td><code>CPPFLAGS</code></td><td>preprocessor flags (-I, -D)</td></tr>
+<tr><td><code>LDFLAGS</code></td><td>linker flags (-L, -Wl,...)</td></tr>
+<tr><td><code>LDLIBS</code></td><td>libraries (-lm, -lpthread)</td></tr>
+<tr><td><code>AR</code> <code>ARFLAGS</code></td><td>archiver (<code>ar cr</code>)</td></tr>
+<tr><td><code>RANLIB</code></td><td><code>ranlib</code> symbol indexer</td></tr>
+</table>
+<p>
+  Using these names plays nicely with every other Makefile, with
+  package maintainers, and with tools like <code>make -p</code>. Invent
+  your own <code>MY_COMPILE_FLAGS</code> only when you must.
+</p>
+</div>
+
+<h2 id="disable-implicit">Disabling built-in rules</h2>
+
+<p>Sometimes you want a pristine Makefile with no surprises:</p>
+
+<div class="code" data-lang="make">
+<pre><code>MAKEFLAGS += --no-builtin-rules --no-builtin-variables</code></pre>
+</div>
+
+<p>
+  Or pass <code>-r -R</code> on the command line. This is common in
+  large projects: built-in rules can cause accidental rebuilds (e.g.
+  Make tries to compile <code>script.py</code> as a yacc file because
+  it matches some weird implicit rule).
+</p>
+
+<p>A more surgical option: empty-override a pattern rule.</p>
+<div class="code" data-lang="make">
+<pre><code>%.o: %.c           # cancel the built-in C rule</code></pre>
+</div>
+<p>A target-less pattern rule with <em>no recipe and no prereqs</em> silently deletes that built-in rule.</p>
+
+<h2 id="vpath">Searching for sources elsewhere — <code>vpath</code></h2>
+
+<p>
+  What if your sources are in <code>src/</code> but your build output
+  should land in <code>build/</code>? One option: use <code>vpath</code>
+  to tell Make where to look.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>vpath %.c src
+
+%.o: %.c
+	cc -c $&lt; -o $@
+
+hello: main.o greet.o
+	cc $^ -o $@</code></pre>
+</div>
+
+<p>
+  When Make looks for <code>main.c</code> and doesn't find it in
+  <code>.</code>, it searches directories listed in
+  <code>vpath %.c src</code>. Same for <code>greet.c</code>. The
+  <code>$&lt;</code> in the recipe will be the <em>full path</em> Make
+  found, e.g. <code>src/main.c</code>.
+</p>
+
+<p>
+  <code>VPATH</code> (uppercase, no pattern) is the older version —
+  it searches these directories for <em>any</em> missing prerequisite:
+</p>
+<div class="code" data-lang="make">
+<pre><code>VPATH := src:include:generated</code></pre>
+</div>
+
+<p>
+  Prefer <code>vpath</code> (lowercase, with pattern) when you can —
+  it's more precise. <code>VPATH</code> can cause surprising matches
+  when a file name coincidentally matches something in another
+  directory.
+</p>
+
+<div class="callout pitfall">
+<div class="callout-title"><code>vpath</code> doesn't handle outputs</div>
+<p>
+  <code>vpath</code> helps Make find <em>inputs</em>. It doesn't change
+  where outputs go. If <code>src/main.c</code> is the input and the
+  pattern is <code>%.o: %.c</code>, the output will be
+  <code>main.o</code> in the current directory — not
+  <code>src/main.o</code>. That's almost always what you want. For
+  output into a <code>build/</code> dir, use explicit paths in the
+  pattern (Chapter 9).
+</p>
+</div>
+
+<h2 id="wildcards">Wildcards and <code>$(wildcard …)</code></h2>
+
+<p>
+  Make expands shell globs like <code>*.c</code> only in places the
+  shell would — namely, recipe lines and some function contexts. In
+  variable assignments, <code>*.c</code> is just the literal string:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>SRC := *.c            # literal text "*.c" — rarely what you want</code></pre>
+</div>
+
+<p>To expand a glob in an assignment, use the <code>wildcard</code> function:</p>
+<div class="code" data-lang="make">
+<pre><code>SRC := $(wildcard *.c)
+OBJ := $(SRC:.c=.o)
+
+hello: $(OBJ)
+	cc $^ -o $@
+
+%.o: %.c
+	cc -c $&lt; -o $@</code></pre>
+</div>
+
+<p>
+  <code>$(SRC:.c=.o)</code> is a <strong>substitution reference</strong>:
+  "in <code>SRC</code>, replace each word ending with <code>.c</code>
+  with the same word ending in <code>.o</code>". It's shorthand for
+  <code>$(patsubst %.c,%.o,$(SRC))</code>, which we'll see in the next
+  chapter.
+</p>
+
+<p>Together, these lines give you an automatic Makefile that just picks up every <code>.c</code> file. Add a new file, no Makefile changes needed.</p>
+
+<h2 id="hands-on">Hands-on: the 3-line Makefile</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · minimal, automatic</div>
+<div class="hands-on-body">
+<p>Start fresh in <code>~/learning-make/ch05</code> with the three C files from Chapter 2 (you can copy them with <code>cp ~/learning-make/ch02/*.c .</code>). Write:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>SRC := $(wildcard *.c)
+OBJ := $(SRC:.c=.o)
+
+hello: $(OBJ)
+	$(CC) $(CFLAGS) $^ -o $@
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+clean: ; rm -f hello *.o
+.PHONY: clean</code></pre>
+</div>
+<p>Build:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+cc  -c main.c -o main.o
+cc  -c greet.c -o greet.o
+cc  -c farewell.c -o farewell.o
+cc  main.o greet.o farewell.o -o hello
+$ ./hello
+Hello, world!
+Goodbye, world!</code></pre>
+</div>
+<p>Now add a new file <code>wave.c</code>:</p>
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdio.h&gt;
+void wave(const char *who) { printf("Hi there, %s.\n", who); }</code></pre>
+</div>
+<p>Call <code>wave("reader")</code> from <code>main</code>. Then:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+cc  -c main.c -o main.o
+cc  -c wave.c -o wave.o
+cc  main.o greet.o farewell.o wave.o -o hello
+$ ./hello
+Hello, world!
+Goodbye, world!
+Hi there, reader.</code></pre>
+</div>
+<p>You didn't touch the Makefile. The <code>wildcard</code> picked up the new file, the substitution produced <code>wave.o</code>, the pattern rule compiled it, and the link rule picked it up because <code>OBJ</code> contains it. This is the kind of Makefile that earns its keep.</p>
+</div>
+</div>
+
+<h2 id="dd-variants">The D and F variants</h2>
+
+<p>Given a target <code>build/obj/foo.o</code>:</p>
+<ul>
+  <li><code>$@</code> = <code>build/obj/foo.o</code></li>
+  <li><code>$(@D)</code> = <code>build/obj</code> (directory)</li>
+  <li><code>$(@F)</code> = <code>foo.o</code> (file, no dir)</li>
+</ul>
+<p>Useful for creating output directories on the fly:</p>
+<div class="code" data-lang="make">
+<pre><code>build/obj/%.o: src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Identify each variable</span>
+</div>
+<div class="exercise-body">
+<p>For this rule, give the values of <code>$@</code>, <code>$&lt;</code>, <code>$^</code>, <code>$?</code>, and <code>$*</code> when the recipe runs:</p>
+<div class="code" data-lang="make">
+<pre><code>build/foo.o: src/foo.c include/foo.h</code></pre>
+</div>
+<p>Assume <code>src/foo.c</code> is newer than <code>build/foo.o</code>, but <code>include/foo.h</code> is older.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li><code>$@</code> = <code>build/foo.o</code></li>
+<li><code>$&lt;</code> = <code>src/foo.c</code></li>
+<li><code>$^</code> = <code>src/foo.c include/foo.h</code></li>
+<li><code>$?</code> = <code>src/foo.c</code> (only newer prereq)</li>
+<li><code>$*</code> = empty, because this isn't a pattern rule — no stem.</li>
+</ul>
+<p>If the rule were instead <code>%.o: %.c</code> and the target was <code>build/foo.o</code>, then <code>$*</code> would be <code>build/foo</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">One-line Makefile</span>
+</div>
+<div class="exercise-body">
+<p>Create a single file <code>hello.c</code> with a working <code>main</code>. With NO Makefile in the directory, run <code>make hello</code>. Does it work? Why?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Yes. Make's built-in rule <code>%: %.c</code> matches, and it runs <code>cc hello.c -o hello</code>. You can verify with <code>make -p</code> | look for "<code>%: %.c</code>". The implicit rules are what make shell demos like <code>make foo</code> (where <code>foo.c</code> is sitting right there) work.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Writing a pattern rule</span>
+</div>
+<div class="exercise-body">
+<p>
+  You have a directory of Markdown files and want each <code>foo.md</code>
+  to be converted to <code>foo.html</code> via
+  <code>pandoc $&lt; -o $@</code>. Write the pattern rule plus an
+  <code>all</code> target that builds every HTML file.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>MD   := $(wildcard *.md)
+HTML := $(MD:.md=.html)
+
+.PHONY: all clean
+all: $(HTML)
+
+%.html: %.md
+	pandoc $&lt; -o $@
+
+clean: ; rm -f $(HTML)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Outputs in a subdirectory</span>
+</div>
+<div class="exercise-body">
+<p>
+  Change the C project so that <code>*.o</code> files are written under
+  <code>build/</code> rather than next to the sources. Sources stay in
+  the current directory. The <code>hello</code> binary should also
+  land in <code>build/</code>.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>SRC := $(wildcard *.c)
+OBJ := $(patsubst %.c,build/%.o,$(SRC))
+BIN := build/hello
+
+.PHONY: all clean
+all: $(BIN)
+
+$(BIN): $(OBJ)
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+clean: ; rm -rf build</code></pre>
+</div>
+<p>
+  Notice <code>$(@D)</code> giving the directory of the current target,
+  and the <code>@mkdir -p</code> making sure it exists. This is the
+  idiomatic "out-of-tree build" pattern. We'll revisit it in Chapter 9
+  with order-only prerequisites for a cleaner implementation.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Using <code>$?</code> cleverly</span>
+</div>
+<div class="exercise-body">
+<p>
+  Write a rule that updates a file <code>all.txt</code> by concatenating
+  only the <em>newer</em> of its prerequisites onto itself. (This is
+  a little contrived, but it's a classic use of <code>$?</code>.)
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>all.txt: a.txt b.txt c.txt
+	cat $? &gt;&gt; $@</code></pre>
+</div>
+<p>
+  If only <code>b.txt</code> is newer than <code>all.txt</code>,
+  <code>$?</code> is just <code>b.txt</code>, so we append its contents.
+  <code>$?</code>'s canonical use case is incremental archive updates:
+</p>
+<div class="code" data-lang="make">
+<pre><code>mylib.a: foo.o bar.o baz.o
+	ar cr $@ $?</code></pre>
+</div>
+<p>
+  This adds only the changed <code>.o</code>s to the archive, rather
+  than rebuilding it from scratch.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Shadowing a built-in rule</span>
+</div>
+<div class="exercise-body">
+<p>
+  You're getting surprising output: Make seems to be trying to run
+  <code>yacc</code> on your file <code>parser.y</code>, but you
+  actually have no yacc-based tooling. How would you disable the
+  <code>%.c: %.y</code> built-in rule specifically, without killing
+  <em>all</em> built-ins?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>%.c: %.y      # empty override — cancel this specific built-in rule</code></pre>
+</div>
+<p>
+  A pattern rule with no recipe and no prerequisites <em>deletes</em>
+  the built-in rule of the same pattern. Now Make will no longer try
+  to yacc your <code>.y</code> file. If you want to see every built-in
+  rule Make knows, run <code>make -p -f /dev/null</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.7</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Static vs regular pattern — when?</span>
+</div>
+<div class="exercise-body">
+<p>
+  Your project has <code>.c</code> files that compile with
+  <code>-fPIC</code> (they go into a shared lib) and <code>.c</code>
+  files that don't (they go into the main executable). Show how a
+  <em>static pattern rule</em> lets you handle this without needing
+  separate file extensions or directories.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>LIB_SRC := fmt.c log.c util.c
+APP_SRC := main.c cli.c
+
+LIB_OBJ := $(LIB_SRC:.c=.o)
+APP_OBJ := $(APP_SRC:.c=.o)
+
+$(LIB_OBJ): %.o: %.c
+	$(CC) -fPIC $(CFLAGS) -c $&lt; -o $@
+
+$(APP_OBJ): %.o: %.c
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+libmine.so: $(LIB_OBJ)
+	$(CC) -shared -o $@ $^
+
+app: $(APP_OBJ) libmine.so
+	$(CC) $(APP_OBJ) -L. -lmine -o $@</code></pre>
+</div>
+<p>
+  A regular pattern rule <code>%.o: %.c</code> would apply to
+  <em>every</em> .o → .c. With the static pattern rule form
+  <code>targets: target-pat: prereq-pat</code>, we restrict each rule
+  to a specific target list.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.8</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Explore the built-in database</span>
+</div>
+<div class="exercise-body">
+<p>
+  Run <code>make -p -f /dev/null 2&gt;/dev/null | less</code>. Find the
+  built-in rule for C++ compilation (<code>%.o: %.cc</code> or
+  <code>%.o: %.cpp</code>). What variable is used for "C++ compiler"?
+  What preprocessor flags does it use?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Search <code>/^%.o:</code>. You'll find something like:</p>
+<div class="code" data-lang="make">
+<pre><code>%.o: %.cc
+#  recipe to execute (built-in):
+	$(COMPILE.cc) $(OUTPUT_OPTION) $&lt;
+# …
+COMPILE.cc = $(CXX) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
+OUTPUT_OPTION = -o $@</code></pre>
+</div>
+<p>
+  <code>CXX</code> is the compiler (default <code>g++</code>).
+  Preprocessor flags come from <code>CPPFLAGS</code>. The conventional
+  names really are:
+</p>
+<ul>
+  <li><code>CPPFLAGS</code> — C preprocessor flags (<code>-I</code>, <code>-D</code>). Shared by C and C++.</li>
+  <li><code>CFLAGS</code> — C compiler flags.</li>
+  <li><code>CXXFLAGS</code> — C++ compiler flags.</li>
+  <li><code>LDFLAGS</code> — linker flags (<code>-L</code>, <code>-Wl,...</code>).</li>
+  <li><code>LDLIBS</code> — libraries (<code>-lm</code>, <code>-lpthread</code>).</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>$@ $&lt; $^ $? $* $+ $|</code> are the automatic variables. The big three daily are <code>$@</code>, <code>$&lt;</code>, <code>$^</code>.</li>
+  <li>Pattern rules use <code>%</code> as a single wildcard. The matching part is the "stem" (<code>$*</code>).</li>
+  <li>Static pattern rules — <code>targets: target-pat: prereq-pat</code> — restrict a pattern to a specific target list.</li>
+  <li>Make ships with many built-in pattern rules. See them with <code>make -p</code>. Disable with <code>--no-builtin-rules</code> or empty-override a specific one.</li>
+  <li>The conventional variable names (<code>CC</code>, <code>CFLAGS</code>, <code>CXXFLAGS</code>, <code>CPPFLAGS</code>, <code>LDFLAGS</code>, <code>LDLIBS</code>) play well with every other Makefile.</li>
+  <li><code>vpath PATTERN DIR</code> tells Make where to search for missing prerequisites.</li>
+  <li><code>$(wildcard *.c)</code> gives you a glob expansion in an assignment context.</li>
+  <li><code>$(VAR:.c=.o)</code> is the "substitution reference" — a terse pattern substitution.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="04-variables.html"><span class="lbl">← Prev</span><span class="ttl">Variables — All Six Flavors</span></a>
+  <a href="06-functions.html" class="next"><span class="lbl">Next →</span><span class="ttl">Functions</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

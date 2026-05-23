@@ -1121,5 +1121,5 @@ public:
 
 ---
 
-*Good luck with your NextHop.AI interview!*
+*Good luck with your interview preparation!*
 

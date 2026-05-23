@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>7 · Kubernetes — Mental Model — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 07</span>
+  Kubernetes — Mental Model
+</h1>
+<p class="lede">
+  If you remember one thing from these K8s chapters, remember this:
+  <strong>Kubernetes is a database with control loops</strong>. You
+  POST your desired state. Controllers watch the desired state and
+  reconcile reality to match it. Once that lands, every other concept
+  is mechanical.
+</p>
+
+<h2 id="what-is">What is Kubernetes, exactly?</h2>
+
+<p>
+  Kubernetes is an orchestrator for containerised workloads. It runs
+  on a fleet of machines (nodes), schedules containers across them,
+  keeps them healthy, restarts them if they die, scales them, and
+  exposes them on the network. Its public face is an <strong>API
+  server</strong> backed by an <strong>etcd</strong> database, plus a
+  bunch of <strong>controllers</strong> that act on what the API
+  server says.
+</p>
+
+<div class="code" data-lang="text">
+<pre><code>            ┌──────────────────────────────────┐
+            │       Control plane               │
+            │  ┌──────────────────────────────┐ │
+            │  │ kube-apiserver  ←── kubectl  │ │
+            │  └──────┬───────────────────────┘ │
+            │         │ persists                │
+            │         ▼                         │
+            │      ┌──────┐                     │
+            │      │ etcd │                     │
+            │      └──────┘                     │
+            │                                   │
+            │  ┌─────────────┐ ┌──────────────┐ │
+            │  │ controllers │ │  scheduler   │ │
+            │  └─────────────┘ └──────────────┘ │
+            └──────────────┬────────────────────┘
+                           │ watches &amp; acts
+                           ▼
+                ┌──────────────────────┐
+                │ Worker nodes         │
+                │ ┌─────────────────┐  │
+                │ │ kubelet, kube-  │  │
+                │ │ proxy, runtime  │  │
+                │ │ + your Pods     │  │
+                │ └─────────────────┘  │
+                └──────────────────────┘</code></pre>
+</div>
+
+<h2 id="control-loop">The control loop — the One Big Idea</h2>
+
+<p>Every controller in Kubernetes runs the same loop:</p>
+
+<ol>
+  <li>Read the <strong>desired state</strong> (what user asked for, in etcd).</li>
+  <li>Read the <strong>actual state</strong> (what's running on nodes).</li>
+  <li>If they differ, take an action to close the gap.</li>
+  <li>Sleep briefly, repeat forever.</li>
+</ol>
+
+<p>Pseudocode:</p>
+<div class="code" data-lang="python">
+<pre><code>while True:
+    desired = api_server.get("Deployment/web")
+    actual  = api_server.get("ReplicaSet for Deployment/web")
+    if desired.replicas != actual.replicas:
+        api_server.scale_replicaset(actual, desired.replicas)
+    time.sleep(1)</code></pre>
+</div>
+
+<p>This is exactly the idempotent / desired-state pattern from Chapter 6, applied at industrial scale. Every K8s feature — Deployments, Services, Ingresses, your custom operator — is a controller running this loop.</p>
+
+<div class="callout tip">
+<div class="callout-title">Why this design wins</div>
+<p>Because it's <strong>self-healing</strong>. If a node crashes, taking 5 Pods with it, the desired state still says "10 Pods of Deployment/web". The controller notices the gap and creates 5 new Pods on surviving nodes. The user never had to issue a "recover" command.</p>
+</div>
+
+<h2 id="declarative">Declarative, not imperative</h2>
+
+<p>You don't say "create this pod, then attach this volume, then start it". You say "this is the shape I want; the system: make it so". The "what" is yours; the "how" is K8s's.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code># declarative — kubectl apply -f
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports: [{ containerPort: 80 }]</code></pre>
+</div>
+
+<p>This says "I want 3 nginx pods labelled <code>app=web</code>". K8s makes it true and keeps it true.</p>
+
+<h2 id="resources">Everything is a resource</h2>
+
+<p>Every concept in Kubernetes is a <strong>resource</strong> — a JSON document with a fixed shape. Every resource has the same envelope:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: &lt;group&gt;/&lt;version&gt;     # e.g. apps/v1, v1, networking.k8s.io/v1
+kind: &lt;Type&gt;                       # Pod, Deployment, Service, ConfigMap, ...
+metadata:
+  name: &lt;string&gt;
+  namespace: &lt;string&gt;
+  labels:      { ... }
+  annotations: { ... }
+spec:                              # what the user wants
+  ...
+status:                            # what the system has done (filled in by controllers)
+  ...</code></pre>
+</div>
+
+<p>Memorise that envelope. Every resource — built-in or custom — follows it. <code>spec</code> is yours to write; <code>status</code> is read-only output from controllers.</p>
+
+<h2 id="api-server">kubectl is just a curl wrapper</h2>
+
+<p>The API server is a REST/JSON service. <code>kubectl get pods</code> is essentially:</p>
+<div class="code" data-lang="text">
+<pre><code>GET /api/v1/namespaces/default/pods
+Authorization: Bearer &lt;your token&gt;</code></pre>
+</div>
+
+<p><code>kubectl apply -f x.yaml</code> sends an HTTP request to the API server. The API server validates, mutates (admission webhooks), persists to etcd, and notifies watchers. That's it.</p>
+
+<p>Try it: <code>kubectl get pods -v=8</code> prints the curl-equivalent for any command.</p>
+
+<h2 id="namespaces">Namespaces — your tenant boundary</h2>
+
+<p>A namespace is a name-scope. Resources in different namespaces can have the same name. Common pattern: one namespace per app, one per environment, or both.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl get ns
+NAME              STATUS   AGE
+default           Active   30d
+kube-system       Active   30d
+ingress-nginx     Active   25d
+team-alpha        Active   12d
+
+$ kubectl -n team-alpha get pods
+$ kubectl get pods -A         # all namespaces
+
+$ kubectl create namespace promote
+$ kubectl config set-context --current --namespace=promote
+# now every kubectl runs against this namespace</code></pre>
+</div>
+
+<p>Namespaces aren't strong isolation — they don't block network traffic by default (NetworkPolicy does that). They're a name-scope plus a unit for RBAC and ResourceQuotas.</p>
+
+<h2 id="install">Get a local cluster</h2>
+
+<p>You want a real cluster on your laptop for the rest of this tutorial. Three good options:</p>
+
+<table>
+<thead><tr><th>Tool</th><th>Best for</th></tr></thead>
+<tbody>
+<tr><td><code>kind</code></td><td>Single-binary, fast, k8s-in-docker. Default for this tutorial.</td></tr>
+<tr><td><code>minikube</code></td><td>Mature, lots of addons, supports VM drivers.</td></tr>
+<tr><td><code>k3d</code></td><td>K3s in docker — lightweight, fast.</td></tr>
+<tr><td>Docker Desktop</td><td>If you already have it, click "Enable Kubernetes".</td></tr>
+</tbody>
+</table>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Install kind (macOS / Linux)
+$ brew install kind kubectl                  # macOS
+$ go install sigs.k8s.io/kind@latest         # any platform with Go
+
+# Create a cluster
+$ kind create cluster --name dev
+Creating cluster "dev" ...
+ ✓ Ensuring node image (kindest/node:v1.30.0) 🖼
+ ✓ Preparing nodes 📦
+ ✓ Writing configuration 📜
+ ✓ Starting control-plane 🕹
+ ✓ Installing CNI 🔌
+ ✓ Installing StorageClass 💾
+
+$ kubectl cluster-info
+$ kubectl get nodes
+NAME                 STATUS   ROLES           AGE   VERSION
+dev-control-plane    Ready    control-plane   1m    v1.30.0</code></pre>
+</div>
+
+<p>You now have a real Kubernetes API server, scheduler, controllers, all running locally in containers.</p>
+
+<h2 id="kubectl">kubectl — the verbs you use daily</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl get pods                           # list
+$ kubectl get pods -o wide                   # more columns
+$ kubectl get pods -o yaml                   # full resource
+$ kubectl get pods -l app=web                # by label
+$ kubectl get pods -A                        # all namespaces
+$ kubectl get pods -w                        # watch (streaming)
+
+$ kubectl describe pod web-abc123            # human-readable details + recent events
+$ kubectl logs web-abc123                    # stdout/stderr of container
+$ kubectl logs -f web-abc123                 # follow
+$ kubectl logs --previous web-abc123         # last container's logs (after a crash)
+
+$ kubectl exec -it web-abc123 -- /bin/sh     # shell inside the container
+$ kubectl exec web-abc123 -- env             # one-off command
+
+$ kubectl apply -f manifest.yaml             # create or update (declarative)
+$ kubectl apply -k ./overlays/staging        # kustomize build &amp; apply
+$ kubectl delete -f manifest.yaml            # remove
+
+$ kubectl port-forward pod/web-abc123 8080:80    # tunnel local 8080 → pod's 80
+$ kubectl cp x.txt pod/web:/tmp/                  # copy file
+
+$ kubectl explain pod.spec.containers        # docs from the API server itself
+$ kubectl api-resources                      # every kind, with shortnames
+$ kubectl api-versions                       # every API group/version</code></pre>
+</div>
+
+<p>One trick to internalise early: <code>kubectl explain pod.spec.containers</code> describes every field of every resource, sourced from the live API server. You don't need to memorise schemas; you just have to remember <code>explain</code>.</p>
+
+<h2 id="get-output">Output formats</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Specific columns via JSONPath
+$ kubectl get pods -o jsonpath='{.items[*].metadata.name}'
+
+# Better: custom-columns
+$ kubectl get pods -o custom-columns=NAME:.metadata.name,IP:.status.podIP,NODE:.spec.nodeName
+
+# Pipe to jq for anything fancy
+$ kubectl get pods -o json | jq '.items[].metadata.name'</code></pre>
+</div>
+
+<h2 id="hello">Your first deployment</h2>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">hello.yaml</span></div>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: hello }
+  template:
+    metadata:
+      labels: { app: hello }
+    spec:
+      containers:
+        - name: web
+          image: hashicorp/http-echo:1.0
+          args: ["-text=Hello from Kubernetes"]
+          ports: [{ containerPort: 5678 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  selector: { app: hello }
+  ports:
+    - port: 80
+      targetPort: 5678</code></pre>
+</div>
+
+<p>Apply, port-forward, hit it:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl apply -f hello.yaml
+deployment.apps/hello created
+service/hello created
+
+$ kubectl get pods,svc -l app=hello
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/hello-7f6c5d4b8-2xz4k   1/1     Running   0          5s
+pod/hello-7f6c5d4b8-q9p2n   1/1     Running   0          5s
+
+NAME            TYPE        CLUSTER-IP   PORT(S)   AGE
+service/hello   ClusterIP   10.96.5.42   80/TCP    5s
+
+$ kubectl port-forward svc/hello 8080:80 &amp;
+$ curl localhost:8080
+Hello from Kubernetes</code></pre>
+</div>
+
+<p>Two pods running. Kill one:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl delete pod hello-7f6c5d4b8-2xz4k
+$ kubectl get pods -l app=hello
+NAME                         READY   STATUS    RESTARTS   AGE
+pod/hello-7f6c5d4b8-q9p2n   1/1     Running   0          90s
+pod/hello-7f6c5d4b8-x47nm   1/1     Running   0          3s</code></pre>
+</div>
+
+<p>The Deployment controller noticed the gap (1 pod vs desired 2), created a new one. Self-healing in action.</p>
+
+<h2 id="resources-summary">A whirlwind tour of resources you'll meet</h2>
+
+<table>
+<thead><tr><th>Kind</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><strong>Pod</strong></td><td>One or more co-located containers, the smallest deployable unit.</td></tr>
+<tr><td><strong>ReplicaSet</strong></td><td>"I want N copies of this pod template" — usually managed by Deployment.</td></tr>
+<tr><td><strong>Deployment</strong></td><td>Manages ReplicaSets, gives rolling updates and rollbacks.</td></tr>
+<tr><td><strong>StatefulSet</strong></td><td>Like Deployment but with stable identity per pod (Pod names <code>0</code>, <code>1</code>, <code>2</code>) and per-pod storage.</td></tr>
+<tr><td><strong>DaemonSet</strong></td><td>One pod per node — for log collectors, metrics agents.</td></tr>
+<tr><td><strong>Job</strong></td><td>Run to completion; restarts until N successful runs.</td></tr>
+<tr><td><strong>CronJob</strong></td><td>Run a Job on a cron schedule.</td></tr>
+<tr><td><strong>Service</strong></td><td>Stable virtual IP + DNS name in front of pods.</td></tr>
+<tr><td><strong>Ingress</strong></td><td>HTTP routing rules (host/path → service).</td></tr>
+<tr><td><strong>ConfigMap</strong></td><td>Non-secret config, mounted as files or env vars.</td></tr>
+<tr><td><strong>Secret</strong></td><td>Like ConfigMap but base64'd, ideally encrypted at rest.</td></tr>
+<tr><td><strong>PersistentVolumeClaim</strong></td><td>"I want some disk" — fulfilled by a PersistentVolume from a StorageClass.</td></tr>
+<tr><td><strong>Namespace</strong></td><td>Name-scope and RBAC unit.</td></tr>
+<tr><td><strong>ServiceAccount</strong></td><td>Identity for pods to call the API server.</td></tr>
+<tr><td><strong>Role / RoleBinding</strong></td><td>Permissions and grants within a namespace.</td></tr>
+<tr><td><strong>NetworkPolicy</strong></td><td>Allow/deny pod-to-pod traffic.</td></tr>
+<tr><td><strong>HorizontalPodAutoscaler</strong></td><td>Scales replicas based on CPU/memory/custom metrics.</td></tr>
+<tr><td><strong>PodDisruptionBudget</strong></td><td>"Never voluntarily evict more than N at once."</td></tr>
+<tr><td><strong>CustomResourceDefinition</strong></td><td>Define your own kinds — the operator pattern.</td></tr>
+</tbody>
+</table>
+
+<p>Chapters 8–11 walk these in detail.</p>
+
+<h2 id="vocab">Words you'll hear constantly</h2>
+
+<dl>
+  <dt><strong>Cluster</strong></dt>     <dd>One control plane + N worker nodes.</dd>
+  <dt><strong>Node</strong></dt>        <dd>A machine (VM or physical) running kubelet.</dd>
+  <dt><strong>Pod</strong></dt>         <dd>A group of co-located containers sharing network and (some) storage.</dd>
+  <dt><strong>Workload</strong></dt>    <dd>Generic term for "thing that runs pods" — Deployment, StatefulSet, etc.</dd>
+  <dt><strong>Manifest</strong></dt>    <dd>A YAML/JSON file describing one or more resources.</dd>
+  <dt><strong>kubeconfig</strong></dt>  <dd>The file (default <code>~/.kube/config</code>) telling kubectl which cluster + user to use.</dd>
+  <dt><strong>Context</strong></dt>     <dd>A {cluster, user, namespace} triple in your kubeconfig.</dd>
+  <dt><strong>Label</strong></dt>       <dd>Free-form key=value on a resource. Selectors filter on labels.</dd>
+  <dt><strong>Annotation</strong></dt>  <dd>Like a label but not for selection — for tools and humans.</dd>
+  <dt><strong>Selector</strong></dt>    <dd>"Match resources whose labels are X" — how Services find their Pods.</dd>
+  <dt><strong>CNI</strong></dt>         <dd>Container Network Interface — the plugin that gives pods IPs (Calico, Cilium, etc.).</dd>
+  <dt><strong>CRI</strong></dt>         <dd>Container Runtime Interface — what kubelet talks to (containerd, CRI-O).</dd>
+  <dt><strong>CRD</strong></dt>         <dd>CustomResourceDefinition — extending K8s with your own resource kinds.</dd>
+  <dt><strong>RBAC</strong></dt>        <dd>Role-Based Access Control — who can do what to which resources.</dd>
+</dl>
+
+<h2 id="hands-on">Hands-on: walk the loop</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · feel the control loop</div>
+<div class="hands-on-body">
+<p>Apply the hello.yaml above, then:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code># In one terminal
+$ kubectl get pods -l app=hello -w
+
+# In another, scale up
+$ kubectl scale deployment hello --replicas=5
+
+# Watch the first terminal — pods appear, status goes Pending → ContainerCreating → Running</code></pre>
+</div>
+<p>Now scale down:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl scale deployment hello --replicas=1
+# Watch pods Terminating, then disappear</code></pre>
+</div>
+<p>Now <em>delete</em> the deployment but leave a stranded pod:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl get pods -l app=hello -o name | head -1
+pod/hello-7f6c5d4b8-q9p2n
+$ kubectl delete pod hello-7f6c5d4b8-q9p2n
+# A new pod appears almost instantly — replicaset noticed</code></pre>
+</div>
+<p>Final cleanup:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl delete -f hello.yaml</code></pre>
+</div>
+<p>You just watched the control loop reconcile, three times. Internalise it.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">spec vs status</span>
+</div>
+<div class="exercise-body">
+<p>For a Deployment, what goes in <code>spec</code> and what in <code>status</code>? Give two examples each.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>spec</strong>: <code>replicas</code> (desired count), <code>template.spec.containers[].image</code>, <code>strategy.rollingUpdate</code>, <code>selector.matchLabels</code>. Things <em>you</em> set.</p>
+<p><strong>status</strong>: <code>availableReplicas</code> (how many are actually serving), <code>conditions[]</code>, <code>observedGeneration</code>. Things controllers <em>fill in</em> after acting.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Self-healing</span>
+</div>
+<div class="exercise-body">
+<p>Without K8s, what does it take to maintain "exactly 3 web servers running" on three machines? With K8s, what does it take?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>Without K8s</strong>: a process supervisor on each box (systemd, supervisord) restarts on crash; a separate health checker + load-balancer config detects and replaces failed nodes; somebody writes the runbook for "node permanently dies — provision a new one, install software, register".</p>
+<p><strong>With K8s</strong>: <code>replicas: 3</code> in a Deployment manifest. The controller does the rest. Process crashes → kubelet restarts container. Container fails repeatedly → pod restarts on a different node. Whole node dies → controller spawns replacement on surviving nodes.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">explain the schema</span>
+</div>
+<div class="exercise-body">
+<p>Without consulting docs, find the field that controls a pod's restart policy.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl explain pod.spec.restartPolicy
+KIND:     Pod
+VERSION:  v1
+FIELD:    restartPolicy &lt;string&gt;
+DESCRIPTION:
+    Restart policy for all containers within the pod.
+    Values: Always, OnFailure, Never. Default Always.</code></pre>
+</div>
+<p>Whenever you forget a field, <code>kubectl explain</code> is the answer. The schema is documented in the live API.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Watch the API server</span>
+</div>
+<div class="exercise-body">
+<p>Run <code>kubectl get pods -v=8</code> and copy the curl-equivalent line. What endpoint, what params, what auth?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Output includes a line like:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>I0423 ... GET https://127.0.0.1:65443/api/v1/namespaces/default/pods?limit=500
+I0423 ... Authorization: Bearer ...REDACTED...</code></pre>
+</div>
+<p>Endpoint: standard REST under <code>/api/v1</code>; namespace in the path; <code>limit</code> for pagination. Auth: bearer token (or client cert) from your kubeconfig. K8s isn't magic — it's a JSON API with controllers behind it.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 7.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Write a "controller" by hand</span>
+</div>
+<div class="exercise-body">
+<p>In ~30 lines of Python, write a fake controller that ensures exactly N text files exist in a directory: poll, count, create or delete to converge. Why is it idempotent?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import time, uuid
+from pathlib import Path
+
+DESIRED = 5
+DIR = Path("./files")
+
+def reconcile():
+    DIR.mkdir(exist_ok=True)
+    actual = list(DIR.iterdir())
+    diff = DESIRED - len(actual)
+    if diff &gt; 0:
+        for _ in range(diff):
+            (DIR / f"{uuid.uuid4()}.txt").write_text("hello")
+    elif diff &lt; 0:
+        for f in actual[:-DESIRED]:
+            f.unlink()
+
+while True:
+    reconcile()
+    time.sleep(1)</code></pre>
+</div>
+<p>Idempotent because each iteration recomputes from current state, not from history. Run twice, miss a tick, recover from a crash mid-write — all fine. This is exactly how every K8s controller works, scaled.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Kubernetes = a database (etcd) + control loops (controllers) reconciling actual to desired state.</li>
+  <li>Every resource has the same envelope: <code>apiVersion</code>, <code>kind</code>, <code>metadata</code>, <code>spec</code>, <code>status</code>.</li>
+  <li>You write <code>spec</code>; controllers fill in <code>status</code>.</li>
+  <li>kubectl is a curl-wrapper. Add <code>-v=8</code> to see the actual HTTP.</li>
+  <li><code>kubectl explain</code> documents every field, sourced from the live API.</li>
+  <li>Namespaces are name-scopes, not strong isolation.</li>
+  <li>Self-healing comes free from the loop: state-driven, not event-driven.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="08-docker-production.html"><span class="lbl">← Prev</span><span class="ttl">Docker — Production</span></a>
+  <a href="10-k8s-core-resources.html" class="next"><span class="lbl">Next →</span><span class="ttl">Core Resources</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

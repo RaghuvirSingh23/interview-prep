@@ -3,7 +3,7 @@
  * Problem: Shortest Job First (SJF) Scheduler
  * ============================================================================
  * Difficulty: Medium
- * Source: NextHop.AI Interview Guidelines (Design Round)
+ * Source: Interview practice guidelines (design round)
  * Time: 40-50 minutes
  * 
  * DESCRIPTION:

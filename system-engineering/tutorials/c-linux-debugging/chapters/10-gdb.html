@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · GDB deep dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 10</span>
+  GDB — deep dive
+</h1>
+<p class="lede">
+  Most engineers know enough GDB to type <code>bt</code> after a
+  segfault. The other 80% of GDB is what turns a five-hour debug into
+  a fifteen-minute one. Breakpoints with conditions and commands,
+  watchpoints, reverse execution, core dumps, multi-thread, scripting,
+  TUI, remote serial. This chapter covers all of it.
+</p>
+
+<h2 id="invocation">Starting GDB</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ gdb ./prog                                 # interactive
+$ gdb --args ./prog --flag arg1 arg2          # with args
+$ gdb -p 1234                                 # attach to running PID
+$ gdb ./prog core                             # post-mortem on a core dump
+$ gdb -ex 'break main' -ex 'run' ./prog       # one-line script
+
+$ gdbserver :1234 ./prog                      # remote server
+(on dev machine) $ gdb ./prog
+(gdb) target remote 192.168.1.10:1234
+</code></pre>
+</div>
+
+<p>Compile with <strong><code>-g</code></strong> (or <code>-g3</code> for macros). Don't strip the binary — or keep an unstripped copy. <code>-O0</code> gives the most accurate stepping; <code>-Og</code> is "optimised, but debug-friendly"; <code>-O2</code> with <code>-g</code> works but variables get optimised away ("<code>&lt;optimized out&gt;</code>") and stepping jumps around.</p>
+
+<h2 id="basics">Movement and inspection</h2>
+
+<table>
+<tr><td><code>r</code> / <code>run</code></td><td>Start the program</td></tr>
+<tr><td><code>c</code> / <code>continue</code></td><td>Resume after a breakpoint</td></tr>
+<tr><td><code>n</code> / <code>next</code></td><td>Step over (don't enter calls)</td></tr>
+<tr><td><code>s</code> / <code>step</code></td><td>Step into</td></tr>
+<tr><td><code>fin</code> / <code>finish</code></td><td>Run until current function returns</td></tr>
+<tr><td><code>u</code> / <code>until N</code></td><td>Run until line N (or past current loop)</td></tr>
+<tr><td><code>p X</code> / <code>print X</code></td><td>Print expression's value</td></tr>
+<tr><td><code>p/x</code>, <code>p/d</code>, <code>p/t</code>, <code>p/c</code></td><td>Format: hex, decimal, binary, char</td></tr>
+<tr><td><code>p *(int[10] *)p</code></td><td>Cast and dereference — useful for pointers-to-arrays</td></tr>
+<tr><td><code>x/16xw addr</code></td><td>Examine memory: 16 words, hex, 4-byte units</td></tr>
+<tr><td><code>info locals</code></td><td>All local vars in current frame</td></tr>
+<tr><td><code>info args</code></td><td>Function arguments</td></tr>
+<tr><td><code>info registers</code></td><td>Register file</td></tr>
+<tr><td><code>list</code> / <code>l</code></td><td>Show source around current line</td></tr>
+<tr><td><code>disas</code></td><td>Disassemble current function</td></tr>
+<tr><td><code>disas /s</code></td><td>Disassemble interleaved with source</td></tr>
+<tr><td><code>up</code> / <code>down</code></td><td>Move between stack frames</td></tr>
+<tr><td><code>frame N</code></td><td>Jump to frame N</td></tr>
+<tr><td><code>bt</code> / <code>backtrace</code></td><td>Stack trace</td></tr>
+<tr><td><code>bt full</code></td><td>Stack with locals at each level</td></tr>
+</table>
+
+<h2 id="breakpoints">Breakpoints — and what they really are</h2>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) b main                                  # function name
+(gdb) b file.c:42                             # file:line
+(gdb) b foo.cpp:100 if x &gt; 0                  # conditional
+(gdb) b malloc                                 # libc function
+(gdb) b 'MyClass::method'                      # C++ — quote name with ::
+(gdb) rb ^my_                                  # regex breakpoint — every fn starting with my_
+
+(gdb) info b                                   # list breakpoints
+(gdb) disable 3                                # turn off breakpoint #3
+(gdb) enable 3
+(gdb) delete 3                                 # remove
+(gdb) clear file.c:42                          # remove by location
+(gdb) tbreak main                              # one-shot
+(gdb) ignore 3 100                             # ignore next 100 hits
+</code></pre>
+</div>
+
+<p>Under the hood: GDB writes <code>0xCC</code> (int3) at the breakpoint address; CPU traps; GDB intercepts. That's why breakpoints don't work on read-only code without <code>set write on</code> or PIE rewrite — and why hardware watchpoints are limited (DR0–DR3, four max on x86).</p>
+
+<h4>Conditional and counting breakpoints</h4>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) b parser.c:120 if strcmp(name, "buggy") == 0
+(gdb) b alloc.c:50 if size &gt; 1024 * 1024
+(gdb) condition 5 retries &gt; 3                  # add condition to existing bp #5
+</code></pre>
+</div>
+
+<h4>Commands attached to breakpoints — the secret weapon</h4>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) b alloc
+(gdb) commands
+&gt; silent
+&gt; printf "alloc(%d) from %p\n", size, $rip
+&gt; bt 5
+&gt; continue
+&gt; end
+</code></pre>
+</div>
+
+<p>Now every <code>alloc</code> call prints its size and a 5-frame stack, then continues. Effective tracing without recompiling. Combine with <code>set logging on</code> to dump to a file.</p>
+
+<h2 id="watchpoints">Watchpoints — when memory changes</h2>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) watch  variable                         # break when written
+(gdb) rwatch variable                          # break when read
+(gdb) awatch variable                          # break on either
+(gdb) watch *(int *)0x7ffdc...                # arbitrary address
+(gdb) watch -l obj-&gt;field                     # watch the location, not the expression
+</code></pre>
+</div>
+
+<p>Hardware watchpoints (the fast kind) are limited to 4 on x86. Above that, GDB falls back to software watchpoints which step every instruction — 100× slower. Use scope: <code>watch x</code> only works while <code>x</code> is in scope; once the function returns, the watchpoint disables.</p>
+
+<p>The classic use: "<em>this struct field gets corrupted somehow; find the writer</em>." A watchpoint catches the moment of corruption with the offender's stack trace.</p>
+
+<h2 id="threads">Multi-threaded debugging</h2>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) info threads                            # list all threads
+  Id   Target Id           Frame
+* 1    Thread 0x7f...      main () at main.c:32
+  2    Thread 0x7f...      sem_wait () from libc
+  3    Thread 0x7f...      epoll_wait () from libc
+
+(gdb) thread 2                                # switch to thread 2
+(gdb) thread apply all bt                     # backtrace of every thread
+(gdb) thread apply all bt full                # ditto + locals
+(gdb) thread apply 2 3 bt                     # specific threads
+
+(gdb) set scheduler-locking on                # only the current thread runs while stepping
+(gdb) set scheduler-locking step              # default; step current, others run on continue
+</code></pre>
+</div>
+
+<p>"<code>thread apply all bt</code>" is what you type when you attach to a hung process. It's three keystrokes shorter than typing it for real and you'll do it constantly. Save it as a defined command in <code>~/.gdbinit</code>.</p>
+
+<h2 id="cores">Core dumps — debugging the dead</h2>
+
+<p>A core dump is a snapshot of process memory at the moment of crash. Enable them, then debug post-mortem:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ulimit -c unlimited                          # this shell
+$ echo "/tmp/core.%e.%p" | sudo tee /proc/sys/kernel/core_pattern  # location pattern
+
+# After a crash:
+$ ls /tmp/core.*
+core.prog.12345
+$ gdb ./prog /tmp/core.prog.12345
+(gdb) bt
+(gdb) info threads
+(gdb) thread apply all bt
+</code></pre>
+</div>
+
+<p>On modern systemd systems, cores are captured by <code>systemd-coredump</code> and accessed via <code>coredumpctl</code>:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ coredumpctl list
+TIME                            PID  UID  SIG     EXE
+Mon 2026-04-27 10:00:00 UTC    1234 1000 SIGSEGV /usr/bin/prog
+$ coredumpctl debug 1234                       # opens GDB on the core
+</code></pre>
+</div>
+
+<p>Tip: include the source file (<code>directory /path/to/src</code> in GDB) and unstripped binary. For very minimal cores, build with <code>-g</code> and keep an unstripped copy alongside the stripped production binary.</p>
+
+<h2 id="signals">Catching signals and faults</h2>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) catch syscall openat                    # break on a specific syscall
+(gdb) catch throw                              # C++: break when an exception is thrown
+(gdb) catch catch                              # C++: when caught
+(gdb) catch signal SIGSEGV                     # break before the default handler runs
+(gdb) handle SIGPIPE nostop print              # don't break on SIGPIPE; just print
+(gdb) info signals                             # current dispositions
+</code></pre>
+</div>
+
+<p><code>catch throw</code> is the C++ exception detective. Set it before reproducing the bug; GDB stops at every <code>throw</code>, even ones that are caught. <code>bt</code> tells you where, which makes "where does this exception come from" trivial.</p>
+
+<h2 id="reverse">Reverse execution — the time machine</h2>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) target record-full                      # start recording
+(gdb) c                                       # run; eventually crashes
+(gdb) reverse-step                            # step backwards
+(gdb) reverse-next
+(gdb) reverse-continue                         # run backwards until prev breakpoint
+</code></pre>
+</div>
+
+<p>GDB's built-in record-replay works on small programs but is slow. The serious tool: <strong><a href="https://rr-project.org/">rr</a></strong>. It records execution to a deterministic trace, then GDB replays — every run is bit-identical, you can step backwards across thousands of instructions cheaply.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ rr record ./prog
+$ rr replay
+(gdb) c
+Program received signal SIGSEGV
+(gdb) reverse-stepi
+...
+</code></pre>
+</div>
+
+<p>For heisenbugs that take a while to reproduce, recording once and replaying many times is genuinely revolutionary.</p>
+
+<h2 id="tui">TUI — text user interface</h2>
+
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) tui enable                              # or start with `gdb -tui`
+# Or toggle: Ctrl-X A
+# layout: src + reg + asm; switch with `layout regs` etc.
+</code></pre>
+</div>
+
+<p>TUI shows source, registers, and current instruction in panes. Useful for stepping through tight code; less great for big projects (use a real editor + <code>gdb-dashboard</code> or VS Code's GDB integration).</p>
+
+<h2 id="python">GDB Python — when commands aren't enough</h2>
+
+<p>GDB embeds Python. You can write commands, pretty-printers, and full inspection scripts.</p>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">python</span><span class="title">~/.gdbinit.d/dump_list.py</span></div>
+<pre><code>import gdb
+
+class DumpList(gdb.Command):
+    """Dump a linked list. Usage: dump_list HEAD FIELD"""
+    def __init__(self):
+        super().__init__("dump_list", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        head_expr, field = arg.split()
+        node = gdb.parse_and_eval(head_expr)
+        i = 0
+        while node and i &lt; 100:
+            print(f"  [{i}] {node.dereference()}")
+            node = node[field]
+            i += 1
+
+DumpList()
+</code></pre>
+</div>
+
+<p>Source from <code>.gdbinit</code>: <code>source ~/.gdbinit.d/dump_list.py</code>. Now <code>dump_list head next</code> walks a linked list. Project-specific scripts that print your data structures readably are 10× more useful than <code>p *struct</code>.</p>
+
+<h4>Pretty printers</h4>
+
+<p>STL containers are unreadable in raw form. GDB ships pretty-printers (<code>libstdc++</code>'s) that show <code>std::vector</code> as <code>{1, 2, 3}</code> not as <code>{_M_start = ..., _M_finish = ...}</code>. They're usually auto-loaded; if not, source <code>libstdc++-v3-printers.py</code> from your GCC install.</p>
+
+<h2 id="gdbinit">~/.gdbinit — make GDB yours</h2>
+
+<div class="code" data-lang="text">
+<pre><code># History
+set history save on
+set history filename ~/.gdb_history
+set history size unlimited
+
+# Better printing
+set print pretty on
+set print array on
+set print array-indexes on
+set print elements 200
+set pagination off
+
+# C++
+set print object on
+set print static-members off
+
+# When stepping
+set step-mode on        # don't skip frameless functions
+
+# Don't ask for unloaded objects
+set confirm off
+
+# Show line + assembly
+define hookpost-up
+  list
+end
+
+# Quick aliases
+define btf
+  bt full
+end
+document btf
+Backtrace with locals
+end
+
+# Source project-specific scripts when in a known dir
+add-auto-load-safe-path /
+</code></pre>
+</div>
+
+<p>Worth setting once. Many engineers dot-file their .gdbinit; check Brendan Gregg's <a href="https://github.com/cyrus-and/gdb-dashboard">gdb-dashboard</a> for a Python-based replacement of TUI.</p>
+
+<h2 id="remote">Remote debugging</h2>
+
+<p>The pattern: gdbserver runs on the target, GDB on the developer machine.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># On target (e.g. embedded board):
+$ gdbserver :2345 ./prog arg1 arg2
+Listening on port 2345
+
+# On developer:
+$ gdb ./prog
+(gdb) set sysroot /path/to/target/sysroot     # so libs match
+(gdb) target remote target.local:2345
+(gdb) b main
+(gdb) c
+</code></pre>
+</div>
+
+<p>For embedded with no Linux on target — bare-metal, RTOS, kernel debugging — gdb talks the GDB Remote Serial Protocol to JTAG probes (OpenOCD, J-Link, ST-Link). Same GDB, different transport. Cover this in chapter 12.</p>
+
+<h2 id="cpp-tricks">C++ specific tips</h2>
+
+<ul>
+  <li><strong>Inline functions:</strong> stepping into <code>std::vector::push_back</code> takes you somewhere weird. <code>step</code> flashes through templates; use <code>next</code> or <code>finish</code>. <code>set print frame-arguments none</code> to hide noisy template args in stacks.</li>
+  <li><strong>Mangled names:</strong> when GDB shows <code>_ZN3foo3barEi</code>, demangle in your head or run <code>c++filt _ZN3foo3barEi</code>. GDB usually demangles automatically with <code>set print demangle on</code> (the default).</li>
+  <li><strong>RTTI:</strong> <code>info vtbl variable</code> shows the vtable for a polymorphic object. <code>p typeid(*ptr).name()</code> at the prompt gets the runtime type.</li>
+  <li><strong>Lambdas</strong> show up as functor types with auto-generated names. Step through with <code>next</code> until you're back in your code.</li>
+</ul>
+
+<h2 id="hands-on">Hands-on: the watchpoint trick</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · catch a corrupting writer</div>
+<div class="hands-on-body">
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+struct {
+    int  magic;
+    char buffer[16];
+    int  count;
+} state = { .magic = 0xCAFE };
+
+void hello(const char *msg) {
+    strcpy(state.buffer, msg);   // possibly overflows
+}
+
+int main(void) {
+    hello("hi");                              // ok
+    hello("hello world from beyond");          // overflows; corrupts state.count
+    if (state.magic != 0xCAFE) puts("magic corrupted!");
+    return 0;
+}
+</code></pre>
+</div>
+<div class="code terminal" data-lang="gdb">
+<pre><code>$ cc -g -O0 corrupt.c -o corrupt
+$ gdb ./corrupt
+(gdb) start
+(gdb) watch state.magic
+Hardware watchpoint 2: state.magic
+(gdb) c
+Hardware watchpoint 2: state.magic
+Old value = 51966   (0xcafe)
+New value = 1819043176
+0x0000... in hello (msg=0x... "hello world from beyond") at corrupt.c:11
+11        strcpy(state.buffer, msg);
+(gdb) bt
+</code></pre>
+</div>
+<p>The watchpoint caught the exact instruction that overwrote <code>magic</code>, with the stack pointing at the bad <code>strcpy</code>. Five minutes of GDB beats hours of <code>printf</code>-based hunting.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Conditional breakpoint</span>
+</div>
+<div class="exercise-body">
+<p>You loop over 1 million records and exactly one triggers a bug. The records have a <code>id</code> field. Set a breakpoint that fires only when <code>id == 137</code> at the function <code>process</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) break process if rec-&gt;id == 137
+</code></pre>
+</div>
+<p>Add commands too if you want it to print and continue without stopping:</p>
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) break process if rec-&gt;id == 137
+(gdb) commands
+&gt; silent
+&gt; printf "hit at id=%d state=%d\n", rec-&gt;id, rec-&gt;state
+&gt; bt 3
+&gt; continue
+&gt; end
+</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Deadlock diagnostic</span>
+</div>
+<div class="exercise-body">
+<p>You attach to a hung process. Show the GDB commands to identify the lock cycle.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="gdb">
+<pre><code>$ gdb -p $(pidof prog)
+(gdb) info threads
+(gdb) thread apply all bt
+</code></pre>
+</div>
+<p>Look for threads stopped in <code>__lll_lock_wait</code> / <code>pthread_mutex_lock</code> / <code>__cond_wait_common</code>. The argument to the lock call (visible with <code>frame N; info args</code>) tells you which mutex; cross-reference threads to find the cycle (A waiting on M2, holding M1; B waiting on M1, holding M2).</p>
+<p>For glibc's mutexes the owner field is at a known offset; <code>p mutex.__data.__owner</code> gives the TID holding it.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Catch exception origin</span>
+</div>
+<div class="exercise-body">
+<p>A C++ program prints <code>terminate called after throwing an instance of 'std::runtime_error'</code> and dies. The catch is somewhere; the throw's location isn't logged. Find the throw.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) catch throw
+(gdb) run
+Catchpoint 1 (exception thrown), 0x... in __cxa_throw ()
+(gdb) bt
+#0  __cxa_throw ()
+#1  parse_input(...) at parse.cpp:42
+#2  ...
+</code></pre>
+</div>
+<p>The throw happened on parse.cpp:42. <code>catch throw</code> is universal for "where does this exception come from" — works even if the exception is caught and rethrown.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Core dump from production</span>
+</div>
+<div class="exercise-body">
+<p>A production crash drops a core; the binary is stripped. You have the unstripped binary on the build server. How do you debug?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code># Either: copy the unstripped binary to the dev machine alongside the stripped one,
+# and tell GDB about the symbols separately.
+$ gdb ./prog.stripped /tmp/core
+(gdb) symbol-file ./prog.unstripped
+
+# Or use a build-id symlink:
+$ readelf -n ./prog.unstripped | grep 'Build ID'
+Build ID: deadbeef...
+$ mkdir -p ~/.cache/debuginfod/de
+$ cp prog.unstripped ~/.cache/debuginfod/de/adbeef....debug
+
+# Or with separate debug info (.gnu_debuglink):
+$ objcopy --only-keep-debug prog prog.debug
+$ strip --strip-debug prog
+$ objcopy --add-gnu-debuglink=prog.debug prog
+# GDB now finds prog.debug automatically when loading prog.
+</code></pre>
+</div>
+<p>Many distros ship debuginfod servers — <code>set debuginfod enabled on</code> in GDB and it fetches debug info on demand from the build's symbol server.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Custom GDB command</span>
+</div>
+<div class="exercise-body">
+<p>Write a GDB Python command <code>tids</code> that prints a table of <code>thread_id, function_name, file:line</code> for every thread. Useful as a one-shot snapshot.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">python</span><span class="title">~/.gdbinit.d/tids.py</span></div>
+<pre><code>import gdb
+
+class Tids(gdb.Command):
+    """Print one-line summary of every thread."""
+    def __init__(self):
+        super().__init__("tids", gdb.COMMAND_USER)
+
+    def invoke(self, arg, from_tty):
+        inf = gdb.selected_inferior()
+        cur = gdb.selected_thread()
+        for t in inf.threads():
+            t.switch()
+            f = gdb.newest_frame()
+            sal = f.find_sal()
+            print(f"  T{t.num:2d} ptid={t.ptid[1]:&lt;8} {f.name() or '??':&lt;40} "
+                  f"{(sal.symtab.filename if sal.symtab else '?')}:{sal.line}")
+        cur.switch()
+
+Tids()
+</code></pre>
+</div>
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) source ~/.gdbinit.d/tids.py
+(gdb) tids
+  T 1 ptid=12345    main                                     main.c:32
+  T 2 ptid=12346    sem_wait                                  sem_waitcommon.c:45
+  T 3 ptid=12347    epoll_wait                                epoll_wait.c:30
+</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Compile with <code>-g</code> (or <code>-Og</code>); core dumps are gold — enable them with <code>ulimit -c unlimited</code>.</li>
+  <li>Conditional breakpoints with <code>commands</code> blocks let you trace without modifying source.</li>
+  <li>Watchpoints catch the writer that corrupts a value.</li>
+  <li><code>thread apply all bt</code> is your hung-process pocket knife.</li>
+  <li><code>catch throw</code> for C++ exception origins; <code>catch syscall</code> for kernel-boundary observation.</li>
+  <li><code>rr</code> for time-travel debugging on hard heisenbugs.</li>
+  <li>GDB Python for project-specific data structure inspection — write the commands once, save lifetime hours.</li>
+  <li>Customise <code>~/.gdbinit</code>; consider <code>gdb-dashboard</code> for a modern UI.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="09-perf-and-observability.html"><span class="lbl">← Prev</span><span class="ttl">Performance &amp; observability</span></a>
+  <a href="11-sanitizers.html" class="next"><span class="lbl">Next →</span><span class="ttl">Sanitizers &amp; static analysis</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

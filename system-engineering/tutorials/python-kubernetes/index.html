@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Python · Automation · Kubernetes — A Deep Dive</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="chapters/01-python-refresher.html">Python refresher</a></li>
+      <li><a href="chapters/02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="chapters/03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="chapters/04-data-formats.html">Data formats</a></li>
+      <li><a href="chapters/05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="chapters/06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="chapters/07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="chapters/08-docker-production.html">Docker — production</a></li>
+      <li><a href="chapters/09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="chapters/10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="chapters/11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="chapters/12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="chapters/13-k8s-production.html">Production patterns</a></li>
+      <li><a href="chapters/14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="chapters/15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="chapters/16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="chapters/17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="exercises.html">All Exercises</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<section class="hero">
+  <h1>
+    <span class="chap-num">A Deep Dive</span>
+    Python, automation, Docker, Kubernetes — for people who already know how to code.
+  </h1>
+  <p class="lede">
+    Four topics that ride together in any modern infra-adjacent role:
+    Python as glue, automation as discipline, Docker as the runtime,
+    Kubernetes as the substrate. The Python part is a refresher (you
+    said you know it), pointed at the idioms you'll use in
+    build/CI/automation work — not a "learn Python" walk. Then a deep
+    dive into the patterns, containers, and the cluster.
+  </p>
+  <div class="hero-meta">
+    <span><strong>17</strong> chapters</span>
+    <span><strong>4</strong> domains</span>
+    <span><strong>95+</strong> exercises</span>
+    <span><strong>60</strong> interview Qs</span>
+  </div>
+</section>
+
+<h2 id="how-to-use">How this is organised</h2>
+<ul>
+  <li><strong>Chapters 1–6 — Python &amp; automation.</strong> Fast refresher of idiomatic Python, then the standard library you actually use (pathlib, subprocess, requests, logging), data formats, CLI building, and the patterns that make automation reliable (idempotency, retries, locks).</li>
+  <li><strong>Chapters 7–8 — Docker.</strong> Image model, layers, Dockerfile, networking, volumes, registries; then the production track — multi-stage, BuildKit cache, distroless, security hardening, signing, scanning, and the bridge to K8s.</li>
+  <li><strong>Chapters 9–14 — Kubernetes.</strong> Mental model, core resources, workload types, networking and storage, production patterns (probes, RBAC, HPA), and the ecosystem (Helm, GitOps, operators).</li>
+  <li><strong>Chapter 15 — Jenkins on Kubernetes.</strong> Where the two worlds meet: controller in-cluster via Helm, ephemeral agent Pods via the Kubernetes plugin, in-cluster image builds with Kaniko/BuildKit, JCasC, deploying from Jenkins to K8s, and the modern Jenkins-plus-Argo-CD split.</li>
+  <li><strong>Chapter 16 — The 50 Questions.</strong> Interview-style Qs across all four.</li>
+  <li><strong>Chapter 17 — Capstone.</strong> A Python tool that talks to Kubernetes — a small artifact-promotion controller, packaged in a Docker image, running as a CronJob inside the cluster.</li>
+</ul>
+
+<div class="callout tip">
+<div class="callout-title">Prerequisites</div>
+<ul>
+<li>Comfortable Python (3.10+). If you've written a couple thousand lines, you're set.</li>
+<li>Shell &amp; git basics.</li>
+<li>Docker installed locally.</li>
+<li>A local Kubernetes for the K8s chapters: <code>kind</code>, <code>minikube</code>, <code>k3d</code>, or Docker Desktop's built-in. We'll use <code>kind</code> in examples.</li>
+<li>A managed cluster (GKE/EKS/AKS) is welcome but not required.</li>
+</ul>
+</div>
+
+<h2 id="contents">Table of contents</h2>
+
+<div class="toc-grid">
+  <a href="chapters/01-python-refresher.html" class="toc-card">
+    <span class="num">01</span><h3>Python Refresher</h3>
+    <p>Idioms you use daily: types &amp; type hints, comprehensions, dataclasses, exceptions, context managers, generators.</p>
+  </a>
+  <a href="chapters/02-python-toolbox.html" class="toc-card">
+    <span class="num">02</span><h3>Python Toolbox</h3>
+    <p><code>pathlib</code>, <code>subprocess</code>, <code>contextlib</code>, <code>logging</code>, <code>tempfile</code>, <code>shutil</code>, <code>os.environ</code> — the standard library that powers automation.</p>
+  </a>
+  <a href="chapters/03-http-and-apis.html" class="toc-card">
+    <span class="num">03</span><h3>HTTP &amp; APIs</h3>
+    <p><code>requests</code> &amp; <code>httpx</code>, retries with backoff, sessions, auth (token, OAuth, mTLS), pagination, async clients.</p>
+  </a>
+  <a href="chapters/04-data-formats.html" class="toc-card">
+    <span class="num">04</span><h3>Data Formats</h3>
+    <p>JSON, YAML, TOML, CSV, INI — schemas with Pydantic, JSON Schema, when to pick which.</p>
+  </a>
+  <a href="chapters/05-clis-and-packaging.html" class="toc-card">
+    <span class="num">05</span><h3>CLIs &amp; Packaging</h3>
+    <p><code>argparse</code> vs <code>typer</code> vs <code>click</code>, console scripts, <code>uv</code>/<code>pyproject.toml</code>, testing, distributing.</p>
+  </a>
+  <a href="chapters/06-automation-patterns.html" class="toc-card">
+    <span class="num">06</span><h3>Automation Patterns</h3>
+    <p>Idempotency, retries with jitter, file locks, atomic writes, webhooks, cron, structured logging, observability.</p>
+  </a>
+  <a href="chapters/07-docker-fundamentals.html" class="toc-card">
+    <span class="num">07</span><h3>Docker — Fundamentals</h3>
+    <p>Images, layers, Dockerfile, ENTRYPOINT vs CMD, networking, volumes, registries, Compose.</p>
+  </a>
+  <a href="chapters/08-docker-production.html" class="toc-card">
+    <span class="num">08</span><h3>Docker — Production</h3>
+    <p>Multi-stage, BuildKit cache, distroless &amp; scratch, security hardening, signing, SBOMs, scanning, CI patterns.</p>
+  </a>
+  <a href="chapters/09-k8s-mental-model.html" class="toc-card">
+    <span class="num">09</span><h3>K8s — Mental Model</h3>
+    <p>Control loops, declarative state, the API server, manifests, <code>kubectl</code> as a frontend.</p>
+  </a>
+  <a href="chapters/10-k8s-core-resources.html" class="toc-card">
+    <span class="num">10</span><h3>Core Resources</h3>
+    <p>Pod, ReplicaSet, Deployment, Service, ConfigMap, Secret, Namespace, ServiceAccount.</p>
+  </a>
+  <a href="chapters/11-k8s-workloads.html" class="toc-card">
+    <span class="num">11</span><h3>Workloads</h3>
+    <p>StatefulSet, DaemonSet, Job, CronJob — when to reach for each.</p>
+  </a>
+  <a href="chapters/12-k8s-networking-storage.html" class="toc-card">
+    <span class="num">12</span><h3>Networking &amp; Storage</h3>
+    <p>Service types, Ingress, NetworkPolicy, DNS; PVC, PV, StorageClass, volume modes.</p>
+  </a>
+  <a href="chapters/13-k8s-production.html" class="toc-card">
+    <span class="num">13</span><h3>Production Patterns</h3>
+    <p>Probes, resource requests/limits, HPA, PDB, RBAC, security context, Pod Security Standards.</p>
+  </a>
+  <a href="chapters/14-helm-gitops-operators.html" class="toc-card">
+    <span class="num">14</span><h3>Helm, GitOps, Operators</h3>
+    <p>Helm charts, Argo CD/Flux, custom resources &amp; controllers, the operator pattern.</p>
+  </a>
+  <a href="chapters/15-jenkins-on-k8s.html" class="toc-card">
+    <span class="num">15</span><h3>Jenkins on Kubernetes</h3>
+    <p>Controller via Helm, ephemeral agent Pods, JCasC, in-cluster Kaniko/BuildKit builds, deploying to K8s, the Jenkins+Argo-CD split.</p>
+  </a>
+  <a href="chapters/16-50-questions.html" class="toc-card">
+    <span class="num">16</span><h3>The 50 Questions</h3>
+    <p>Interview-style questions across Python, automation, Docker, and K8s, answered with code.</p>
+  </a>
+  <a href="chapters/17-capstone.html" class="toc-card">
+    <span class="num">17</span><h3>Capstone Project</h3>
+    <p>Build an artifact-promotion controller in Python, packaged in a Docker image, running as a CronJob in <code>kind</code>.</p>
+  </a>
+</div>
+
+<p style="text-align: center; margin-top: 60px;">
+  <a href="chapters/01-python-refresher.html" style="font-size: 20px;">→ Begin: Chapter 1 — Python Refresher</a>
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

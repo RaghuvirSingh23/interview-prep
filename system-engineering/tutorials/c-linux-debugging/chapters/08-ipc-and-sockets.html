@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>8 · IPC &amp; sockets</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 08</span>
+  IPC &amp; sockets
+</h1>
+<p class="lede">
+  Pipes, Unix-domain sockets, shared memory, and TCP/UDP. The
+  building blocks behind every server and every multi-process system
+  on the box. Plus epoll — the event-loop primitive Linux servers
+  are built on.
+</p>
+
+<h2 id="picking">Pick the right IPC</h2>
+
+<table>
+<thead><tr><th>Mechanism</th><th>Use when</th></tr></thead>
+<tbody>
+<tr><td><strong>Pipes</strong> (anonymous)</td><td>Parent ↔ child, one direction, byte stream. <code>shell |</code> uses these.</td></tr>
+<tr><td><strong>FIFOs</strong> (named pipes)</td><td>Unrelated processes, byte stream, one writer/reader at a time. Uncommon.</td></tr>
+<tr><td><strong>Unix-domain sockets</strong></td><td>Local IPC; bidirectional; messages or stream; can pass fds and credentials. <strong>Default for any local IPC you design.</strong></td></tr>
+<tr><td><strong>POSIX message queues</strong></td><td>Priority-ordered messages between processes. Niche; sockets usually win.</td></tr>
+<tr><td><strong>Shared memory</strong> (POSIX <code>shm_open</code> or SysV)</td><td>Bulk data sharing without copies. Pair with a mutex/futex/semaphore.</td></tr>
+<tr><td><strong>eventfd</strong></td><td>Counter you can poll on. Cheap "wake up the event loop" primitive.</td></tr>
+<tr><td><strong>signalfd</strong></td><td>Receive signals via a file descriptor.</td></tr>
+<tr><td><strong>timerfd</strong></td><td>Timers as fds — integrates with epoll.</td></tr>
+<tr><td><strong>TCP/UDP</strong></td><td>Cross-host networking. Localhost too if you need network-shaped semantics.</td></tr>
+</tbody>
+</table>
+
+<p>For new local IPC, default to a Unix-domain socket. They're fast (no TCP/IP stack), pass fds, deliver peer credentials (<code>SO_PEERCRED</code>), and have the same API as network sockets — easy to extend later.</p>
+
+<h2 id="unix-sockets">Unix-domain sockets — the standard local IPC</h2>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">server.c</span></div>
+<pre><code>#include &lt;sys/socket.h&gt;
+#include &lt;sys/un.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    strcpy(addr.sun_path, "/tmp/myapp.sock");
+    unlink(addr.sun_path);                                  // remove stale
+    bind(s, (struct sockaddr *)&amp;addr, sizeof addr);
+    listen(s, 16);
+
+    for (;;) {
+        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
+        char buf[4096];
+        ssize_t n = read(c, buf, sizeof buf);
+        write(c, buf, n);          // echo
+        close(c);
+    }
+}
+</code></pre>
+</div>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">client.c</span></div>
+<pre><code>int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+struct sockaddr_un addr = { .sun_family = AF_UNIX };
+strcpy(addr.sun_path, "/tmp/myapp.sock");
+connect(s, (struct sockaddr *)&amp;addr, sizeof addr);
+write(s, "hello", 5);
+char buf[64];
+ssize_t n = read(s, buf, sizeof buf);
+buf[n] = '\0';
+puts(buf);                          // "hello"
+close(s);
+</code></pre>
+</div>
+
+<p>Things to know:</p>
+<ul>
+  <li><code>SOCK_STREAM</code> = byte stream, like TCP. <code>SOCK_DGRAM</code> = messages with boundaries, like UDP. <code>SOCK_SEQPACKET</code> = reliable messages with boundaries.</li>
+  <li><strong>Abstract sockets</strong> on Linux: pathnames starting with <code>\0</code> live in a separate namespace (no filesystem entry). Useful for unprivileged servers.</li>
+  <li><strong><code>SO_PEERCRED</code></strong> tells you the connecting process's PID/UID/GID. Authenticate without passwords.</li>
+  <li><strong>Pass file descriptors</strong> through Unix sockets with <code>SCM_RIGHTS</code>. Useful for "give me an open log file" patterns.</li>
+</ul>
+
+<h2 id="passing-fds">Passing file descriptors</h2>
+
+<p>This is one of Unix's underused superpowers. The kernel duplicates the fd into the receiver's table. Used by privileged-helper patterns: a privileged process opens a low port socket and hands it to a worker.</p>
+
+<div class="code" data-lang="c">
+<pre><code>// Sender
+struct msghdr msg = {0};
+struct iovec  iov = { .iov_base = "hi", .iov_len = 2 };
+char cbuf[CMSG_SPACE(sizeof(int))];
+msg.msg_iov     = &amp;iov; msg.msg_iovlen = 1;
+msg.msg_control = cbuf;  msg.msg_controllen = sizeof cbuf;
+struct cmsghdr *cm = CMSG_FIRSTHDR(&amp;msg);
+cm-&gt;cmsg_level = SOL_SOCKET; cm-&gt;cmsg_type = SCM_RIGHTS;
+cm-&gt;cmsg_len = CMSG_LEN(sizeof(int));
+memcpy(CMSG_DATA(cm), &amp;fd_to_send, sizeof(int));
+sendmsg(sock, &amp;msg, 0);
+
+// Receiver — symmetric, recvmsg pulls the fd into your table at a new number.
+</code></pre>
+</div>
+
+<p>Painful API; the win is real. Systemd, browsers (sandboxed renderer + privileged main), libvirt all use this.</p>
+
+<h2 id="shm">Shared memory</h2>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/mman.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+int fd = shm_open("/myapp_shm", O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+ftruncate(fd, 4096 * 1024);
+void *p = mmap(NULL, 4096 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+close(fd);
+// Both processes that shm_open the same name see the same memory.
+</code></pre>
+</div>
+
+<p>POSIX shared memory lives at <code>/dev/shm/myapp_shm</code> on Linux — it's a tmpfs file. Same lifecycle: <code>shm_unlink</code> to remove. Pair with a futex or a process-shared mutex (<code>PTHREAD_PROCESS_SHARED</code>) for synchronisation.</p>
+
+<p><strong>Care:</strong> shared-memory layouts cross process boundaries. Different builds with different struct layouts will misread. Pin the binary, or version the format.</p>
+
+<h2 id="futex">futex — the kernel side of mutexes</h2>
+
+<p>A futex (fast userspace mutex) is the syscall <code>std::mutex</code>, <code>pthread_mutex</code>, <code>std::condition_variable</code>, and friends are built on. The fast path stays in userspace; only contention goes to the kernel.</p>
+
+<p>Direct futex use is rare — use <code>std::mutex</code> or <code>pthread_mutex_t</code>. But you'll see futexes in <code>strace</code> output and in the implementation of every locking primitive. Knowing what they are makes <code>futex(...)</code> in stack traces stop looking scary.</p>
+
+<h2 id="event-fds">eventfd, timerfd, signalfd — the unifying trick</h2>
+
+<p>Linux exposes signals, timers, and "wakeup" notifications as file descriptors so they integrate with <code>poll</code>/<code>epoll</code>. This is how modern event loops avoid mixing async signals with synchronous I/O.</p>
+
+<div class="code" data-lang="c">
+<pre><code>// eventfd — counter, write to wake any reader
+int e = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+uint64_t v = 1; write(e, &amp;v, sizeof v);   // wakes the reader
+
+// timerfd — periodic timer as fd
+int t = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+struct itimerspec ts = {
+    .it_interval = {.tv_sec = 1},  // every 1s
+    .it_value    = {.tv_sec = 1},  // first fire 1s from now
+};
+timerfd_settime(t, 0, &amp;ts, NULL);
+
+// signalfd — read signal info from an fd; see chapter 5
+</code></pre>
+</div>
+
+<p>Plug all three into your epoll loop and you never have to deal with async signal handlers, callback-style timers, or condvar wake-ups in the same loop as your sockets.</p>
+
+<h2 id="tcp">TCP sockets — server skeleton</h2>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/socket.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;arpa/inet.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;string.h&gt;
+
+int main(void) {
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+    int yes = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &amp;yes, sizeof yes);
+    setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &amp;yes, sizeof yes);   // Linux: load-balance across multiple listeners
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons(8080),
+        .sin_addr   = { htonl(INADDR_ANY) },
+    };
+    bind(s, (struct sockaddr *)&amp;addr, sizeof addr);
+    listen(s, 128);
+
+    for (;;) {
+        struct sockaddr_in cli;
+        socklen_t cl = sizeof cli;
+        int c = accept4(s, (struct sockaddr *)&amp;cli, &amp;cl, SOCK_CLOEXEC);
+        // ... handle client; ideally hand to a worker or epoll loop
+    }
+}
+</code></pre>
+</div>
+
+<p>Defaults you'll set on most servers:</p>
+<ul>
+  <li><code>SO_REUSEADDR</code> — restart the server without "address already in use" for ~minute.</li>
+  <li><code>SO_REUSEPORT</code> — multiple processes/threads bind the same port; kernel load-balances incoming connections.</li>
+  <li><code>TCP_NODELAY</code> — disable Nagle, lower latency for small messages (web, RPC).</li>
+  <li><code>SO_KEEPALIVE</code> + <code>TCP_KEEPIDLE</code>/<code>TCP_KEEPINTVL</code>/<code>TCP_KEEPCNT</code> — detect dead peers.</li>
+  <li><code>O_NONBLOCK</code> on the fd if you're using epoll.</li>
+</ul>
+
+<h2 id="udp">UDP — the connectionless cousin</h2>
+
+<div class="code" data-lang="c">
+<pre><code>int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+bind(s, ...);
+
+for (;;) {
+    char buf[1500];
+    struct sockaddr_in cli;
+    socklen_t cl = sizeof cli;
+    ssize_t n = recvfrom(s, buf, sizeof buf, 0, (struct sockaddr *)&amp;cli, &amp;cl);
+    sendto(s, buf, n, 0, (struct sockaddr *)&amp;cli, cl);  // echo
+}
+</code></pre>
+</div>
+
+<p>UDP datagrams are atomic — one <code>recv</code> reads exactly one datagram (or you lose the rest with truncation). Lost packets aren't retransmitted; ordering isn't preserved. You build reliability if you need it (DNS, QUIC, VPNs do).</p>
+
+<h2 id="epoll">epoll — wait for many fds at once</h2>
+
+<p><code>poll</code> works but scans all fds linearly. <code>epoll</code> is the Linux scaling answer: O(1) registration, O(ready) wakeup.</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/epoll.h&gt;
+
+int ep = epoll_create1(EPOLL_CLOEXEC);
+
+struct epoll_event ev = { .events = EPOLLIN | EPOLLET, .data.fd = listen_fd };
+epoll_ctl(ep, EPOLL_CTL_ADD, listen_fd, &amp;ev);
+
+struct epoll_event evs[64];
+for (;;) {
+    int n = epoll_wait(ep, evs, 64, -1);
+    for (int i = 0; i &lt; n; i++) {
+        int fd = evs[i].data.fd;
+        if (fd == listen_fd) {
+            int c = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+            ev.events = EPOLLIN | EPOLLET;
+            ev.data.fd = c;
+            epoll_ctl(ep, EPOLL_CTL_ADD, c, &amp;ev);
+        } else {
+            handle_io(fd);
+        }
+    }
+}
+</code></pre>
+</div>
+
+<p>Two trigger modes:</p>
+<ul>
+  <li><strong>Level-triggered (default):</strong> the fd reports ready as long as data is available. Easier to write correctly; small CPU overhead from spurious wake-ups.</li>
+  <li><strong>Edge-triggered (<code>EPOLLET</code>):</strong> reports ready only on transitions. You <em>must</em> read until <code>EAGAIN</code> on every event, or you'll deadlock waiting for an event that already came. Faster; harder to use.</li>
+</ul>
+
+<p>Modern Linux servers (nginx, redis, envoy) use epoll-ET with <code>O_NONBLOCK</code> sockets. The library you use (libuv, asio, tokio for Rust) hides the details.</p>
+
+<h2 id="io_uring">io_uring — the modern next step</h2>
+
+<p><code>io_uring</code> (kernel 5.1+) is the latest async-I/O interface — submission and completion queues shared with the kernel. Saves syscalls, supports a wide range of ops including network, file, fsync, splice. liburing is the user-friendly wrapper.</p>
+
+<p>For very high-throughput servers, io_uring beats epoll. For typical applications, epoll is fine; io_uring is the right answer when you've measured and have evidence.</p>
+
+<h2 id="netstat">Inspecting connections</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ss -tlnp                          # listening TCP, with PID
+State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process
+LISTEN  0       128     0.0.0.0:8080         0.0.0.0:*          users:(("myapp",pid=1234,fd=3))
+
+$ ss -tan state established        # all established TCP
+$ ss -lx                            # listening unix sockets
+
+$ ss -i src :8080                   # detailed: cwnd, rtt, retransmits
+$ ss -K dst 1.2.3.4                 # kill connections (root)
+
+$ tcpdump -i lo -A 'port 8080'      # packet capture; -A shows ASCII
+$ tcpdump -i any -w trace.pcap      # save for Wireshark
+</code></pre>
+</div>
+
+<p><code>ss</code> replaces the older <code>netstat</code>. <code>tcpdump</code> + Wireshark for the wire-level details. Both are reflex tools.</p>
+
+<h2 id="gotchas">Network gotchas</h2>
+
+<ul>
+  <li><strong>SIGPIPE on closed peer:</strong> covered in chapter 5. Ignore the signal or use <code>MSG_NOSIGNAL</code>.</li>
+  <li><strong>TIME_WAIT after server restart:</strong> fixed by <code>SO_REUSEADDR</code> on listening socket.</li>
+  <li><strong>Partial writes / reads:</strong> TCP is a byte stream; one <code>send</code> may take multiple <code>recv</code>s and vice versa. Frame your messages (length-prefix or delimiter).</li>
+  <li><strong>Nagle + delayed-ACK</strong> can cause 40 ms latency on small request/response. Set <code>TCP_NODELAY</code> for interactive protocols.</li>
+  <li><strong>Slow loris / accept queue:</strong> attackers connecting and not sending fill your <code>listen()</code> backlog. <code>TCP_DEFER_ACCEPT</code> on Linux lets the kernel hold the connection until data arrives.</li>
+  <li><strong>Reverse-DNS lookups in your server:</strong> blocking, slow, often hostile. Don't.</li>
+  <li><strong>EINTR:</strong> just like file I/O — retry, or use <code>SA_RESTART</code>.</li>
+</ul>
+
+<h2 id="hands-on">Hands-on: an echo server with epoll</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · the canonical loop</div>
+<div class="hands-on-body">
+<p>Build the TCP server skeleton above, plus an epoll loop that handles many clients. Test with:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ./echo &amp;
+$ echo hello | nc localhost 8080
+hello
+$ for i in $(seq 1 100); do (echo "client $i" | nc -q 1 localhost 8080 &amp;) ; done
+# 100 connections, all served by the same epoll loop on one thread
+</code></pre>
+</div>
+<p>Inspect with <code>ss -tan | grep 8080</code> while the test runs. Watch <code>perf stat -e syscalls:sys_enter_*</code> for the syscall mix.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">TCP framing</span>
+</div>
+<div class="exercise-body">
+<p>You send three messages over TCP: "ALPHA", "BETA", "GAMMA". The receiver might read them as one chunk "ALPHABETAGAMMA". Why, and how do you frame so the receiver gets three?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>TCP is a byte stream; it doesn't preserve send boundaries. The kernel coalesces small sends; the receiver's read returns whatever's available. Two framing options:</p>
+<ol>
+<li><strong>Length-prefix:</strong> 4-byte big-endian length, then payload. Read length, then exactly that many bytes.</li>
+<li><strong>Delimiter:</strong> e.g. newline. Read until you see one. HTTP/1.1 uses both (Content-Length or chunked).</li>
+</ol>
+<p>SOCK_DGRAM (UDP, AF_UNIX SOCK_DGRAM, SEQPACKET) preserves boundaries — but with size limits and other tradeoffs.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">SO_REUSEADDR vs SO_REUSEPORT</span>
+</div>
+<div class="exercise-body">
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li><strong>SO_REUSEADDR:</strong> lets you bind a port that's in TIME_WAIT from a recent close. Solves the "address already in use" annoyance after server restart. Required on every server.</li>
+<li><strong>SO_REUSEPORT:</strong> Linux 3.9+. Multiple processes/threads can bind <em>the same address+port</em>; the kernel hashes incoming connections across them. Used for "N-process server with no connection broker". Each accept goes to one binder; no thundering herd.</li>
+</ul>
+<p>Set both on a listening socket. They solve different problems.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Pick the IPC</span>
+</div>
+<div class="exercise-body">
+<p>Pick the right primitive:</p>
+<ol type="a">
+<li>A privileged helper opens hardware devices and hands fds to a worker process.</li>
+<li>A producer writes 100 MB/s to a consumer in another process; both on same machine.</li>
+<li>You want to wake an event loop from another thread.</li>
+<li>A daemon needs to receive SIGTERM cleanly along with TCP traffic in one loop.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li>Unix-domain socket with SCM_RIGHTS — pass fds.</li>
+<li>Shared memory ring + semaphore/futex (or eventfd as the wake). Avoids copy.</li>
+<li>eventfd. Cheap, integrates with epoll.</li>
+<li>signalfd in the epoll loop. Block the signals normally, deliver via fd.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Authenticate over Unix socket</span>
+</div>
+<div class="exercise-body">
+<p>Your local daemon should serve only callers running as a specific user. Don't use passwords. How?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="c">
+<pre><code>#include &lt;sys/socket.h&gt;
+
+struct ucred peer;
+socklen_t len = sizeof peer;
+if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &amp;peer, &amp;len) &lt; 0) {
+    /* error */
+}
+/* peer.pid, peer.uid, peer.gid */
+if (peer.uid != EXPECTED_UID) {
+    close(client_fd);
+    return -1;
+}
+</code></pre>
+</div>
+<p>The kernel guarantees the credentials of the connecting process. The caller can't lie. Pair with restrictive socket-file permissions (<code>chmod 0600</code>) and you've got user-level authentication for free.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 8.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Mystery latency</span>
+</div>
+<div class="exercise-body">
+<p>Your RPC server processes requests in &lt; 1 ms locally, but clients see 40 ms latency. <code>tcpdump</code> shows the client's request goes out fine; the server response arrives 40 ms later than the server logs claim it sent. What's likely?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Nagle's algorithm + delayed-ACK interaction. Server sends a small response; the client's TCP stack is in delayed-ACK mode (waiting up to 40 ms to piggyback an ACK on data). Server's Nagle won't send the next small chunk until ACK'd. Result: 40 ms idle.</p>
+<p>Fix: <code>setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &amp;one, sizeof one)</code> on both sides. Required for any interactive RPC over TCP.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Default to Unix sockets for local IPC; same API as TCP, plus fd passing and peer credentials.</li>
+  <li>Shared memory + futex/process-shared mutex for bulk data.</li>
+  <li>eventfd / signalfd / timerfd unify async events with file-descriptor I/O for clean event loops.</li>
+  <li>TCP gotchas: framing (it's a stream), TIME_WAIT (use SO_REUSEADDR), Nagle×delayed-ACK (TCP_NODELAY), SIGPIPE (ignore or MSG_NOSIGNAL).</li>
+  <li>epoll is the scalable wait-for-fds. Edge-triggered for performance, level-triggered for simplicity.</li>
+  <li><code>ss</code> + <code>tcpdump</code> + Wireshark are the inspection tools.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="07-threads-and-concurrency.html"><span class="lbl">← Prev</span><span class="ttl">Threads &amp; concurrency</span></a>
+  <a href="09-perf-and-observability.html" class="next"><span class="lbl">Next →</span><span class="ttl">Performance &amp; observability</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

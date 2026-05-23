@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3 · HTTP &amp; APIs — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 03</span>
+  HTTP &amp; APIs
+</h1>
+<p class="lede">
+  Talking to APIs is 80% of automation work. <code>requests</code> for
+  most things, <code>httpx</code> when you need async or HTTP/2,
+  retries that don't lie, sessions that pool connections, auth that
+  doesn't leak. The patterns here scale from a 10-line script to a
+  service.
+</p>
+
+<h2 id="basics">requests — the basics</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import requests
+
+# GET
+r = requests.get("https://api.github.com/repos/torvalds/linux")
+r.raise_for_status()                  # raise on 4xx/5xx
+data = r.json()
+print(data["full_name"], data["stargazers_count"])
+
+# POST JSON
+r = requests.post(
+    "https://api.example.com/v1/items",
+    json={"name": "fw-1.0.0", "channel": "dev"},
+    headers={"Authorization": f"Bearer {token}"},
+    timeout=10,
+)
+r.raise_for_status()</code></pre>
+</div>
+
+<p>Five rules from day one:</p>
+<ol>
+  <li><strong>Always pass <code>timeout=</code>.</strong> Without it, a hung server hangs your script forever.</li>
+  <li><strong>Always call <code>raise_for_status()</code>.</strong> Otherwise <code>r.json()</code> on a 500 page silently parses HTML as JSON and gives garbage.</li>
+  <li><strong>Use <code>json=</code>, not <code>data=json.dumps(...)</code>.</strong> Sets the right header automatically.</li>
+  <li><strong>Stream big responses</strong> with <code>stream=True</code> + <code>iter_content</code>; otherwise the whole body lands in memory.</li>
+  <li><strong>Use a <code>Session</code></strong> for anything that does &gt;1 request — connection pooling alone is a 5-10× speedup.</li>
+</ol>
+
+<h2 id="session">Sessions</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import requests
+
+class ArtifactoryClient:
+    def __init__(self, base: str, token: str):
+        self.base = base.rstrip('/')
+        self.s = requests.Session()
+        self.s.headers.update({
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "promote-bot/1.0",
+        })
+
+    def get(self, path: str, **kw):
+        r = self.s.get(f"{self.base}{path}", timeout=15, **kw)
+        r.raise_for_status()
+        return r.json()
+
+    def promote(self, src: str, dst: str) -&gt; None:
+        r = self.s.post(
+            f"{self.base}/api/copy/{src}",
+            params={"to": dst, "dry": 0},
+            timeout=60,
+        )
+        r.raise_for_status()</code></pre>
+</div>
+
+<p>The Session reuses the underlying TCP connection (and TLS handshake) across requests. For dozens of calls, the difference between session and no-session is the difference between a 30-second job and a 3-second job.</p>
+
+<h2 id="timeouts">Timeouts — read them carefully</h2>
+
+<p><code>timeout=10</code> is shorthand for <em>10 seconds for both connect and read</em>. The two-tuple form is more nuanced:</p>
+
+<div class="code" data-lang="python">
+<pre><code>requests.get(url, timeout=(3.05, 30))     # (connect, read)</code></pre>
+</div>
+
+<p>Use a short connect timeout (3-5 s) and a longer read timeout (30+ s) for endpoints that do real work. The 3.05 oddity is because TCP retransmit cycles align with multiples of 3 seconds.</p>
+
+<h2 id="retries">Retries that work</h2>
+
+<p>The naïve loop is wrong:</p>
+<div class="code" data-lang="python">
+<pre><code># BAD — no backoff, retries on every error including 4xx
+for _ in range(5):
+    try:
+        return requests.get(url).json()
+    except Exception:
+        continue
+raise RuntimeError("gave up")</code></pre>
+</div>
+
+<p>Use <code>urllib3</code>'s <code>Retry</code> via a session adapter — battle-tested, handles backoff, picks correct status codes:</p>
+
+<div class="code" data-lang="python">
+<pre><code>from requests import Session
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+def make_session() -&gt; Session:
+    s = Session()
+    retry = Retry(
+        total=5,
+        backoff_factor=0.5,                # 0.5, 1, 2, 4, 8 seconds
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("HEAD", "GET", "PUT", "DELETE", "OPTIONS", "POST"),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s</code></pre>
+</div>
+
+<p>Backoff: each attempt sleeps <code>backoff_factor * (2 ** (attempt-1))</code>, plus jitter from server's <code>Retry-After</code>. <em>Don't</em> retry POSTs that aren't idempotent — set <code>allowed_methods=("GET", "PUT", "DELETE")</code> if your POSTs would be unsafe to repeat.</p>
+
+<h2 id="idempotency">Idempotency keys</h2>
+
+<p>For POSTs that <em>create</em> things, you want safe-to-retry semantics. The convention: send a unique header so the server can dedupe.</p>
+
+<div class="code" data-lang="python">
+<pre><code>import uuid
+
+key = str(uuid.uuid4())
+r = session.post(
+    "https://api.example.com/promotions",
+    json={"artifact": name, "channel": "release"},
+    headers={"Idempotency-Key": key},
+    timeout=30,
+)</code></pre>
+</div>
+
+<p>If the network breaks mid-request and you retry with the <em>same key</em>, the server returns the original result instead of creating a duplicate. Stripe popularised this; many modern APIs support it.</p>
+
+<h2 id="auth">Auth patterns</h2>
+
+<h4>Bearer tokens (most common)</h4>
+<div class="code" data-lang="python">
+<pre><code>session.headers["Authorization"] = f"Bearer {token}"</code></pre>
+</div>
+
+<h4>Basic auth</h4>
+<div class="code" data-lang="python">
+<pre><code>requests.get(url, auth=(user, password))</code></pre>
+</div>
+
+<h4>API key in header</h4>
+<div class="code" data-lang="python">
+<pre><code>session.headers["X-Api-Key"] = api_key</code></pre>
+</div>
+
+<h4>OAuth2 — client credentials flow</h4>
+<div class="code" data-lang="python">
+<pre><code>def fetch_token(client_id: str, client_secret: str, token_url: str) -&gt; tuple[str, float]:
+    r = requests.post(
+        token_url,
+        data={"grant_type": "client_credentials"},
+        auth=(client_id, client_secret),
+        timeout=10,
+    )
+    r.raise_for_status()
+    body = r.json()
+    return body["access_token"], time.time() + body["expires_in"] - 30   # 30s safety</code></pre>
+</div>
+
+<p>Cache the token; refresh when it's about to expire. Don't fetch a fresh token per request — that's a flood of auth calls and gets you rate-limited.</p>
+
+<h4>mTLS (client certificate)</h4>
+<div class="code" data-lang="python">
+<pre><code>requests.get(url, cert=("client.crt", "client.key"), verify="ca.pem")</code></pre>
+</div>
+
+<h2 id="streaming">Streaming downloads &amp; uploads</h2>
+
+<h4>Stream-download a 5 GB image</h4>
+<div class="code" data-lang="python">
+<pre><code>def download(url: str, dst: Path, session: Session) -&gt; None:
+    with session.get(url, stream=True, timeout=(10, 600)) as r:
+        r.raise_for_status()
+        tmp = dst.with_suffix(dst.suffix + ".part")
+        with tmp.open("wb") as f:
+            for chunk in r.iter_content(chunk_size=1 &lt;&lt; 20):    # 1 MB
+                f.write(chunk)
+        tmp.replace(dst)                                          # atomic</code></pre>
+</div>
+
+<h4>Stream-upload a file (no double-buffering)</h4>
+<div class="code" data-lang="python">
+<pre><code>with open("firmware.img", "rb") as f:
+    r = session.put(
+        url,
+        data=f,                          # streaming generator-like
+        headers={"Content-Type": "application/octet-stream"},
+        timeout=(10, 1800),
+    )
+    r.raise_for_status()</code></pre>
+</div>
+
+<p>Don't <code>read()</code> a 5 GB file then pass <code>data=bytes</code> — you'll OOM. Pass the file handle and <code>requests</code> streams it.</p>
+
+<h2 id="pagination">Pagination</h2>
+
+<p>The two common API styles:</p>
+
+<h4>Link-header (RFC 5988) — GitHub, GitLab</h4>
+<div class="code" data-lang="python">
+<pre><code>def paginate(session, url):
+    while url:
+        r = session.get(url, timeout=15)
+        r.raise_for_status()
+        yield from r.json()
+        url = r.links.get("next", {}).get("url")    # parsed Link header
+
+repos = list(paginate(s, "https://api.github.com/orgs/myorg/repos?per_page=100"))</code></pre>
+</div>
+
+<h4>Cursor / token — common everywhere else</h4>
+<div class="code" data-lang="python">
+<pre><code>def paginate_cursor(session, url, params):
+    params = dict(params)
+    while True:
+        r = session.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        body = r.json()
+        yield from body["items"]
+        if not body.get("next_token"):
+            break
+        params["page_token"] = body["next_token"]</code></pre>
+</div>
+
+<p>Generators here mean memory stays flat regardless of total result count.</p>
+
+<h2 id="rate-limit">Rate limiting</h2>
+
+<p>Most APIs publish their limits in headers:</p>
+<div class="code" data-lang="python">
+<pre><code>r = session.get(url)
+remaining = int(r.headers.get("X-RateLimit-Remaining", "1"))
+reset_ts  = int(r.headers.get("X-RateLimit-Reset", "0"))
+if remaining &lt; 5:
+    log.warning("rate limit close: %d left, resets at %d", remaining, reset_ts)</code></pre>
+</div>
+
+<p>For client-side throttling, <code>tenacity</code> and <code>asyncio</code>-based <code>aiolimiter</code> are good libraries.</p>
+
+<h2 id="errors">Error handling</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import requests
+
+try:
+    r = session.get(url, timeout=10)
+    r.raise_for_status()
+    return r.json()
+except requests.Timeout:
+    log.error("request timed out: %s", url)
+    raise
+except requests.HTTPError as e:
+    body = e.response.text[:500]      # first 500 chars for the log
+    log.error("HTTP %s on %s: %s", e.response.status_code, url, body)
+    raise
+except requests.RequestException as e:
+    log.error("network error: %s", e)
+    raise
+except json.JSONDecodeError as e:
+    log.error("bad JSON from %s: %s", url, r.text[:200])
+    raise</code></pre>
+</div>
+
+<p>Always log a snippet of the response body on errors — APIs often return JSON with a useful <code>"message"</code> field.</p>
+
+<h2 id="async">Async with httpx</h2>
+
+<p>When you need to fan out to many endpoints, <code>requests</code> is sequential per session. <code>httpx</code> has the same API but async-aware:</p>
+
+<div class="code" data-lang="python">
+<pre><code>import asyncio, httpx
+
+async def fetch(client: httpx.AsyncClient, url: str) -&gt; dict:
+    r = await client.get(url, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+async def fetch_all(urls: list[str]) -&gt; list[dict]:
+    async with httpx.AsyncClient(http2=True) as client:
+        return await asyncio.gather(*(fetch(client, u) for u in urls))
+
+results = asyncio.run(fetch_all([f"https://api.example.com/items/{i}" for i in range(100)]))</code></pre>
+</div>
+
+<p>For "fetch 100 things in parallel", <code>httpx</code> + <code>asyncio.gather</code> is night-and-day faster. Don't go async unless you actually need the parallelism — sync code is easier to debug.</p>
+
+<h2 id="webhook">Receiving webhooks (FastAPI)</h2>
+
+<p>Sometimes you're the server. Minimal webhook receiver:</p>
+<div class="code" data-lang="python">
+<pre><code>from fastapi import FastAPI, Header, HTTPException, Request
+import hashlib, hmac, os
+
+app = FastAPI()
+SECRET = os.environ["WEBHOOK_SECRET"].encode()
+
+def verify(body: bytes, signature: str) -&gt; bool:
+    expected = "sha256=" + hmac.new(SECRET, body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+@app.post("/webhook")
+async def webhook(req: Request, x_hub_signature_256: str = Header(...)):
+    body = await req.body()
+    if not verify(body, x_hub_signature_256):
+        raise HTTPException(403, "bad signature")
+    payload = await req.json()
+    # process payload...
+    return {"ok": True}</code></pre>
+</div>
+
+<p><code>hmac.compare_digest</code> avoids timing-attack leaks. Reject the request fast on bad signatures — never process unverified webhooks.</p>
+
+<h2 id="hands-on">Hands-on: a tiny GitHub releases scraper</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · pulls all releases of a public repo</div>
+<div class="hands-on-body">
+<div class="code" data-lang="python">
+<pre><code>#!/usr/bin/env python3
+from __future__ import annotations
+import os, time, logging, sys
+from requests import Session
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+log = logging.getLogger("releases")
+
+def make_session(token: str | None) -&gt; Session:
+    s = Session()
+    s.headers["Accept"] = "application/vnd.github+json"
+    s.headers["X-GitHub-Api-Version"] = "2022-11-28"
+    if token:
+        s.headers["Authorization"] = f"Bearer {token}"
+    retry = Retry(total=5, backoff_factor=0.5,
+                  status_forcelist=(429, 500, 502, 503, 504),
+                  respect_retry_after_header=True)
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    return s
+
+def releases(s: Session, owner: str, repo: str):
+    url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100"
+    while url:
+        r = s.get(url, timeout=(5, 30))
+        r.raise_for_status()
+        log.debug("rate remaining: %s", r.headers.get("X-RateLimit-Remaining"))
+        yield from r.json()
+        url = r.links.get("next", {}).get("url")
+
+def main(owner: str, repo: str) -&gt; int:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)-5s | %(message)s")
+    s = make_session(os.environ.get("GITHUB_TOKEN"))
+    for rel in releases(s, owner, repo):
+        print(f"{rel['tag_name']:&lt;15} {rel['published_at']}  {rel['name']}")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main(*sys.argv[1:3]))</code></pre>
+</div>
+<p>Run: <code>./releases.py torvalds linux</code>. Pagination, retries, optional auth, structured logging — all in 30 lines.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Add a timeout</span>
+</div>
+<div class="exercise-body">
+<p>This call hangs forever sometimes. Fix it without changing behaviour otherwise:</p>
+<div class="code" data-lang="python">
+<pre><code>r = requests.get("https://api.example.com/health")
+r.raise_for_status()</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>r = requests.get("https://api.example.com/health", timeout=(3, 10))
+r.raise_for_status()</code></pre>
+</div>
+<p>Health-checks should fail fast. 3 s connect, 10 s read is a reasonable default; tune for your service.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Retry only safe verbs</span>
+</div>
+<div class="exercise-body">
+<p>Configure a session that retries GET, HEAD, PUT, DELETE on 5xx but never retries POST. Why is the distinction important?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>retry = Retry(
+    total=5,
+    backoff_factor=0.5,
+    status_forcelist=(500, 502, 503, 504),
+    allowed_methods=("GET", "HEAD", "PUT", "DELETE", "OPTIONS"),
+)</code></pre>
+</div>
+<p>POST typically <em>creates</em> a resource; retrying after a partial success creates a duplicate. PUT/DELETE are conventionally idempotent — same operation twice is the same as once. If your POST has an Idempotency-Key, it's safe to add it to <code>allowed_methods</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Token refresh</span>
+</div>
+<div class="exercise-body">
+<p>Build a token cache: function returns a valid token, fetching a new one only when within 30 s of expiry. Thread-safe is bonus.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import threading, time, requests
+
+_lock  = threading.Lock()
+_token = ("", 0.0)        # (value, expiry_ts)
+
+def get_token() -&gt; str:
+    global _token
+    with _lock:
+        val, exp = _token
+        if val and time.time() &lt; exp - 30:
+            return val
+        r = requests.post(TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(CLIENT_ID, CLIENT_SECRET), timeout=10)
+        r.raise_for_status()
+        body = r.json()
+        _token = (body["access_token"], time.time() + body["expires_in"])
+        return _token[0]</code></pre>
+</div>
+<p>Lock prevents two threads simultaneously hitting the token endpoint. The 30 s safety margin handles clock skew between client and auth server.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Atomic streaming download</span>
+</div>
+<div class="exercise-body">
+<p>Write a function <code>download(url, dst)</code> that: streams the body, writes to <code>dst.part</code>, verifies a SHA256 you pass in, atomically renames to <code>dst</code>. On any failure, leave no partial file behind.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import hashlib, requests
+from pathlib import Path
+
+def download(url: str, dst: Path, expected_sha: str, session=None) -&gt; None:
+    s = session or requests.Session()
+    tmp = dst.with_suffix(dst.suffix + ".part")
+    h = hashlib.sha256()
+    try:
+        with s.get(url, stream=True, timeout=(10, 600)) as r:
+            r.raise_for_status()
+            with tmp.open("wb") as f:
+                for chunk in r.iter_content(chunk_size=1 &lt;&lt; 20):
+                    f.write(chunk); h.update(chunk)
+        actual = h.hexdigest()
+        if actual != expected_sha:
+            raise ValueError(f"sha mismatch: expected {expected_sha}, got {actual}")
+        tmp.replace(dst)            # atomic
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Async fan-out</span>
+</div>
+<div class="exercise-body">
+<p>Fetch 200 endpoint URLs concurrently with <code>httpx</code>, but at most 20 in flight at once. Return a list of <code>(url, status_code)</code> tuples.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import asyncio, httpx
+
+async def fetch(sem, client, url):
+    async with sem:
+        try:
+            r = await client.get(url, timeout=10)
+            return (url, r.status_code)
+        except httpx.HTTPError as e:
+            return (url, str(e))
+
+async def fan_out(urls: list[str], concurrency: int = 20):
+    sem = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient() as client:
+        return await asyncio.gather(*(fetch(sem, client, u) for u in urls))
+
+results = asyncio.run(fan_out(urls, 20))</code></pre>
+</div>
+<p>The semaphore caps in-flight requests. Without it, 200 simultaneous connections would overwhelm both your client and the server.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Always pass <code>timeout=</code> on every HTTP call. Always.</li>
+  <li>Use a <code>Session</code> for connection pooling; mount a <code>Retry</code> adapter for backoff.</li>
+  <li>Idempotency keys for unsafe POSTs that need to be retry-safe.</li>
+  <li>Stream big payloads (download and upload) — never load gigabytes into memory.</li>
+  <li>Auth: bearer tokens with caching/refresh; mTLS for service-to-service; never embed plain passwords.</li>
+  <li>Pagination: link-header style or cursor-token style — wrap in a generator.</li>
+  <li>For fan-out work, switch to <code>httpx</code> + <code>asyncio.gather</code> with a semaphore.</li>
+  <li>Receiving webhooks: verify HMAC signatures with <code>hmac.compare_digest</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="02-python-toolbox.html"><span class="lbl">← Prev</span><span class="ttl">Python Toolbox</span></a>
+  <a href="04-data-formats.html" class="next"><span class="lbl">Next →</span><span class="ttl">Data Formats</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

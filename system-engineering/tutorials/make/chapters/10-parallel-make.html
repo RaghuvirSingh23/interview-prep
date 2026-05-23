@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · Parallel Make — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 10</span>
+  Parallel Make
+</h1>
+<p class="lede">
+  Modern machines have 8, 16, 64 cores. A Makefile that uses one of
+  them is a crime. This chapter covers <code>-j</code>, the
+  GNU jobserver protocol (how recursive Make coordinates without
+  exploding your machine), race conditions, and the handful of
+  gotchas that ruin parallel builds.
+</p>
+
+<h2 id="just-dash-j">The basics: <code>-j N</code></h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 4         # up to 4 jobs in parallel
+$ make -j           # unlimited jobs (all of them right now)
+$ make -j $(nproc)  # one job per core</code></pre>
+</div>
+
+<p>
+  <code>-j</code> with no number means "no limit". That's usually a
+  bad idea: a bare <code>make -j</code> on a Makefile with 10,000
+  targets will spawn 10,000 shells and hang your machine. Always pass
+  a number.
+</p>
+
+<p>A reasonable default: <code>nproc</code> on Linux, <code>sysctl -n hw.ncpu</code> on macOS, or just <code>-j 8</code> and call it a day.</p>
+
+<h2 id="how-it-works">How parallel Make schedules</h2>
+
+<p>
+  When you run <code>make -j N</code>, Make builds the dependency graph
+  as usual, then walks it, scheduling up to <code>N</code> recipes at
+  once. A recipe can start as soon as <em>all its prerequisites are
+  built</em>. Two recipes with no mutual dependency can run in parallel.
+</p>
+
+<p>Given this graph:</p>
+<div class="code" data-lang="text">
+<pre><code>       hello
+      /  |  \
+ main.o greet.o util.o
+    |     |      |
+ main.c greet.c util.c</code></pre>
+</div>
+
+<p>Running <code>make -j 4</code>:</p>
+<ol>
+  <li>Make walks to <code>hello</code>, sees it needs three <code>.o</code>s.</li>
+  <li>The three <code>.o</code> compilations are independent — all three start at once.</li>
+  <li>Once all three are done, the link step runs.</li>
+</ol>
+
+<p>
+  Total wall-clock time: (time to compile the slowest .c) + (time to
+  link). Sequential time: sum of all three compiles + link. Potential
+  3× speedup.
+</p>
+
+<h2 id="interleaved-output">Interleaved output</h2>
+
+<p>
+  Make doesn't buffer recipe output by default — multiple recipes
+  printing simultaneously interleave on your terminal. For a quick
+  build this is usually fine. For debugging, it's a nightmare.
+</p>
+
+<p>GNU Make 4.0+ has <code>--output-sync</code>:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 8 --output-sync=target
+$ make -j 8 -O=line</code></pre>
+</div>
+
+<table>
+<thead><tr><th>Mode</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>none</code> (default)</td><td>Output interleaves freely.</td></tr>
+<tr><td><code>line</code></td><td>Print each line atomically. Lines from different recipes may still interleave but individual lines stay whole.</td></tr>
+<tr><td><code>target</code></td><td>Buffer all output from a recipe until it finishes, then flush as a block. Usually what you want.</td></tr>
+<tr><td><code>recurse</code></td><td>Like <code>target</code>, but also buffers sub-make output as a unit.</td></tr>
+</tbody>
+</table>
+
+<p>The shorthand <code>-O</code> (capital O, not zero) is equivalent to <code>--output-sync=target</code>.</p>
+
+<h2 id="jobserver">The jobserver — how recursive Make doesn't fork-bomb you</h2>
+
+<p>
+  Here's a puzzle. You type <code>make -j 8</code>. Your Makefile
+  includes a recursive call <code>$(MAKE) -C subdir</code>. The
+  sub-make also wants to run 8 jobs in parallel. If each of your 8
+  top-level jobs spawns a sub-make that runs 8 of its own, you'd get
+  64 simultaneous processes, not 8.
+</p>
+
+<p>The GNU jobserver protocol solves this elegantly. It works like a token pool:</p>
+<ol>
+  <li>The top-level Make creates a pipe and writes <code>N-1</code> tokens (bytes) to it.</li>
+  <li>Before running a recipe, Make tries to <em>read a token</em> from the pipe. If none available, it waits.</li>
+  <li>When the recipe finishes, Make <em>writes</em> the token back.</li>
+  <li>Sub-makes are told about the pipe via the <code>MAKEFLAGS</code> environment variable. They participate in the same pool.</li>
+</ol>
+
+<p>Net effect: across the entire process tree, at most <code>N</code> recipes run simultaneously — whether they're in the top Make, a sub-make, or a sub-sub-make.</p>
+
+<div class="callout hood">
+<div class="callout-title">Why <code>N-1</code> tokens?</div>
+<p>
+  The top-level Make holds one implicit "slot" for itself — it counts
+  as one of the <code>N</code>. So it writes <code>N-1</code>
+  additional tokens. A sub-make inherits the pool and can read tokens
+  for its own recipes without counting itself as an extra consumer.
+</p>
+</div>
+
+<h2 id="plus-prefix">Why <code>$(MAKE)</code> needs the <code>+</code> prefix (or full name)</h2>
+
+<p>
+  For the jobserver to work, a recursive Make invocation must not go
+  through <code>sh -c</code>'s usual dance. Specifically, Make
+  recognises recipe lines that <em>explicitly mention
+  <code>$(MAKE)</code></em> (or <code>${MAKE}</code>) and treats them
+  as recursive, passing the jobserver fd through.
+</p>
+
+<p>If you try to obscure the recursive call — e.g. by running it in a subshell — Make can't tell, and the sub-make is left without a jobserver. The standard form:</p>
+
+<div class="code" data-lang="make">
+<pre><code>.PHONY: build-sub
+build-sub:
+	$(MAKE) -C subdir</code></pre>
+</div>
+
+<p>When you need to force "run this even under <code>-n</code>" (e.g. for a custom dry-run compat), use the <code>+</code> prefix:</p>
+<div class="code" data-lang="make">
+<pre><code>build-sub:
+	+$(MAKE) -C subdir</code></pre>
+</div>
+
+<h2 id="races">Race conditions</h2>
+
+<p>
+  Parallel Make is correct only if your dependency graph correctly
+  captures every real prerequisite. A missing edge means two recipes
+  that <em>actually</em> depend on each other might run simultaneously.
+</p>
+
+<h4>Race 1 — implicit directory creation</h4>
+<div class="code" data-lang="make">
+<pre><code>build/a.o: src/a.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -c $&lt; -o $@
+
+build/b.o: src/b.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -c $&lt; -o $@</code></pre>
+</div>
+<p>Two parallel jobs both run <code>mkdir -p build</code>. With <code>mkdir -p</code> this is <em>usually</em> safe, but some filesystems or race conditions can produce errors. Fix: make the directory an order-only prerequisite (Chapter 7).</p>
+
+<h4>Race 2 — shared intermediate</h4>
+<div class="code" data-lang="make">
+<pre><code>output.a output.b: input
+	process input        # produces both output.a and output.b</code></pre>
+</div>
+<p>Two parallel jobs both run <code>process input</code>. They overwrite each other's outputs. Fix: grouped target (<code>&amp;:</code>) — Chapter 7.</p>
+
+<h4>Race 3 — non-atomic writes</h4>
+<p>
+  A recipe that writes <em>directly</em> to its target without
+  intermediate staging can produce garbage if interrupted:
+</p>
+<div class="code" data-lang="make">
+<pre><code>report.csv: process.py data.csv
+	python $&lt; data.csv &gt; $@</code></pre>
+</div>
+<p>
+  If Python crashes mid-stream, you have a partial CSV. Fix: write to
+  a temp file, rename atomically on success:
+</p>
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:
+report.csv: process.py data.csv
+	python $&lt; data.csv &gt; $@.tmp
+	mv $@.tmp $@</code></pre>
+</div>
+<p>Combined with <code>.DELETE_ON_ERROR:</code>, a failed build leaves no stale output.</p>
+
+<h4>Race 4 — cross-recipe state</h4>
+<p>
+  Two recipes that both modify a shared file (a log, a database,
+  anything) without explicit ordering. Fix: add a dependency, or use
+  <code>.NOTPARALLEL</code> to force these specific recipes to run
+  sequentially.
+</p>
+
+<h2 id="load">Load-based throttling</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 16 -l 4</code></pre>
+</div>
+<p>
+  <code>-l N</code>: don't spawn new jobs if the system's 1-minute
+  load average is above <code>N</code>. Useful when you're building on
+  a shared machine, or on a laptop you want to keep responsive.
+</p>
+
+<h2 id="notparallel">When parallel doesn't work</h2>
+
+<p>Some recipes can't parallelise. For them:</p>
+<div class="code" data-lang="make">
+<pre><code>.NOTPARALLEL:                       # whole Makefile is serial
+.NOTPARALLEL: test                  # only "test" is serial (GNU Make 4.4+)</code></pre>
+</div>
+
+<p>Or force sub-make sequential while keeping the top parallel:</p>
+<div class="code" data-lang="make">
+<pre><code>test:
+	$(MAKE) -j 1 run-tests</code></pre>
+</div>
+<p>This spawns a sub-make with <code>-j 1</code>, overriding the inherited jobserver. The sub-make runs sequentially; the top Make can still parallelise other targets concurrently.</p>
+
+<h2 id="measuring">Measuring speedup</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make clean &amp;&amp; time make
+...
+real    0m9.832s
+user    0m9.411s
+sys     0m0.406s
+
+$ make clean &amp;&amp; time make -j 8
+...
+real    0m1.742s
+user    0m10.221s
+sys     0m0.612s</code></pre>
+</div>
+
+<p>
+  <code>user</code> time stays roughly the same — the total CPU work
+  is the same. <code>real</code> (wall) time drops by up to
+  <code>-j</code>× depending on how parallelisable your graph is.
+</p>
+
+<p>
+  The ratio <code>user/real</code> tells you your actual parallelism.
+  If <code>-j 8</code> gives you user/real = 6.0, you're getting 6× of
+  your theoretical 8×. Missing 2× might be: serial link step, Make's
+  own overhead, a bottleneck file all targets depend on.
+</p>
+
+<h2 id="hands-on">Hands-on: measure your project</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · wall-clock vs cpu time</div>
+<div class="hands-on-body">
+<p>With any of the C Makefiles from earlier chapters, run:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make clean
+$ time make
+$ make clean
+$ time make -j 2
+$ make clean
+$ time make -j 8
+$ make clean
+$ time make -j 8 --output-sync=target</code></pre>
+</div>
+<p>
+  Note how much faster <code>-j 8</code> is, and how clean the output
+  becomes with <code>--output-sync</code>. This is cheap speedup —
+  maybe the single highest-ROI habit you'll pick up in this tutorial.
+</p>
+<p>Stick <code>MAKEFLAGS += -j 8 --output-sync=target</code> in your <code>~/.makerc</code> or equivalent, or alias <code>make</code>:</p>
+<div class="code" data-lang="sh">
+<pre><code>alias make='make -j 8 --output-sync=target'</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Observe interleaving</span>
+</div>
+<div class="exercise-body">
+<p>Write a Makefile with three targets, each of which prints "start N", sleeps 1s, prints "end N". Run sequentially (<code>make -j 1</code>) and in parallel (<code>make -j 3</code>). What differs?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all a b c
+all: a b c
+
+a: ; @echo start a; sleep 1; echo end a
+b: ; @echo start b; sleep 1; echo end b
+c: ; @echo start c; sleep 1; echo end c</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 1         # ~3 seconds
+start a
+end a
+start b
+end b
+start c
+end c
+
+$ make -j 3         # ~1 second
+start a
+start b
+start c
+end a
+end b
+end c</code></pre>
+</div>
+<p>In parallel, the three starts happen essentially simultaneously; after the sleep all three end. Now try with <code>-O</code>:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 3 -O
+start a
+end a
+start b
+end b
+start c
+end c</code></pre>
+</div>
+<p>Total wall time is still ~1s, but each target's output is grouped.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Spot the race</span>
+</div>
+<div class="exercise-body">
+<p>Find the race condition:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all
+all: app/v1 app/v2
+
+app/v1: app/main.o
+	mkdir -p app
+	cp app/main.o app/v1
+
+app/v2: app/main.o
+	mkdir -p app
+	cp app/main.o app/v2
+
+app/main.o: main.c
+	mkdir -p app
+	$(CC) -c main.c -o app/main.o</code></pre>
+</div>
+<p>Why can this fail with <code>-j</code>? How do you fix it?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  The three rules each invoke <code>mkdir -p app</code>, and the
+  <code>app/main.o</code> rule may run in parallel with the
+  <code>app/v1</code> / <code>app/v2</code> rules. In principle
+  <code>mkdir -p</code> is safe for races; in practice, slow NFS /
+  overlayfs filesystems sometimes return errors.
+</p>
+<p>But the bigger problem: both <code>app/v1</code> and <code>app/v2</code> list <code>app/main.o</code> as a prereq, so Make knows the order — but in parallel, <code>app/v1</code> and <code>app/v2</code> run simultaneously, and both attempt to <code>mkdir -p app</code>. With <code>-p</code> this should be idempotent, but…</p>
+<p>Cleanup — use order-only:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all
+all: app/v1 app/v2
+
+app/v1: app/main.o | app
+	cp $&lt; $@
+
+app/v2: app/main.o | app
+	cp $&lt; $@
+
+app/main.o: main.c | app
+	$(CC) -c $&lt; -o $@
+
+app: ; mkdir -p $@</code></pre>
+</div>
+<p><code>mkdir</code> runs at most once, no races.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Measure effective parallelism</span>
+</div>
+<div class="exercise-body">
+<p>
+  Take any C project with at least 10 source files. Run
+  <code>time make -j N</code> for <code>N</code> in 1, 2, 4, 8. Plot
+  (or mentally sketch) wall time vs N. Where does the curve plateau?
+  What's the bottleneck?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The curve plateaus when you run out of independent work. Usually the plateau is at around <code>min(cores, number_of_independent_leaves)</code>. Beyond the plateau, extra jobs don't help — they're waiting for the critical path.</p>
+<p>For a typical C project: wall time drops fast until N ≈ cores, then flattens. The final link step is serial, so ultra-fast parallel compile + a slow link gives a final "tail" you can't shorten with more parallelism — you need a faster linker (mold, lld).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Sequential tests, parallel build</span>
+</div>
+<div class="exercise-body">
+<p>
+  Your build is embarrassingly parallel; your tests must run one at a
+  time (they use a test DB). User types <code>make -j 8 all check</code>.
+  How do you keep compile parallel while forcing tests serial?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Either scoped <code>.NOTPARALLEL</code> (4.4+) or a sub-make trick:</p>
+<div class="code" data-lang="make">
+<pre><code># approach 1: GNU Make 4.4+
+.NOTPARALLEL: check
+check: $(TESTS)
+	@for t in $^; do ./$$t || exit 1; done
+
+# approach 2: portable
+check:
+	$(MAKE) -j 1 check-seq
+
+.PHONY: check-seq
+check-seq: $(TESTS)
+	@for t in $^; do ./$$t || exit 1; done</code></pre>
+</div>
+<p>The sub-make with <code>-j 1</code> overrides the inherited jobserver for that branch only.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">What does MAKEFLAGS look like?</span>
+</div>
+<div class="exercise-body">
+<p>Write a Makefile that prints <code>$(MAKEFLAGS)</code> and the <code>MAKEFLAGS</code> environment variable inside a recipe. Run with <code>make -j 4 --output-sync=target</code> and inspect what Make tells its children.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>all:
+	@echo 'Make var: $(MAKEFLAGS)'
+	@echo 'env var: '"$$MAKEFLAGS"</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 4 --output-sync=target
+Make var: -j4 --output-sync=target --jobserver-auth=fifo:/tmp/GMfifo12345
+env var: -j4 --output-sync=target --jobserver-auth=fifo:/tmp/GMfifo12345</code></pre>
+</div>
+<p>
+  The <code>--jobserver-auth=fifo:…</code> (or older
+  <code>--jobserver-fds=3,4</code>) is the token pipe handle a sub-make
+  uses to participate in the pool. Don't try to read or write to it
+  yourself — Make manages it.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.6</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Atomic writes</span>
+</div>
+<div class="exercise-body">
+<p>Rewrite this rule so that a crashed recipe leaves no partial output:</p>
+<div class="code" data-lang="make">
+<pre><code>summary.json: raw.csv
+	python summarize.py raw.csv &gt; summary.json</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>.DELETE_ON_ERROR:
+
+summary.json: raw.csv
+	python summarize.py raw.csv &gt; $@.tmp
+	mv $@.tmp $@</code></pre>
+</div>
+<p>
+  On success: output is atomically renamed.<br>
+  On crash of <code>python</code>: <code>.DELETE_ON_ERROR</code>
+  removes <code>summary.json.tmp</code> (the target at the moment it
+  fails is <code>summary.json</code>, but the partial file was
+  <code>summary.json.tmp</code> — so actually
+  <code>.DELETE_ON_ERROR</code> may not help here; the key insight is
+  that a crash means <code>mv</code> never ran, so no
+  <code>summary.json</code> exists to be stale).
+</p>
+<p>
+  Double belt-and-braces:
+</p>
+<div class="code" data-lang="make">
+<pre><code>summary.json: raw.csv
+	@rm -f $@.tmp
+	python summarize.py raw.csv &gt; $@.tmp
+	mv $@.tmp $@</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>-j N</code> runs up to N recipes in parallel.</li>
+  <li><code>-O</code> / <code>--output-sync=target</code> groups output per recipe for readability.</li>
+  <li><code>-l N</code> throttles based on system load.</li>
+  <li>The GNU jobserver protocol lets a tree of recursive Makes cooperate on one token pool, so <code>-j 8</code> means 8 jobs total, not 8 per level.</li>
+  <li>Recipe lines containing <code>$(MAKE)</code> / <code>${MAKE}</code> get auto-propagated jobserver info. Use <code>+$(MAKE) …</code> if you need it to run under <code>-n</code> too.</li>
+  <li>Races hide in: missing directory dependencies (use order-only), shared multi-output recipes (use grouped targets), non-atomic writes (write to <code>.tmp</code> + rename).</li>
+  <li><code>.NOTPARALLEL:</code> (all or scoped) forces sequential execution. Or spawn a sub-make with <code>-j 1</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="09-real-projects.html"><span class="lbl">← Prev</span><span class="ttl">Real Projects</span></a>
+  <a href="11-debugging.html" class="next"><span class="lbl">Next →</span><span class="ttl">Debugging Make</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

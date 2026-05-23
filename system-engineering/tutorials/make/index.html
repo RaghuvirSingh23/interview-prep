@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GNU Make — A Deep Dive</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+
+<div class="layout">
+<aside class="sidebar">
+  <a href="index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="chapters/01-why-make.html">Why Make Exists</a></li>
+      <li><a href="chapters/02-hello-make.html">Hello, Make</a></li>
+      <li><a href="chapters/03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="chapters/04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="chapters/05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="chapters/06-functions.html">Functions</a></li>
+      <li><a href="chapters/07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="chapters/08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="chapters/09-real-projects.html">Real Projects</a></li>
+      <li><a href="chapters/10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="chapters/11-debugging.html">Debugging Make</a></li>
+      <li><a href="chapters/12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="chapters/13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="chapters/14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="exercises.html">All Exercises</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<section class="hero">
+  <h1>
+    <span class="chap-num">A Deep Dive</span>
+    GNU Make, from first principles.
+  </h1>
+  <p class="lede">
+    Most people learn enough Make to copy an existing <code>Makefile</code> and
+    stop. That's a shame — Make is a tiny, beautiful language for describing
+    <em>how files depend on other files</em>, and once you truly understand it
+    you'll use it for years. This tutorial takes you from the first rule to
+    metaprogramming, parallel builds, and the patterns real C projects use.
+  </p>
+  <div class="hero-meta">
+    <span><strong>14</strong> chapters</span>
+    <span><strong>120+</strong> exercises</span>
+    <span><strong>50</strong> interview-style questions</span>
+    <span>~<strong>6 hours</strong> to read, weeks to internalise</span>
+  </div>
+</section>
+
+<h2 id="how-to-use">How to use this tutorial</h2>
+
+<p>
+  This is a <strong>hands-on</strong> tutorial. You will learn Make by
+  running it, not by reading about it. Every chapter contains:
+</p>
+<ul>
+  <li><strong>Concept prose</strong> — what the feature is, when to use it, and why it exists.</li>
+  <li><strong>Code examples</strong> — every Makefile snippet is copy-pasteable. Tabs are rendered as <code>→</code> so you can see them.</li>
+  <li><strong>Hands-on blocks</strong> — terminal sessions you should actually type. The commands and expected output are shown.</li>
+  <li><strong>Pitfalls</strong> — the traps I fell into so you don't have to.</li>
+  <li><strong>Exercises</strong> — 3–8 per chapter, each with a collapsible solution. Do them. Don't peek.</li>
+</ul>
+
+<div class="callout tip">
+<div class="callout-title">Before you start</div>
+<p>Open a terminal. Create a scratch directory and stay in it for the whole course:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ mkdir -p ~/learning-make &amp;&amp; cd ~/learning-make</code></pre>
+</div>
+<p>Every chapter assumes you're in that directory and may leave files behind. If you want a clean slate, <code>rm -rf *</code> between chapters — or keep them as a reference.</p>
+</div>
+
+<h2 id="what-you-will-learn">What you will learn</h2>
+
+<p>By the end of this tutorial you will:</p>
+<ul>
+  <li>Read any <code>Makefile</code> in the wild and know what it's doing.</li>
+  <li>Write <code>Makefile</code>s that correctly express <em>why</em> things depend on other things, not just <em>how</em> to build them.</li>
+  <li>Use automatic dependency generation (the <code>-MMD -MP</code> trick) so you never forget a header change again.</li>
+  <li>Debug a broken Makefile with <code>--debug</code>, <code>-n</code>, <code>-p</code>, and the <code>$(info …)</code> function.</li>
+  <li>Write non-recursive Makefiles that scale to hundreds of source files — and understand why recursive Make is harmful.</li>
+  <li>Answer, with confidence, every common Make question an interviewer or colleague will ever throw at you.</li>
+</ul>
+
+<h2 id="contents">Table of contents</h2>
+
+<div class="toc-grid">
+  <a href="chapters/01-why-make.html" class="toc-card">
+    <span class="num">01</span>
+    <h3>Why Make Exists</h3>
+    <p>The problem Stuart Feldman solved at Bell Labs in 1976, and why the solution still runs your build.</p>
+  </a>
+  <a href="chapters/02-hello-make.html" class="toc-card">
+    <span class="num">02</span>
+    <h3>Hello, Make</h3>
+    <p>Install. Write. Run. The tab vs spaces catastrophe. Your first dependency graph.</p>
+  </a>
+  <a href="chapters/03-anatomy-of-a-rule.html" class="toc-card">
+    <span class="num">03</span>
+    <h3>Anatomy of a Rule</h3>
+    <p>Targets, prerequisites, recipes, subshells, error semantics, and the secret life of <code>.SHELL</code>.</p>
+  </a>
+  <a href="chapters/04-variables.html" class="toc-card">
+    <span class="num">04</span>
+    <h3>Variables — All Six Flavors</h3>
+    <p><code>=</code> vs <code>:=</code> vs <code>::=</code> vs <code>?=</code> vs <code>+=</code> vs <code>!=</code>. The difference matters.</p>
+  </a>
+  <a href="chapters/05-automatic-vars.html" class="toc-card">
+    <span class="num">05</span>
+    <h3>Automatic Vars &amp; Pattern Rules</h3>
+    <p><code>$@ $&lt; $^ $? $* $+ $|</code>, pattern rules, static patterns, and the built-in implicit rule database.</p>
+  </a>
+  <a href="chapters/06-functions.html" class="toc-card">
+    <span class="num">06</span>
+    <h3>Functions</h3>
+    <p>Text manipulation, file-name munging, <code>foreach</code>, <code>call</code>, <code>eval</code>, and Make-as-a-programming-language.</p>
+  </a>
+  <a href="chapters/07-phony-and-special.html" class="toc-card">
+    <span class="num">07</span>
+    <h3>Phony &amp; Special Targets</h3>
+    <p><code>.PHONY</code>, order-only prerequisites, <code>::</code> rules, static pattern rules, and every <code>.SPECIAL</code> target.</p>
+  </a>
+  <a href="chapters/08-metaprogramming.html" class="toc-card">
+    <span class="num">08</span>
+    <h3>Metaprogramming</h3>
+    <p>Conditionals, <code>include</code>, computed variable names, <code>.SECONDEXPANSION</code>, and writing Make that writes Make.</p>
+  </a>
+  <a href="chapters/09-real-projects.html" class="toc-card">
+    <span class="num">09</span>
+    <h3>Real Projects</h3>
+    <p>C with automatic header dependencies, data pipelines, LaTeX, and how to structure a real codebase's build.</p>
+  </a>
+  <a href="chapters/10-parallel-make.html" class="toc-card">
+    <span class="num">10</span>
+    <h3>Parallel Make</h3>
+    <p><code>-j</code>, the jobserver protocol, <code>.NOTPARALLEL</code>, race conditions, and how Make negotiates with itself.</p>
+  </a>
+  <a href="chapters/11-debugging.html" class="toc-card">
+    <span class="num">11</span>
+    <h3>Debugging Make</h3>
+    <p><code>--debug</code>, <code>-n</code>, <code>-p</code>, <code>--trace</code>, <code>$(info)</code>, <code>$(warning)</code>, <code>$(error)</code>, and <em>remake</em>.</p>
+  </a>
+  <a href="chapters/12-recursive-harmful.html" class="toc-card">
+    <span class="num">12</span>
+    <h3>Recursive Make Considered Harmful</h3>
+    <p>Peter Miller's 1997 paper, why every large project gets this wrong, and the non-recursive pattern.</p>
+  </a>
+  <a href="chapters/13-50-questions.html" class="toc-card">
+    <span class="num">13</span>
+    <h3>The 50 Questions</h3>
+    <p>Every common interview and real-world question about Make — answered with code.</p>
+  </a>
+  <a href="chapters/14-capstone.html" class="toc-card">
+    <span class="num">14</span>
+    <h3>Capstone Project</h3>
+    <p>Build a complete C project's build system from scratch: multi-target, auto-deps, tests, install, release.</p>
+  </a>
+</div>
+
+<h2 id="prereqs">Prerequisites</h2>
+<ul>
+  <li>A Unix-like shell (macOS Terminal, Linux, WSL). Windows native works too but paths differ — prefer WSL if you're on Windows.</li>
+  <li><code>make</code> installed. Check with <code>make --version</code>. You want GNU Make 4.0 or newer (macOS ships 3.81 which is ancient — install GNU make via <code>brew install make</code> and invoke it as <code>gmake</code>).</li>
+  <li>A working C compiler (<code>gcc</code> or <code>clang</code>) for the C-build chapters.</li>
+  <li>Comfort reading shell commands. You don't need to be a shell wizard, but <code>ls</code>, <code>cat</code>, <code>echo</code>, and redirection should feel natural.</li>
+</ul>
+
+<div class="callout history">
+<div class="callout-title">What this tutorial is not</div>
+<p>
+  This is not a reference manual. For exhaustive detail, read the official
+  <a href="https://www.gnu.org/software/make/manual/make.html">GNU Make manual</a> —
+  it is surprisingly readable, and I'll cite chapters from it throughout.
+  This tutorial is the <em>curriculum</em> the manual wishes it had: a
+  guided tour through every feature you will actually use, with exercises
+  that build the intuition a reference book can't give you.
+</p>
+</div>
+
+<p style="text-align: center; margin-top: 60px;">
+  <a href="chapters/01-why-make.html" style="font-size: 20px;">→ Begin: Chapter 1 — Why Make Exists</a>
+</p>
+
+</main>
+</div>
+
+<script src="assets/site.js"></script>
+</body>
+</html>

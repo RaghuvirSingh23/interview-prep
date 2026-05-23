@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>9 · GitHub Actions — Fundamentals — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 09</span>
+  GitHub Actions — Fundamentals
+</h1>
+<p class="lede">
+  GitHub Actions (GHA) was the last of the three big tools to arrive
+  (2019) and had the advantage of learning from everyone else's
+  mistakes. Its defining feature is the <em>Marketplace</em> — a huge
+  ecosystem of pre-built "actions" you compose into workflows. This
+  chapter gets you from "empty repo" to "green check mark".
+</p>
+
+<h2 id="architecture">Architecture</h2>
+
+<div class="code" data-lang="text">
+<pre><code>  ┌─────────────────────────────────────────┐
+  │            GitHub.com                   │
+  │  - stores repo &amp; workflows              │
+  │  - schedules workflow runs              │
+  │  - stores secrets, artifacts, caches    │
+  │  - shows results on PRs &amp; commits       │
+  └───────────────┬─────────────────────────┘
+                  │
+          ┌───────┴────────┬───────────────┐
+          │                │               │
+    [GitHub-hosted     [GitHub-hosted  [Self-hosted
+     ubuntu-latest]     macos-latest]   runner]
+      ephemeral VM      ephemeral VM   your machine
+      ~2 CPU / 7GB      ~3 CPU         whatever you give</code></pre>
+</div>
+
+<p>
+  GitHub-hosted runners are ephemeral VMs: fresh for every job, torn
+  down after. They come in Linux, Windows, and macOS flavors with
+  pre-installed toolchains. Self-hosted runners are machines you run
+  that poll GitHub for work — use them for private networks, special
+  hardware, or cost control on heavy pipelines.
+</p>
+
+<h2 id="files">Files, not config</h2>
+
+<p>Your CI lives in <code>.github/workflows/*.yml</code>. Any file in that directory is a separate workflow; you can have many. GitHub reads them, reacts to the <code>on:</code> triggers, and runs them.</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: pytest</code></pre>
+</div>
+
+<p>Push this to a repo. Go to the Actions tab. Your workflow runs on every push to <code>main</code> and every PR.</p>
+
+<h2 id="concepts">The four concepts</h2>
+
+<table>
+<thead><tr><th>Level</th><th>What</th></tr></thead>
+<tbody>
+<tr><td><strong>Workflow</strong></td><td>One YAML file in <code>.github/workflows/</code>. Has triggers and jobs.</td></tr>
+<tr><td><strong>Job</strong></td><td>A set of steps run on a single runner. Jobs can parallelise.</td></tr>
+<tr><td><strong>Step</strong></td><td>A single unit: either <code>run: &lt;shell&gt;</code> or <code>uses: &lt;action&gt;</code>.</td></tr>
+<tr><td><strong>Action</strong></td><td>Reusable step defined elsewhere — in a GitHub repo or on the Marketplace.</td></tr>
+</tbody>
+</table>
+
+<p>
+  The GHA model is fundamentally: a workflow contains jobs, each job
+  has steps, and a step is either inline shell or a reusable action.
+  Actions are the primary reuse mechanism — unlike GitLab where you
+  <code>include</code> YAML, in GHA you <code>uses:</code> an action.
+</p>
+
+<h2 id="actions">Actions — the key concept</h2>
+
+<p>An action is a reusable unit distributed as a git repository. Three kinds:</p>
+
+<ul>
+  <li><strong>JavaScript actions</strong> — a <code>node</code> program run directly on the runner. Fast; required for cross-platform (Linux/Windows/macOS).</li>
+  <li><strong>Docker container actions</strong> — a Docker image; the runner pulls and runs it. Linux-only.</li>
+  <li><strong>Composite actions</strong> — a bundle of steps defined in an <code>action.yml</code>. Run as if their contents were inlined.</li>
+</ul>
+
+<p>Reference an action with <code>uses:</code>:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>- uses: actions/checkout@v4                 # official
+- uses: actions/setup-node@v4               # official
+- uses: docker/build-push-action@v5         # third-party
+- uses: ./my-local-action                   # local (in this repo)
+- uses: myorg/my-action@v1                  # private action in myorg
+- uses: actions/setup-python@a8b72        # pinned to commit SHA (security)</code></pre>
+</div>
+
+<div class="callout tip">
+<div class="callout-title">Pin actions by SHA, not tag</div>
+<p>
+  Tags are mutable. An attacker who compromises an action's
+  repository can move <code>v4</code> to a malicious commit. For
+  untrusted or third-party actions, pin to a full commit SHA:
+  <code>uses: tj-actions/changed-files@<em>a1b2c3…</em></code>. Dependabot
+  can keep these pins updated via PRs you review.
+</p>
+</div>
+
+<h2 id="triggers">Triggers (<code>on:</code>)</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>on:
+  push:
+    branches: [main, 'release/**']
+    paths:    ['src/**', 'Dockerfile']
+    tags:     ['v*']
+
+  pull_request:
+    branches: [main]
+    types:    [opened, synchronize, reopened]
+
+  schedule:
+    - cron: '0 2 * * *'              # 02:00 UTC daily
+
+  workflow_dispatch:                 # manual "Run workflow" button
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        type: string
+      env:
+        type: choice
+        options: [staging, production]
+
+  repository_dispatch:               # external API trigger
+    types: [deploy-request]
+
+  workflow_run:                      # after another workflow finishes
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]</code></pre>
+</div>
+
+<p>Some triggers less obvious:</p>
+<ul>
+  <li><code>workflow_dispatch</code> — manual with inputs, shows a button in the Actions UI.</li>
+  <li><code>workflow_call</code> — lets other workflows call this one (Chapter 10's reusable workflows).</li>
+  <li><code>repository_dispatch</code> — trigger via GitHub's REST API; useful for external webhooks.</li>
+  <li><code>workflow_run</code> — chain workflow A after workflow B.</li>
+</ul>
+
+<h2 id="runner">Runners</h2>
+
+<p>Pick with <code>runs-on:</code>:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  linux:   { runs-on: ubuntu-latest,  ... }
+  macos:   { runs-on: macos-latest,   ... }
+  win:     { runs-on: windows-latest, ... }
+  selfhost: { runs-on: [self-hosted, linux, x64, gpu], ... }
+  larger:  { runs-on: ubuntu-latest-8-cores, ... }      # paid larger runners</code></pre>
+</div>
+
+<p>
+  GitHub-hosted runner images come with heaps of pre-installed tools:
+  git, Docker, Node (multiple versions), Python, Java, Go, .NET,
+  recent Chrome/Firefox, jq, awk, tar, gzip, etc. The
+  <a href="https://github.com/actions/runner-images">actions/runner-images</a>
+  repo documents the full list per image. You can use <code>setup-*</code>
+  actions to pin specific tool versions, but baseline works for most
+  projects out of the box.
+</p>
+
+<h2 id="steps">Steps and their shapes</h2>
+
+<h4>A <code>run:</code> step</h4>
+<div class="code" data-lang="yaml">
+<pre><code>- name: Install deps
+  run: |
+    pip install -r requirements.txt
+    pip install -e .
+  working-directory: ./backend
+  env:
+    PIP_CACHE_DIR: ~/.cache/pip
+  shell: bash                    # 'pwsh' on windows-latest by default
+  if: runner.os == 'Linux'
+  timeout-minutes: 5
+  continue-on-error: false
+  id: install-deps</code></pre>
+</div>
+
+<h4>A <code>uses:</code> step</h4>
+<div class="code" data-lang="yaml">
+<pre><code>- name: Setup Python
+  uses: actions/setup-python@v5
+  with:
+    python-version: "3.11"
+    cache: pip
+  id: py</code></pre>
+</div>
+
+<p>Every step optionally has:</p>
+<ul>
+  <li><code>name:</code> — shown in logs. Strongly recommended.</li>
+  <li><code>id:</code> — so later steps can refer to <code>${{ steps.ID.outputs.* }}</code>.</li>
+  <li><code>if:</code> — conditional (<code>if: always()</code>, <code>if: failure()</code>, <code>if: success()</code>, <code>if: cancelled()</code>, or any expression).</li>
+  <li><code>env:</code> — env vars for this step.</li>
+  <li><code>working-directory:</code>, <code>shell:</code>, <code>timeout-minutes:</code>, <code>continue-on-error:</code>.</li>
+</ul>
+
+<h2 id="expr">Expressions and contexts</h2>
+
+<p>GHA has a mini expression language: <code>${{ … }}</code>.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>- run: echo "branch=${{ github.ref_name }}"
+- if:  ${{ github.event_name == 'pull_request' }}
+  run: echo "It's a PR"
+
+- uses: actions/setup-node@v4
+  with:
+    node-version: ${{ matrix.node }}</code></pre>
+</div>
+
+<p>Available <strong>contexts</strong> (objects the expression can access):</p>
+
+<table>
+<thead><tr><th>Context</th><th>Contains</th></tr></thead>
+<tbody>
+<tr><td><code>github</code></td><td>Event payload, actor, repository, refs, SHA, workflow metadata</td></tr>
+<tr><td><code>env</code></td><td>Env vars set at workflow/job/step level</td></tr>
+<tr><td><code>vars</code></td><td>Repo/org-level variables set in Settings</td></tr>
+<tr><td><code>secrets</code></td><td>Secret names (only usable as <code>${{ secrets.X }}</code>)</td></tr>
+<tr><td><code>job</code></td><td>Container, services, status</td></tr>
+<tr><td><code>steps</code></td><td>Outputs and conclusions of previous steps</td></tr>
+<tr><td><code>runner</code></td><td>OS, arch, tool cache, temp dir</td></tr>
+<tr><td><code>needs</code></td><td>Outputs of jobs this job depends on</td></tr>
+<tr><td><code>inputs</code></td><td>Inputs to a reusable / dispatch workflow</td></tr>
+<tr><td><code>matrix</code></td><td>Current matrix values</td></tr>
+<tr><td><code>strategy</code></td><td>Strategy context (fail-fast, job-index)</td></tr>
+</tbody>
+</table>
+
+<p>Examples:</p>
+<div class="code" data-lang="yaml">
+<pre><code>run: echo "${{ github.repository }} @ ${{ github.sha }}"
+run: echo "Triggered by ${{ github.actor }}"
+run: echo "Runner OS is ${{ runner.os }}"
+run: echo "Matrix value: ${{ matrix.python-version }}"</code></pre>
+</div>
+
+<h2 id="deps">Job dependencies &amp; outputs</h2>
+
+<p>Default: jobs run in parallel. To sequence, use <code>needs:</code>:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run lint
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps: [...]
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps: [...]</code></pre>
+</div>
+
+<p>Pass values between jobs via outputs:</p>
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: bump
+        run: echo "tag=v$(date +%Y%m%d)" &gt;&gt; $GITHUB_OUTPUT
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Building ${{ needs.version.outputs.tag }}"</code></pre>
+</div>
+
+<p>
+  Step outputs use <code>$GITHUB_OUTPUT</code>, a special file the
+  runner exposes. Write <code>key=value</code> lines; they become
+  <code>${{ steps.&lt;id&gt;.outputs.key }}</code>.
+</p>
+
+<h2 id="artifacts">Artifacts &amp; caches</h2>
+
+<h4>Artifacts</h4>
+<div class="code" data-lang="yaml">
+<pre><code>- uses: actions/upload-artifact@v4
+  with:
+    name: build-output
+    path: dist/
+    retention-days: 14
+
+- uses: actions/download-artifact@v4
+  with:
+    name: build-output
+    path: dist/</code></pre>
+</div>
+
+<p>Upload stores the files in GitHub's artifact store for the workflow run (up to 90 days default). Download in a later job, or even manually from the Actions UI.</p>
+
+<h4>Cache</h4>
+<div class="code" data-lang="yaml">
+<pre><code>- uses: actions/cache@v4
+  with:
+    path: ~/.npm
+    key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+    restore-keys: |
+      ${{ runner.os }}-npm-</code></pre>
+</div>
+
+<p>Most <code>setup-*</code> actions have built-in caching (pass <code>cache: npm</code> to <code>setup-node</code>). Only hand-roll cache for non-obvious paths.</p>
+
+<h2 id="env-vars">Environment variables</h2>
+
+<p>Three scopes, inner wins:</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>env:
+  GLOBAL: "workflow"              # workflow-scope
+
+jobs:
+  build:
+    env:
+      JOB: "job-level"            # job-scope
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          STEP: "step-only"       # step-scope
+        run: env | grep -E 'GLOBAL|JOB|STEP'</code></pre>
+</div>
+
+<p>Setting env vars for later steps in the same job:</p>
+<div class="code" data-lang="yaml">
+<pre><code>- id: sha
+  run: echo "FULL_SHA=$(git rev-parse HEAD)" &gt;&gt; $GITHUB_ENV
+- run: echo "SHA is $FULL_SHA"</code></pre>
+</div>
+
+<p><code>$GITHUB_ENV</code> is a file the runner exports into the environment of every subsequent step.</p>
+
+<h2 id="secrets">Secrets</h2>
+
+<p>Store at three levels: repo, environment, organisation. Reference only as <code>${{ secrets.X }}</code> — never echo or log them.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>- run: |
+    echo "${{ secrets.NPM_TOKEN }}" &gt; ~/.npmrc     # BAD — could leak
+    npm publish</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<pre><code>- env:
+    NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  run: |
+    echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" &gt; ~/.npmrc
+    npm publish</code></pre>
+</div>
+
+<p>
+  GHA masks secret values in logs if they appear verbatim — but
+  transformations (base64 encoding, JSON-wrapping) can defeat the
+  mask. Pass via <code>env:</code> and never echo directly.
+</p>
+
+<h2 id="permissions">GITHUB_TOKEN and permissions</h2>
+
+<p>
+  Every workflow run gets a short-lived token
+  <code>${{ secrets.GITHUB_TOKEN }}</code> with permissions scoped to
+  the triggering repo. By default it has broad read access. You should
+  lock it down per workflow:
+</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>permissions:
+  contents: read
+  pull-requests: write     # so this workflow can comment on PRs
+  packages: write          # so it can push to GHCR</code></pre>
+</div>
+
+<p>
+  Set <code>permissions: {}</code> at workflow scope, then grant only
+  what you need at job scope. Principle of least privilege.
+</p>
+
+<h2 id="ui">Watching a run</h2>
+
+<p>On the Actions tab:</p>
+<ul>
+  <li><strong>All workflows</strong> on the left.</li>
+  <li>Click a workflow → list of runs.</li>
+  <li>Click a run → per-job tabs with live logs.</li>
+  <li>Logs are collapsible by step; hover a timestamp to get a direct link.</li>
+  <li>Failed jobs show a red X; passed green tick; cancelled grey.</li>
+  <li>"Re-run jobs" button → re-run all, failed only, or just one.</li>
+</ul>
+
+<p>PRs show a consolidated "Checks" tab with every workflow's status and inline annotations from failed tests.</p>
+
+<h2 id="hands-on">Hands-on: a full workflow</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · real CI workflow</div>
+<div class="hands-on-body">
+<p>In any GitHub repo, add:</p>
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install ruff
+      - run: ruff check src/ tests/
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest --junitxml=report.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report-py${{ matrix.python }}
+          path: report.xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7</code></pre>
+</div>
+<p>Commit, push, and open the Actions tab. Study the run:</p>
+<ul>
+<li><strong>concurrency</strong> cancels redundant runs on the same branch — push twice quickly, watch the older run cancel.</li>
+<li><strong>matrix</strong> fans out to 3 Python versions in parallel.</li>
+<li>Test reports are uploaded even on failure thanks to <code>if: always()</code>.</li>
+<li>Build only runs after all test matrix cells succeed.</li>
+</ul>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Schedule + manual</span>
+</div>
+<div class="exercise-body">
+<p>Write <code>on:</code> that runs a workflow on every push to <code>main</code>, nightly at 03:00 UTC, and any time someone clicks "Run workflow" with an <code>env</code> choice.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      env:
+        type: choice
+        options: [staging, production]
+        default: staging</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Step output chain</span>
+</div>
+<div class="exercise-body">
+<p>Step 1 captures the current git short SHA into an output. Step 2 echoes it. Step 3 (in a later job) also echoes it.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>jobs:
+  a:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: sha
+        run: echo "value=$(git rev-parse --short HEAD)" &gt;&gt; $GITHUB_OUTPUT
+      - run: echo "from step 2: ${{ steps.sha.outputs.value }}"
+  b:
+    needs: a
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "from job b: ${{ needs.a.outputs.sha }}"</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Skip on docs-only changes</span>
+</div>
+<div class="exercise-body">
+<p>Don't run the test job on pushes that only touch <code>docs/**</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Use <code>paths:</code> on the trigger:</p>
+<div class="code" data-lang="yaml">
+<pre><code>on:
+  push:
+    paths-ignore: ['docs/**']
+  pull_request:
+    paths-ignore: ['docs/**']</code></pre>
+</div>
+<p>Caveat: <code>paths-ignore</code> affects whether the workflow runs at all, not individual jobs. If you need per-job gating within a workflow that always runs, use <code>dorny/paths-filter</code> as a first job and key later jobs off its outputs.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Cache a custom path</span>
+</div>
+<div class="exercise-body">
+<p>Cache a Rust <code>target/</code> directory keyed by <code>Cargo.lock</code> hash, with <code>Cargo.toml</code>-based fallback.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>- uses: actions/cache@v4
+  with:
+    path: |
+      ~/.cargo/registry
+      ~/.cargo/git
+      target
+    key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    restore-keys: |
+      ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+      ${{ runner.os }}-cargo-</code></pre>
+</div>
+<p>In practice, use the purpose-built <code>Swatinem/rust-cache</code> action — same idea, better defaults.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 9.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Permissions audit</span>
+</div>
+<div class="exercise-body">
+<p>A workflow writes to the repo (tag pushes) and comments on PRs. Set the minimum <code>permissions:</code> it needs.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>permissions:
+  contents: write        # for pushing tags
+  pull-requests: write   # for commenting
+  # everything else implicitly: none</code></pre>
+</div>
+<p>If other workflows don't need these, start at workflow level with <code>permissions: {}</code> and escalate per-job for the ones that do. Minimise blast radius.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>GHA = <code>.github/workflows/*.yml</code> + GitHub's scheduler + runners (hosted or self-hosted).</li>
+  <li>Four concepts: workflow → jobs → steps, with actions as the reusable step type.</li>
+  <li>Pin third-party actions to commit SHAs; let Dependabot update them.</li>
+  <li>Triggers cover push/PR/schedule/manual/external and workflow-to-workflow.</li>
+  <li>Jobs default to parallel; use <code>needs:</code> and <code>outputs:</code> for sequencing and data passing.</li>
+  <li>Cache and artifacts are purpose-built actions; <code>setup-*</code> actions include caching automatically.</li>
+  <li>Set <code>permissions:</code> explicitly — the default <code>GITHUB_TOKEN</code> scope is broad.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="08-gitlab-advanced.html"><span class="lbl">← Prev</span><span class="ttl">GitLab CI — Advanced</span></a>
+  <a href="10-gha-advanced.html" class="next"><span class="lbl">Next →</span><span class="ttl">GitHub Actions — Advanced</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

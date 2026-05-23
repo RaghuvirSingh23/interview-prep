@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3 · Anatomy of a Rule — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 03</span>
+  Anatomy of a Rule
+</h1>
+<p class="lede">
+  A rule has three parts: a target, some prerequisites, and a recipe.
+  That's it. But each part has subtleties that trip people up for
+  years. This chapter dissects them all.
+</p>
+
+<h2 id="three-parts">The three parts, drawn out</h2>
+
+<div class="code" data-lang="make">
+<pre><code>target : prereq1 prereq2 prereq3
+	recipe-line-1
+	recipe-line-2
+	recipe-line-3</code></pre>
+</div>
+
+<p>Read top to bottom:</p>
+<ul>
+  <li><strong>target</strong> — the file Make is trying to produce, or the name of a phony action.</li>
+  <li><strong>prerequisites</strong> — zero or more whitespace-separated file names (or phony names) that must exist / be up-to-date before the recipe runs.</li>
+  <li><strong>recipe</strong> — one or more tab-indented lines of shell to execute.</li>
+</ul>
+
+<p>You can have targets with no prerequisites:</p>
+<div class="code" data-lang="make">
+<pre><code>greet:
+	echo hello</code></pre>
+</div>
+
+<p>And rules with no recipe (purely for declaring a dependency):</p>
+<div class="code" data-lang="make">
+<pre><code>all: hello docs tests</code></pre>
+</div>
+
+<p>And rules where the target is multiple files:</p>
+<div class="code" data-lang="make">
+<pre><code>a.o b.o c.o: shared.h</code></pre>
+</div>
+<p>
+  This declares that three targets each depend on <code>shared.h</code>
+  — useful for shared prerequisites. It is <em>not</em> saying "one
+  recipe produces all three"; that's a <strong>grouped target</strong>,
+  which uses <code>&amp;:</code> and we cover in Chapter 7.
+</p>
+
+<h2 id="recipe-semantics">Recipe semantics — how lines actually run</h2>
+
+<p>
+  By default <strong>each line of a recipe runs in its own shell</strong>.
+  This is the single most important fact about Make's execution model
+  and it burns everyone eventually.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>test:
+	cd /tmp
+	pwd                 # prints $HOME, not /tmp</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make test
+cd /tmp
+pwd
+/Users/you</code></pre>
+</div>
+
+<p>
+  Why? Because Make spawned one shell for <code>cd /tmp</code>, which
+  exited. Then Make spawned a <em>fresh</em> shell for
+  <code>pwd</code>. The first shell's working directory is gone.
+</p>
+
+<p>Three ways to make lines share state:</p>
+
+<h4>1 · Chain with <code>&amp;&amp;</code> / <code>;</code></h4>
+<div class="code" data-lang="make">
+<pre><code>test:
+	cd /tmp &amp;&amp; pwd</code></pre>
+</div>
+<p>Standard shell. The <em>entire line</em> — including the continuation — runs as one shell invocation.</p>
+
+<h4>2 · Line continuation with <code>\</code></h4>
+<div class="code" data-lang="make">
+<pre><code>test:
+	cd /tmp &amp;&amp; \
+	pwd</code></pre>
+</div>
+<p>Make joins backslash-newline and sends the whole thing to one shell.</p>
+
+<h4>3 · <code>.ONESHELL:</code></h4>
+<div class="code" data-lang="make">
+<pre><code>.ONESHELL:
+test:
+	cd /tmp
+	pwd                 # now prints /tmp</code></pre>
+</div>
+<p>
+  With <code>.ONESHELL:</code> at the top of the Makefile, every recipe
+  runs as a single shell invocation. Set it once and forget. The catch:
+  error handling changes subtly (more below).
+</p>
+
+<div class="callout hood">
+<div class="callout-title">Which shell does Make use?</div>
+<p>
+  Make invokes <code>$(SHELL) -c 'the line'</code> for each recipe
+  line. The default for <code>SHELL</code> is <code>/bin/sh</code> on
+  Unix. You can override it:
+</p>
+<div class="code" data-lang="make">
+<pre><code>SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c</code></pre>
+</div>
+<p>
+  The two lines above switch to <code>bash</code> with strict mode
+  (<code>-e</code> exit on error, <code>-u</code> error on undefined
+  vars, <code>-o pipefail</code> propagate pipe errors). For any
+  non-trivial Makefile, these are wise defaults. We'll cover
+  <code>SHELL</code> vs <code>.SHELLFLAGS</code> more in Chapter 11.
+</p>
+</div>
+
+<h2 id="error-handling">Error handling per line</h2>
+
+<p>
+  If a recipe line exits non-zero, Make prints an error and stops.
+  <strong>Under <code>.ONESHELL:</code></strong> there's a subtlety:
+  without <code>set -e</code>, the whole recipe only fails if the
+  <em>last</em> command fails. The safer incantation:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>.ONESHELL:
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c</code></pre>
+</div>
+
+<p>A single <code>-</code> prefix ignores failure for that line:</p>
+<div class="code" data-lang="make">
+<pre><code>clean:
+	-rm -f *.o *.bak
+	-rmdir build</code></pre>
+</div>
+
+<p>A single <code>@</code> prefix silences the echo (we saw this in Chapter 2):</p>
+<div class="code" data-lang="make">
+<pre><code>hello:
+	@echo "  CC   hello.c"
+	cc hello.c -o hello</code></pre>
+</div>
+
+<p>A single <code>+</code> prefix says "run this even in a dry run (<code>-n</code>)":</p>
+<div class="code" data-lang="make">
+<pre><code>test:
+	+$(MAKE) -C subdir       # always run MAKE, even with -n, for jobserver reasons</code></pre>
+</div>
+
+<p>You can combine the three prefixes in any order:</p>
+<div class="code" data-lang="make">
+<pre><code>clean:
+	-@rm -f *.o    # silence echo AND ignore errors</code></pre>
+</div>
+
+<h2 id="phony">Phony targets</h2>
+
+<p>
+  <code>clean</code> and <code>all</code> aren't files. They're
+  <em>names for actions</em>. What happens if you accidentally create a
+  file called <code>clean</code>?
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ touch clean
+$ make clean
+make: 'clean' is up to date.</code></pre>
+</div>
+
+<p>
+  Make sees the file <code>clean</code>, has no prerequisites to check,
+  concludes it's already built, refuses to run the recipe. Disaster.
+</p>
+
+<p>The fix:</p>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: clean
+clean:
+	rm -f hello main.o greet.o</code></pre>
+</div>
+
+<p>
+  <code>.PHONY</code> is a special target that says "these targets are
+  phony — don't look for files with these names, always run the
+  recipe". It's a declaration. You can list as many as you like:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>.PHONY: all clean test install release</code></pre>
+</div>
+
+<p>
+  We'll cover <code>.PHONY</code> in depth in Chapter 7. For now,
+  <strong>mark every action-target as phony</strong>. Always. No
+  exceptions.
+</p>
+
+<h2 id="prerequisite-order">Prerequisite order and parallelism</h2>
+
+<p>
+  Prerequisites are <em>unordered</em>. When Make processes a rule, it
+  visits prerequisites in the order listed — but with <code>-j</code>,
+  it will happily run independent prerequisites in parallel. Your
+  Makefile must not depend on prerequisite A finishing before
+  prerequisite B unless B explicitly lists A as <em>its own</em>
+  prerequisite.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>all: a b c   # a, b, c may all run simultaneously with -j
+
+a: ; echo a &amp;&amp; sleep 1 &amp;&amp; date
+b: ; echo b &amp;&amp; sleep 1 &amp;&amp; date
+c: ; echo c &amp;&amp; sleep 1 &amp;&amp; date</code></pre>
+</div>
+
+<p>
+  If you <em>need</em> ordering (say, <code>b</code> must run after
+  <code>a</code>), encode it in the graph:
+</p>
+<div class="code" data-lang="make">
+<pre><code>all: c
+c: b
+b: a</code></pre>
+</div>
+
+<p>
+  There's also a halfway house called <strong>order-only prerequisites</strong>
+  — we'll meet them in Chapter 7. They say "this must be built first if
+  it doesn't exist, but its mtime shouldn't trigger my rebuild".
+</p>
+
+<h2 id="multi-rules">Multiple rules for the same target</h2>
+
+<p>
+  You can define more than one rule for the same target. Make will
+  <strong>merge the prerequisites</strong> but <strong>only one rule can
+  have a recipe</strong>:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code># In Makefile:
+hello: main.o
+
+# In Makefile.extras (include'd later):
+hello: greet.o</code></pre>
+</div>
+
+<p>
+  Net effect: <code>hello</code> depends on both <code>main.o</code>
+  and <code>greet.o</code>. This is the standard way to <em>add</em>
+  dependencies to a target without rewriting the recipe — common when
+  auto-generated dependency files get pulled in via <code>include</code>.
+</p>
+
+<p>If you give two recipes for the same target, Make warns and uses the second:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+Makefile:2: warning: overriding recipe for target 'hello'
+Makefile:1: warning: ignoring old recipe for target 'hello'</code></pre>
+</div>
+
+<p>
+  There is a feature called <strong>double-colon rules</strong> that
+  <em>does</em> allow multiple independent recipes — one for each rule.
+  We cover it in Chapter 7. Short version: you rarely need it.
+</p>
+
+<h2 id="shell-vs-make">Shell syntax vs Make syntax — don't confuse them</h2>
+
+<p>
+  Make has its own syntax for everything <em>outside</em> recipes
+  (target/prerequisite lines, variable assignments, functions,
+  directives). Recipes, by contrast, are passed verbatim to the shell.
+  This trips people up constantly:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>MSG = hello             # Make assignment, Make's $MSG
+
+greet:
+	MSG="world"         # shell assignment — ends when the shell exits
+	echo $(MSG)         # Make's $MSG → "hello"  (expanded before shell sees it)
+	echo $$MSG          # shell's $MSG → ""       (different shell, empty)</code></pre>
+</div>
+
+<p>Run this and look at the output:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make greet
+MSG="world"
+echo hello
+hello
+echo $MSG
+
+</code></pre>
+</div>
+
+<p>
+  Read that carefully. Key facts:
+</p>
+<ul>
+  <li><code>$(MSG)</code> is <strong>Make's</strong> syntax for expanding a variable. It's expanded by Make <em>before</em> the recipe line is handed to the shell.</li>
+  <li>A literal <code>$</code> in a recipe must be written <code>$$</code>. That produces a single <code>$</code> in the shell.</li>
+  <li>The shell variable <code>MSG</code> set on line 1 exists only until that shell exits — and it exits at the end of that line, because each line is its own shell.</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">The <code>$$</code> rule</div>
+<p>
+  If you want the shell to see <code>$foo</code>, write <code>$$foo</code>
+  in the Makefile. Every single <code>$</code> that you want the shell
+  to see must be doubled. This bites everyone at least once.
+</p>
+</div>
+
+<h2 id="all-prefixes">Summary of line prefixes</h2>
+<table>
+<thead><tr><th>Prefix</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>@</code></td><td>Don't echo this line before running it.</td></tr>
+<tr><td><code>-</code></td><td>Ignore non-zero exit status; don't stop the build.</td></tr>
+<tr><td><code>+</code></td><td>Run this line even under <code>-n</code> / <code>-q</code> / <code>-t</code>. Used for recursive <code>$(MAKE)</code>.</td></tr>
+</tbody>
+</table>
+<p>They combine in any order: <code>@-rm -f foo</code>, <code>-@rm -f foo</code>, etc.</p>
+
+<h2 id="hands-on">Hands-on: subshells vs .ONESHELL</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · subshells in action</div>
+<div class="hands-on-body">
+<p>Create a new directory and this Makefile:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>.PHONY: subshells oneshell
+
+subshells:
+	@echo "--- default: one shell per line ---"
+	X=1
+	echo "X is $$X"
+
+oneshell:
+	@echo "--- .ONESHELL not set yet ---"
+	Y=1
+	echo "Y is $$Y"</code></pre>
+</div>
+<p>Run:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make subshells
+--- default: one shell per line ---
+X=1
+echo "X is $X"
+X is
+
+$ make oneshell
+--- .ONESHELL not set yet ---
+Y=1
+echo "Y is $Y"
+Y is
+</code></pre>
+</div>
+<p>Now add <code>.ONESHELL:</code> to the top of the Makefile:</p>
+<div class="code" data-lang="make">
+<pre><code>.ONESHELL:
+.PHONY: subshells oneshell
+# … rest unchanged</code></pre>
+</div>
+<p>Re-run:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make oneshell
+--- .ONESHELL not set yet ---
+Y=1
+echo "Y is $Y"
+Y is 1</code></pre>
+</div>
+<p>
+  With <code>.ONESHELL:</code>, the recipe is handed to one shell, so
+  the <code>Y=1</code> persists to the next line. Subshells behaviour
+  changed <em>globally</em> — that's the cost.
+</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Identify the parts</span>
+</div>
+<div class="exercise-body">
+<p>
+  For each of the following rules, name the target, prerequisites,
+  and recipe:
+</p>
+<div class="code" data-lang="make">
+<pre><code>(a) all: hello docs
+(b) hello.o: hello.c hello.h
+	cc -c hello.c -o hello.o
+(c) docs:
+	pandoc README.md -o docs.pdf
+(d) $(OBJ): $(HEADERS)</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li>Target: <code>all</code>. Prereqs: <code>hello</code>, <code>docs</code>. Recipe: none (an aggregator rule).</li>
+<li>Target: <code>hello.o</code>. Prereqs: <code>hello.c</code>, <code>hello.h</code>. Recipe: the <code>cc</code> command.</li>
+<li>Target: <code>docs</code>. Prereqs: none. Recipe: the <code>pandoc</code> command.</li>
+<li>Targets: every file listed in the variable <code>OBJ</code> (there can be many). Prereqs: every file listed in <code>HEADERS</code>. Recipe: none. This is the pattern "all object files depend on all headers" — crude but common. A better solution using auto-dep generation comes in Chapter 9.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">The subshell trap</span>
+</div>
+<div class="exercise-body">
+<p>
+  A colleague writes this Makefile:
+</p>
+<div class="code" data-lang="make">
+<pre><code>deploy:
+	source env.sh
+	scp $$TARGET deploy@host:/var/www</code></pre>
+</div>
+<p>
+  They complain that <code>$TARGET</code> is never set, even though
+  <code>env.sh</code> definitely exports it. What's wrong and how do
+  you fix it?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Each recipe line runs in its own shell. <code>source env.sh</code>
+  sets <code>TARGET</code> in a shell that immediately exits. The
+  <code>scp</code> line runs in a new shell with no <code>TARGET</code>
+  defined.
+</p>
+<p>Three fixes, in order of preference:</p>
+<div class="code" data-lang="make">
+<pre><code># (1) one line
+deploy:
+	source env.sh &amp;&amp; scp $$TARGET deploy@host:/var/www
+
+# (2) line continuation
+deploy:
+	source env.sh &amp;&amp; \
+	scp $$TARGET deploy@host:/var/www
+
+# (3) .ONESHELL (global)
+.ONESHELL:
+deploy:
+	source env.sh
+	scp $$TARGET deploy@host:/var/www</code></pre>
+</div>
+<p>
+  Option 1 or 2 is what I'd use — it's explicit and local. Option 3
+  changes the behaviour of the <em>whole Makefile</em> and isn't always
+  desirable.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">$ vs $$</span>
+</div>
+<div class="exercise-body">
+<p>Predict the output of each recipe. Then run it and check.</p>
+<div class="code" data-lang="make">
+<pre><code>NAME = raghu
+
+a:
+	echo hello $(NAME)
+
+b:
+	echo hello $NAME
+
+c:
+	echo hello $$NAME
+
+d:
+	NAME=world; echo hello $$NAME</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<table>
+<tr><th>Rule</th><th>Echoed</th><th>Why</th></tr>
+<tr><td><code>a</code></td><td><code>hello raghu</code></td><td>Make expands <code>$(NAME)</code> before the shell runs.</td></tr>
+<tr><td><code>b</code></td><td><code>hello AME</code></td><td>Make sees <code>$N</code> (a Make variable), expands it to empty, leaves <code>AME</code>. Classic mistake.</td></tr>
+<tr><td><code>c</code></td><td><code>hello</code> followed by a newline</td><td><code>$$</code> becomes a single <code>$</code>, so the shell sees <code>$NAME</code>. In a fresh shell, <code>$NAME</code> is empty.</td></tr>
+<tr><td><code>d</code></td><td><code>hello world</code></td><td>The shell's <code>NAME=world</code> assignment takes effect within the same shell command, so <code>$NAME</code> expands to <code>world</code>.</td></tr>
+</table>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.4</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Quiet and ignore-error</span>
+</div>
+<div class="exercise-body">
+<p>
+  Write a <code>clean</code> target that silently removes
+  <code>*.o</code>, <code>*.bak</code>, and a directory called
+  <code>build/</code>, without failing if any of those don't exist.
+  Don't use <code>rm -f</code>.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>.PHONY: clean
+clean:
+	-@rm *.o 2&gt;/dev/null
+	-@rm *.bak 2&gt;/dev/null
+	-@rmdir build 2&gt;/dev/null</code></pre>
+</div>
+<p>
+  The <code>-</code> prefix ignores failure, the <code>@</code>
+  suppresses the echo, and <code>2&gt;/dev/null</code> hides the "No
+  such file" stderr. That said: in real life, use <code>rm -rf</code>.
+  It's cleaner. This exercise is about understanding the prefixes.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Write it with strict bash</span>
+</div>
+<div class="exercise-body">
+<p>
+  Create a Makefile that uses <code>.ONESHELL:</code> plus
+  bash's strict mode (<code>-eu -o pipefail</code>). Write a single
+  target <code>check</code> whose recipe:
+</p>
+<ol>
+  <li>Sets a variable <code>FILES</code> to <code>*.c</code>.</li>
+  <li>Iterates with <code>for f in $FILES; do ...</code>.</li>
+  <li>Prints each filename and its line count.</li>
+</ol>
+<p>
+  The whole recipe should abort if any single step fails.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.ONESHELL:
+
+.PHONY: check
+check:
+	FILES=*.c
+	for f in $$FILES; do
+	    echo "$$f:"
+	    wc -l &lt; "$$f"
+	done</code></pre>
+</div>
+<p>
+  Note: even with <code>.ONESHELL:</code>, you still need <code>$$</code>
+  for shell variables — because Make still parses the recipe and
+  expands <code>$(...)</code> references before handing it to the
+  shell. <code>$$FILES</code> becomes <code>$FILES</code> for bash.
+</p>
+<p>
+  If you have no <code>.c</code> files, the glob won't expand and the
+  <code>for</code> loop sees the literal string <code>*.c</code>. The
+  <code>wc</code> on <code>*.c</code> will fail, and because of
+  <code>set -e</code>, the recipe aborts. Good.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.6</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">When does it run?</span>
+</div>
+<div class="exercise-body">
+<p>Given:</p>
+<div class="code" data-lang="make">
+<pre><code>all: a b
+
+a:
+	@echo "running a"
+
+b:
+	@echo "running b"
+
+a: c
+
+c:
+	@echo "running c"</code></pre>
+</div>
+<p>
+  What does <code>make all</code> print? Note: there are two rules for
+  <code>a</code>.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  First, Make merges the two rules for <code>a</code>: now <code>a</code>
+  depends on <code>c</code>, and has the recipe from the first rule.
+  The graph is <code>all → {a, b}; a → c</code>. Walking from
+  <code>all</code>:
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make all
+running c
+running a
+running b</code></pre>
+</div>
+<p>
+  <code>a</code> is processed first, so <code>c</code> runs, then
+  <code>a</code>, then <code>b</code>. In parallel mode, <code>b</code>
+  might start before <code>c</code> finishes — try it with
+  <code>-j 2</code> and see.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.7</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Override the shell per-target</span>
+</div>
+<div class="exercise-body">
+<p>
+  You want most of your Makefile to use <code>sh</code> (fast, portable),
+  but a specific target <code>report</code> needs <code>bash</code> because
+  it uses arrays. Without changing the global <code>SHELL</code>, make
+  <code>report</code>'s recipe run under bash.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Target-specific variables:</p>
+<div class="code" data-lang="make">
+<pre><code>report: SHELL := /bin/bash
+report: .SHELLFLAGS := -eu -o pipefail -c
+report:
+	arr=(one two three)
+	printf '%s\n' "$${arr[@]}"</code></pre>
+</div>
+<p>
+  The first two lines set <code>SHELL</code> and <code>.SHELLFLAGS</code>
+  <em>only</em> when Make is executing the <code>report</code> target's
+  recipe. All other targets see the global defaults. Target-specific
+  variables are covered more in Chapter 4.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>A rule is <em>target : prerequisites</em> + tab-indented recipe lines.</li>
+  <li>Each recipe line runs in its own shell unless you chain with <code>&amp;&amp;</code>, continue with <code>\</code>, or set <code>.ONESHELL:</code>.</li>
+  <li>The default shell is <code>/bin/sh</code>. Override globally with <code>SHELL := /bin/bash</code>, adjust flags with <code>.SHELLFLAGS</code>.</li>
+  <li>Line prefixes: <code>@</code> (silent), <code>-</code> (ignore errors), <code>+</code> (always run).</li>
+  <li>Two rules for the same target merge prerequisites; only one rule can carry the recipe.</li>
+  <li><code>$</code> in a recipe must be doubled as <code>$$</code> to reach the shell.</li>
+  <li>Action-targets (clean, all, test) should be declared <code>.PHONY</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="02-hello-make.html"><span class="lbl">← Prev</span><span class="ttl">Hello, Make</span></a>
+  <a href="04-variables.html" class="next"><span class="lbl">Next →</span><span class="ttl">Variables — All Six Flavors</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

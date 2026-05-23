@@ -3,7 +3,7 @@
  * Problem: Split Linked List by Odd and Even Indices
  * ============================================================================
  * Difficulty: Easy-Medium
- * Source: NextHop.AI Interview Guidelines
+ * Source: Interview practice guidelines
  * Time: 20-30 minutes
  * 
  * DESCRIPTION:

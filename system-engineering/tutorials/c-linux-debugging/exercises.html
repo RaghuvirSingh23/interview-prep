@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>All Exercises — C · Linux · Debugging</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="chapters/01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="chapters/02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="chapters/03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="chapters/04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="chapters/05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="chapters/06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="chapters/07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="chapters/08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="chapters/09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="chapters/10-gdb.html">GDB deep dive</a></li>
+      <li><a href="chapters/11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="chapters/12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="chapters/13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="chapters/14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="exercises.html">All Exercises</a>
+      <a href="index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Index</span>
+  All Exercises
+</h1>
+<p class="lede">
+  Every exercise across the tutorial, indexed by chapter and difficulty.
+  Use this as a checklist. Reading exercises teaches nothing &mdash; you
+  need to actually compile, run, break, and fix the code on a real
+  Linux box.
+</p>
+
+<h2 id="chapter-1">Chapter 1 — C, the working subset</h2>
+<ul>
+  <li><a href="chapters/01-c-refresher.html#exercises">EX 1.1</a> <span class="exercise-diff easy">easy</span> — Predict the output</li>
+  <li><a href="chapters/01-c-refresher.html#exercises">EX 1.2</a> <span class="exercise-diff easy">easy</span> — Read these declarations</li>
+  <li><a href="chapters/01-c-refresher.html#exercises">EX 1.3</a> <span class="exercise-diff medium">medium</span> — strncpy without NUL</li>
+  <li><a href="chapters/01-c-refresher.html#exercises">EX 1.4</a> <span class="exercise-diff medium">medium</span> — Container-of in action</li>
+  <li><a href="chapters/01-c-refresher.html#exercises">EX 1.5</a> <span class="exercise-diff hard">hard</span> — Find the leak / UB</li>
+</ul>
+
+<h2 id="chapter-2">Chapter 2 — C++, the modern subset</h2>
+<ul>
+  <li><a href="chapters/02-cpp-refresher.html#exercises">EX 2.1</a> <span class="exercise-diff easy">easy</span> — Smart-pointer choice</li>
+  <li><a href="chapters/02-cpp-refresher.html#exercises">EX 2.2</a> <span class="exercise-diff medium">medium</span> — Spot the dangling reference</li>
+  <li><a href="chapters/02-cpp-refresher.html#exercises">EX 2.3</a> <span class="exercise-diff medium">medium</span> — Why move?</li>
+  <li><a href="chapters/02-cpp-refresher.html#exercises">EX 2.4</a> <span class="exercise-diff hard">hard</span> — Rule of five from scratch</li>
+</ul>
+
+<h2 id="chapter-3">Chapter 3 — Memory model &amp; UB</h2>
+<ul>
+  <li><a href="chapters/03-memory-and-ub.html#exercises">EX 3.1</a> <span class="exercise-diff easy">easy</span> — UB census</li>
+  <li><a href="chapters/03-memory-and-ub.html#exercises">EX 3.2</a> <span class="exercise-diff easy">easy</span> — memcpy or punning?</li>
+  <li><a href="chapters/03-memory-and-ub.html#exercises">EX 3.3</a> <span class="exercise-diff medium">medium</span> — Optimisation removes my check</li>
+  <li><a href="chapters/03-memory-and-ub.html#exercises">EX 3.4</a> <span class="exercise-diff hard">hard</span> — Iterator invalidation</li>
+  <li><a href="chapters/03-memory-and-ub.html#exercises">EX 3.5</a> <span class="exercise-diff hard">hard</span> — Why is signed-overflow UB but unsigned isn't?</li>
+</ul>
+
+<h2 id="chapter-4">Chapter 4 — Build &amp; link</h2>
+<ul>
+  <li><a href="chapters/04-build-and-link.html#exercises">EX 4.1</a> <span class="exercise-diff easy">easy</span> — Diagnose a link error</li>
+  <li><a href="chapters/04-build-and-link.html#exercises">EX 4.2</a> <span class="exercise-diff medium">medium</span> — Why static</li>
+  <li><a href="chapters/04-build-and-link.html#exercises">EX 4.3</a> <span class="exercise-diff medium">medium</span> — Use <code>nm</code> to find a missing symbol</li>
+  <li><a href="chapters/04-build-and-link.html#exercises">EX 4.4</a> <span class="exercise-diff hard">hard</span> — C++ symbols look different</li>
+  <li><a href="chapters/04-build-and-link.html#exercises">EX 4.5</a> <span class="exercise-diff hard">hard</span> — RPATH detective</li>
+</ul>
+
+<h2 id="chapter-5">Chapter 5 — Linux process model</h2>
+<ul>
+  <li><a href="chapters/05-linux-process-model.html#exercises">EX 5.1</a> <span class="exercise-diff easy">easy</span> — Why _exit after exec?</li>
+  <li><a href="chapters/05-linux-process-model.html#exercises">EX 5.2</a> <span class="exercise-diff medium">medium</span> — Process is stuck — what now?</li>
+  <li><a href="chapters/05-linux-process-model.html#exercises">EX 5.3</a> <span class="exercise-diff medium">medium</span> — SIGPIPE in a server</li>
+  <li><a href="chapters/05-linux-process-model.html#exercises">EX 5.4</a> <span class="exercise-diff hard">hard</span> — Child zombie hunt</li>
+  <li><a href="chapters/05-linux-process-model.html#exercises">EX 5.5</a> <span class="exercise-diff hard">hard</span> — FD leak across exec</li>
+</ul>
+
+<h2 id="chapter-6">Chapter 6 — Files &amp; I/O</h2>
+<ul>
+  <li><a href="chapters/06-files-and-io.html#exercises">EX 6.1</a> <span class="exercise-diff easy">easy</span> — Short reads</li>
+  <li><a href="chapters/06-files-and-io.html#exercises">EX 6.2</a> <span class="exercise-diff medium">medium</span> — Why fsync the parent directory?</li>
+  <li><a href="chapters/06-files-and-io.html#exercises">EX 6.3</a> <span class="exercise-diff medium">medium</span> — mmap or read?</li>
+  <li><a href="chapters/06-files-and-io.html#exercises">EX 6.4</a> <span class="exercise-diff hard">hard</span> — Concurrent writers</li>
+  <li><a href="chapters/06-files-and-io.html#exercises">EX 6.5</a> <span class="exercise-diff hard">hard</span> — Find a leak with /proc/PID/fd</li>
+</ul>
+
+<h2 id="chapter-7">Chapter 7 — Threads &amp; concurrency</h2>
+<ul>
+  <li><a href="chapters/07-threads-and-concurrency.html#exercises">EX 7.1</a> <span class="exercise-diff easy">easy</span> — Why isn't volatile enough?</li>
+  <li><a href="chapters/07-threads-and-concurrency.html#exercises">EX 7.2</a> <span class="exercise-diff medium">medium</span> — Spurious wakeup</li>
+  <li><a href="chapters/07-threads-and-concurrency.html#exercises">EX 7.3</a> <span class="exercise-diff medium">medium</span> — Memory order for a flag</li>
+  <li><a href="chapters/07-threads-and-concurrency.html#exercises">EX 7.4</a> <span class="exercise-diff hard">hard</span> — Deadlock-free multi-mutex</li>
+  <li><a href="chapters/07-threads-and-concurrency.html#exercises">EX 7.5</a> <span class="exercise-diff hard">hard</span> — False sharing benchmark</li>
+</ul>
+
+<h2 id="chapter-8">Chapter 8 — IPC &amp; sockets</h2>
+<ul>
+  <li><a href="chapters/08-ipc-and-sockets.html#exercises">EX 8.1</a> <span class="exercise-diff easy">easy</span> — TCP framing</li>
+  <li><a href="chapters/08-ipc-and-sockets.html#exercises">EX 8.2</a> <span class="exercise-diff medium">medium</span> — SO_REUSEADDR vs SO_REUSEPORT</li>
+  <li><a href="chapters/08-ipc-and-sockets.html#exercises">EX 8.3</a> <span class="exercise-diff medium">medium</span> — Pick the IPC</li>
+  <li><a href="chapters/08-ipc-and-sockets.html#exercises">EX 8.4</a> <span class="exercise-diff hard">hard</span> — Authenticate over Unix socket</li>
+  <li><a href="chapters/08-ipc-and-sockets.html#exercises">EX 8.5</a> <span class="exercise-diff hard">hard</span> — Mystery latency</li>
+</ul>
+
+<h2 id="chapter-9">Chapter 9 — Performance &amp; observability</h2>
+<ul>
+  <li><a href="chapters/09-perf-and-observability.html#exercises">EX 9.1</a> <span class="exercise-diff easy">easy</span> — Read time output</li>
+  <li><a href="chapters/09-perf-and-observability.html#exercises">EX 9.2</a> <span class="exercise-diff medium">medium</span> — Low IPC, what's wrong?</li>
+  <li><a href="chapters/09-perf-and-observability.html#exercises">EX 9.3</a> <span class="exercise-diff medium">medium</span> — Why my benchmark lies</li>
+  <li><a href="chapters/09-perf-and-observability.html#exercises">EX 9.4</a> <span class="exercise-diff hard">hard</span> — Off-CPU mystery</li>
+  <li><a href="chapters/09-perf-and-observability.html#exercises">EX 9.5</a> <span class="exercise-diff hard">hard</span> — Histograms over time</li>
+</ul>
+
+<h2 id="chapter-10">Chapter 10 — GDB deep dive</h2>
+<ul>
+  <li><a href="chapters/10-gdb.html#exercises">EX 10.1</a> <span class="exercise-diff easy">easy</span> — Conditional breakpoint</li>
+  <li><a href="chapters/10-gdb.html#exercises">EX 10.2</a> <span class="exercise-diff medium">medium</span> — Deadlock diagnostic</li>
+  <li><a href="chapters/10-gdb.html#exercises">EX 10.3</a> <span class="exercise-diff medium">medium</span> — Catch exception origin</li>
+  <li><a href="chapters/10-gdb.html#exercises">EX 10.4</a> <span class="exercise-diff hard">hard</span> — Core dump from production</li>
+  <li><a href="chapters/10-gdb.html#exercises">EX 10.5</a> <span class="exercise-diff hard">hard</span> — Custom GDB command</li>
+</ul>
+
+<h2 id="chapter-11">Chapter 11 — Sanitizers &amp; static analysis</h2>
+<ul>
+  <li><a href="chapters/11-sanitizers.html#exercises">EX 11.1</a> <span class="exercise-diff easy">easy</span> — Pick the sanitizer</li>
+  <li><a href="chapters/11-sanitizers.html#exercises">EX 11.2</a> <span class="exercise-diff medium">medium</span> — ASan slowdown</li>
+  <li><a href="chapters/11-sanitizers.html#exercises">EX 11.3</a> <span class="exercise-diff medium">medium</span> — Why both ASan and UBSan in CI?</li>
+  <li><a href="chapters/11-sanitizers.html#exercises">EX 11.4</a> <span class="exercise-diff hard">hard</span> — Fix flake with TSan</li>
+  <li><a href="chapters/11-sanitizers.html#exercises">EX 11.5</a> <span class="exercise-diff hard">hard</span> — Suppress a known false positive</li>
+</ul>
+
+<h2 id="chapter-12">Chapter 12 — Kernel-adjacent debug</h2>
+<ul>
+  <li><a href="chapters/12-kernel-adjacent.html#exercises">EX 12.1</a> <span class="exercise-diff easy">easy</span> — Read an oops</li>
+  <li><a href="chapters/12-kernel-adjacent.html#exercises">EX 12.2</a> <span class="exercise-diff medium">medium</span> — Why D-state?</li>
+  <li><a href="chapters/12-kernel-adjacent.html#exercises">EX 12.3</a> <span class="exercise-diff medium">medium</span> — OOM killed without warning</li>
+  <li><a href="chapters/12-kernel-adjacent.html#exercises">EX 12.4</a> <span class="exercise-diff hard">hard</span> — Embedded breakpoint limit</li>
+  <li><a href="chapters/12-kernel-adjacent.html#exercises">EX 12.5</a> <span class="exercise-diff hard">hard</span> — Latency hidden in the kernel</li>
+</ul>
+
+<h2 id="chapter-14">Chapter 14 — Capstone</h2>
+<ul>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.1</a> <span class="exercise-diff medium">medium</span> — Add a regression test</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.2</a> <span class="exercise-diff hard">hard</span> — Convert to a single-thread epoll design</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.3</a> <span class="exercise-diff hard">hard</span> — Make it survive a kill -9 mid-write</li>
+  <li><a href="chapters/14-capstone.html#exercises">EX 14.4</a> <span class="exercise-diff medium">medium</span> — Wire it into CI under three sanitizer matrices</li>
+</ul>
+
+<hr>
+
+<p style="text-align: center; color: var(--text-faint); font-family: var(--mono); font-size: 14px;">
+  58 exercises · 50 questions · 14 chapters
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

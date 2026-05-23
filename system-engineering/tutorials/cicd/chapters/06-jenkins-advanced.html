@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>6 · Jenkins — Advanced — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 06</span>
+  Jenkins — Advanced
+</h1>
+<p class="lede">
+  Shared Libraries (how to extract reusable pipeline logic), JCasC
+  (configure-as-code), Kubernetes-backed agents, credentials
+  management, and how to keep Jenkins running without becoming a
+  full-time admin. This is the chapter that turns you from
+  "writes Jenkinsfiles" into "manages Jenkins".
+</p>
+
+<h2 id="shared-lib">Shared libraries</h2>
+
+<p>
+  When every project's Jenkinsfile has the same five stages, you need
+  a way to factor them out. <strong>Shared libraries</strong> are
+  Jenkins' answer: Groovy code stored in a git repo, loaded into
+  every pipeline that needs it.
+</p>
+
+<h4>Anatomy of a shared library repo</h4>
+
+<div class="code" data-lang="text">
+<pre><code>my-shared-lib/
+├── vars/               # global variables & steps; one file per entry
+│   ├── buildDocker.groovy
+│   └── deployK8s.groovy
+├── src/                # regular Groovy classes (package-based)
+│   └── com/example/
+│       └── BuildInfo.groovy
+└── resources/          # files you can loadResource()
+    └── templates/
+        └── prod-values.yaml</code></pre>
+</div>
+
+<p><code>vars/buildDocker.groovy</code>:</p>
+<div class="code" data-lang="groovy">
+<pre><code>// Any file in vars/ becomes a global step with the filename (minus .groovy).
+// Here we define a step callable as `buildDocker(image: 'x', tag: 'y')`.
+
+def call(Map args) {
+    def image = args.image ?: error('buildDocker: image is required')
+    def tag   = args.tag   ?: env.BUILD_NUMBER
+    sh "docker build -t ${image}:${tag} ${args.context ?: '.'}"
+    return "${image}:${tag}"
+}</code></pre>
+</div>
+
+<p>Configure Jenkins: <strong>Manage Jenkins → System → Global Pipeline Libraries → Add</strong>. Give it a name (<code>my-shared-lib</code>) and point at the git repo.</p>
+
+<p>Then use it in any Jenkinsfile:</p>
+<div class="code" data-lang="groovy">
+<pre><code>@Library('my-shared-lib') _
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                script {
+                    def ref = buildDocker image: 'registry/myapp', tag: env.BUILD_NUMBER
+                    echo "Built ${ref}"
+                }
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>
+  The underscore <code>_</code> imports everything in
+  <code>vars/</code>. Now every project that opts in can call
+  <code>buildDocker(…)</code>. When you fix a bug in the library, all
+  consumers benefit instantly — a two-edged sword; test library
+  changes in a staging pipeline first.
+</p>
+
+<div class="callout tip">
+<div class="callout-title">Pinning library versions</div>
+<p>
+  Live-at-HEAD libraries are risky. Pin to a tag or commit per
+  consumer:
+</p>
+<div class="code" data-lang="groovy">
+<pre><code>@Library('my-shared-lib@v1.4.0') _
+@Library('my-shared-lib@4f3c9a1') _   // specific commit</code></pre>
+</div>
+</div>
+
+<h4>Custom steps with Declarative DSL</h4>
+
+<p>Shared libraries can also define entire pipelines as reusable DSL:</p>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">vars/standardPipeline.groovy</span></div>
+<pre><code>def call(Map args) {
+    pipeline {
+        agent any
+        stages {
+            stage('Build') { steps { sh args.buildCmd ?: 'make' } }
+            stage('Test')  { steps { sh args.testCmd  ?: 'make test' } }
+            stage('Deploy') {
+                when { branch 'main' }
+                steps { sh args.deployCmd ?: 'make deploy' }
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>Consumer's <code>Jenkinsfile</code>:</p>
+<div class="code" data-lang="groovy">
+<pre><code>@Library('my-shared-lib') _
+standardPipeline(testCmd: 'pytest', buildCmd: 'python -m build')</code></pre>
+</div>
+
+<p>Three-line Jenkinsfile. Scales to 100 projects with consistent behaviour.</p>
+
+<h2 id="cps">The CPS transformation — Groovy's asterisk</h2>
+
+<p>
+  Jenkins runs pipeline Groovy under a <strong>Continuation-Passing
+  Style</strong> transformation. This lets Jenkins pause a running
+  pipeline (across restarts, waiting on <code>input</code>) and resume
+  it later with the same state.
+</p>
+
+<p>The catch: not all Groovy code survives the CPS rewrite. Problem spots:</p>
+<ul>
+  <li><strong>Closures with side-effectful iteration.</strong> <code>list.each { doSomething(it) }</code> can misbehave; prefer <code>for (item in list) doSomething(item)</code>.</li>
+  <li><strong>Complex Groovy idioms</strong> (method references, some delegation patterns).</li>
+  <li><strong>Calls into non-CPS code</strong> are allowed but your code is not resumable through them.</li>
+</ul>
+
+<p>If you must run a chunk of non-CPS Groovy, annotate:</p>
+<div class="code" data-lang="groovy">
+<pre><code>// In shared library code:
+@NonCPS
+def parseJson(String text) {
+    // Safe to use complex Groovy here; but the pipeline can't pause inside it.
+    new groovy.json.JsonSlurper().parseText(text)
+}</code></pre>
+</div>
+
+<p>Rule of thumb: keep Pipeline code simple. Push complex Groovy into <code>@NonCPS</code> methods in shared libraries.</p>
+
+<h2 id="credentials-deep">Credentials, properly</h2>
+
+<p>Credentials have a <em>scope</em>:</p>
+<ul>
+  <li><strong>Global</strong> — any job can use them.</li>
+  <li><strong>System</strong> — only Jenkins itself (not pipelines) can use them.</li>
+  <li><strong>Folder-scoped</strong> — only jobs in a folder can use them.</li>
+  <li><strong>User-scoped</strong> — personal credentials for a single user.</li>
+</ul>
+
+<p>Rule: use folder scope to isolate production from development. If a dev job shouldn't access prod credentials, put them in different folders.</p>
+
+<p>Two injection patterns for pipelines:</p>
+
+<h4>Via <code>environment { credentials('id') }</code></h4>
+<div class="code" data-lang="groovy">
+<pre><code>environment {
+    AWS_CREDS = credentials('aws-prod')      // username/password type
+}
+// In shell: $AWS_CREDS_USR and $AWS_CREDS_PSW are available
+// For secret-text: $AWS_CREDS alone holds the value</code></pre>
+</div>
+
+<h4>Via <code>withCredentials([...])</code></h4>
+<div class="code" data-lang="groovy">
+<pre><code>withCredentials([
+    string(credentialsId: 'slack-webhook', variable: 'SLACK_HOOK'),
+    usernamePassword(credentialsId: 'registry', usernameVariable: 'U', passwordVariable: 'P'),
+    sshUserPrivateKey(credentialsId: 'deploy-key', keyFileVariable: 'SSH_KEY')
+]) {
+    sh '''
+        ssh -i "$SSH_KEY" deploy@server 'cd /app &amp;&amp; git pull'
+        echo "$P" | docker login registry.example.com -u "$U" --password-stdin
+    '''
+}</code></pre>
+</div>
+
+<p><code>withCredentials</code> scopes exposure to the block only — safer than environment bindings that span the entire pipeline.</p>
+
+<h2 id="k8s-agents">Kubernetes agents</h2>
+
+<p>
+  The modern default for serious Jenkins: every build gets a fresh
+  Kubernetes pod. Install the Kubernetes plugin; configure Jenkins
+  (Manage Jenkins → Clouds → New Cloud → Kubernetes) with your
+  cluster's credentials and namespace.
+</p>
+
+<p>Then in a pipeline:</p>
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  containers:
+                    - name: node
+                      image: node:20
+                      command: [sleep]
+                      args: [infinity]
+                    - name: python
+                      image: python:3.11
+                      command: [sleep]
+                      args: [infinity]
+            '''
+        }
+    }
+    stages {
+        stage('JS') {
+            steps {
+                container('node') { sh 'npm ci &amp;&amp; npm test' }
+            }
+        }
+        stage('PY') {
+            steps {
+                container('python') { sh 'pip install -r req.txt &amp;&amp; pytest' }
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>
+  The pod has two containers. The pipeline switches between them for
+  each stage. Each build gets its own pod, torn down on completion.
+  This is the Jenkins answer to "hermetic, reproducible builds".
+</p>
+
+<h2 id="jcasc">Configuration as Code (JCasC)</h2>
+
+<p>
+  Classic Jenkins stores everything in XML files in
+  <code>$JENKINS_HOME</code>. That's configuration-as-data, stored in
+  a place no one backs up. Awful.
+</p>
+
+<p>
+  The JCasC (Configuration as Code) plugin lets you write your entire
+  Jenkins config as YAML:
+</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">jenkins.yaml (JCasC)</span></div>
+<pre><code>jenkins:
+  systemMessage: "Production Jenkins — managed by GitOps"
+  numExecutors: 0
+  mode: EXCLUSIVE
+  securityRealm:
+    ldap:
+      configurations:
+        - server: "ldaps://directory.example.com"
+          rootDN: "dc=example,dc=com"
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: "admin"
+            pattern: ".*"
+            permissions: [ "Overall/Administer" ]
+            assignments: [ "release-managers" ]
+
+  clouds:
+    - kubernetes:
+        name: "k8s"
+        serverUrl: "https://kubernetes.default"
+        namespace: "jenkins"
+        jenkinsUrl: "http://jenkins:8080"
+        templates:
+          - name: "default"
+            label: "k8s"
+            containers:
+              - name: "jnlp"
+                image: "jenkins/inbound-agent:latest"
+
+unclassified:
+  location:
+    url: "https://jenkins.example.com"
+  slackNotifier:
+    teamDomain: "example"
+    tokenCredentialId: "slack-hook"</code></pre>
+</div>
+
+<p>Set <code>CASC_JENKINS_CONFIG=/etc/jenkins/jenkins.yaml</code> in Jenkins' environment. On startup, JCasC applies the config. Now your Jenkins setup lives in git, reviewable, diffable, rollback-able. Huge quality-of-life improvement for admins.</p>
+
+<h2 id="rbac">RBAC — who can do what</h2>
+
+<p>Jenkins' authorisation strategies:</p>
+<ul>
+  <li><strong>Logged-in users can do anything.</strong> Default after initial setup. Fine for a single team.</li>
+  <li><strong>Matrix-based security.</strong> A grid of permissions per user/group. Granular but tedious to maintain.</li>
+  <li><strong>Project-based Matrix Authorization Strategy.</strong> Per-job matrices override globals. Lets you lock down production jobs to specific groups.</li>
+  <li><strong>Role-Based Authorization Strategy (plugin).</strong> Define roles (admin, developer, QA) with permissions, assign to users or LDAP groups. Much more maintainable.</li>
+</ul>
+
+<p>For anything multi-team, install Role-Based Authorization Strategy plugin + LDAP/SSO and manage roles via JCasC.</p>
+
+<h2 id="backup">Backup strategy</h2>
+
+<p>
+  Even with JCasC, some state is in <code>$JENKINS_HOME</code>: build
+  history, workspaces (usually on agents), credentials (encrypted).
+  The <strong>must-back-up</strong> set:
+</p>
+<ul>
+  <li><code>config.xml</code>, <code>jobs/*/config.xml</code>, <code>credentials.xml</code> — the state JCasC can't fully reconstruct.</li>
+  <li><code>secrets/</code> — the encryption keys. Without these, encrypted credentials are unrecoverable.</li>
+  <li><code>plugins/</code> — list of installed plugins with versions (so you can reinstall the same set).</li>
+</ul>
+
+<p>Don't back up full build logs and workspaces — they're replaceable and volume-expensive. Use log rotation instead.</p>
+
+<h2 id="blue-ocean">Blue Ocean</h2>
+
+<p>Jenkins' modernised pipeline UI. Better visualisation of stages, nicer graph view of parallel execution, friendlier pipeline creation wizard. Recent native Jenkins UI has improved enough that Blue Ocean is less essential than it used to be, but it's still worth installing.</p>
+
+<h2 id="observability">Observability</h2>
+
+<p>Key signals to monitor on a Jenkins install:</p>
+<ul>
+  <li><strong>Controller memory &amp; CPU.</strong> Big pipelines can OOM a Controller.</li>
+  <li><strong>Executor utilisation.</strong> Are builds queued waiting for executors?</li>
+  <li><strong>Build duration trends.</strong> Sudden slowdowns often point at plugin regressions.</li>
+  <li><strong>Agent connectivity.</strong> Offline agents silently shrink capacity.</li>
+  <li><strong>Plugin warnings.</strong> The Update Centre flags security advisories — react within days, not months.</li>
+</ul>
+
+<p>The <em>Prometheus metrics</em> and <em>Metrics</em> plugins expose all of this. Wire them into Grafana.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.1</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Extract a shared step</span>
+</div>
+<div class="exercise-body">
+<p>You find five Jenkinsfiles all containing the same "docker build + push + tag latest" block. Extract it to a shared library step. What's the signature, and how do consumers call it?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">vars/dockerPublish.groovy</span></div>
+<pre><code>def call(Map args) {
+    def image = args.image ?: error('image required')
+    def tag   = args.tag   ?: env.BUILD_NUMBER
+    def creds = args.creds ?: 'registry-login'
+    def reg   = args.registry ?: env.REGISTRY
+
+    withCredentials([usernamePassword(credentialsId: creds,
+                                      usernameVariable: 'U',
+                                      passwordVariable: 'P')]) {
+        sh """
+            echo "\$P" | docker login ${reg} -u "\$U" --password-stdin
+            docker build -t ${reg}/${image}:${tag} ${args.context ?: '.'}
+            docker push  ${reg}/${image}:${tag}
+            docker tag   ${reg}/${image}:${tag} ${reg}/${image}:latest
+            docker push  ${reg}/${image}:latest
+        """
+    }
+}</code></pre>
+</div>
+<p>Consumer:</p>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Publish') {
+    steps { dockerPublish image: 'myapp', registry: 'registry.example.com' }
+}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">CPS pitfall</span>
+</div>
+<div class="exercise-body">
+<p>Rewrite this so it's safe under Jenkins' CPS:</p>
+<div class="code" data-lang="groovy">
+<pre><code>def branches = sh(returnStdout: true, script: 'git branch -r').split('\n')
+branches.each { b -&gt; echo b.trim() }</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>def raw = sh(returnStdout: true, script: 'git branch -r')
+for (b in raw.split('\n')) {
+    echo b.trim()
+}</code></pre>
+</div>
+<p>Or push the parsing into a <code>@NonCPS</code> method in a shared library and return a plain list of strings.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">JCasC for Slack</span>
+</div>
+<div class="exercise-body">
+<p>Write the JCasC snippet that configures the Slack Notification plugin with workspace <code>my-co</code>, credential ID <code>slack-token</code>, default channel <code>#ci</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>unclassified:
+  slackNotifier:
+    teamDomain: "my-co"
+    tokenCredentialId: "slack-token"
+    room: "#ci"
+    sendAsText: false</code></pre>
+</div>
+<p>Exact keys depend on plugin version — <code>http://jenkins/configuration-as-code/reference</code> lists them all for installed plugins.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Folder-scoped credentials</span>
+</div>
+<div class="exercise-body">
+<p>You have two folders, <code>dev</code> and <code>prod</code>, each with its own AWS credentials. A pipeline in <code>dev</code> must never access prod's creds. How do you enforce this? What happens when a Jenkinsfile in <code>dev/some-job</code> tries to <code>credentials('aws-prod')</code>?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Put <code>aws-prod</code> in the <code>prod</code> folder's credential store (Manage folder → Credentials). It's then visible only to jobs under <code>prod/</code>. A job in <code>dev/</code> calling <code>credentials('aws-prod')</code> would get a "No such credential" error — the credential is invisible to it.</p>
+<p>Combine with RBAC: developers have Configure permission only on <code>dev/</code>, not on <code>prod/</code>. Now they can't even see prod credentials exist.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Multi-container pod</span>
+</div>
+<div class="exercise-body">
+<p>Design a Kubernetes agent pod that has: a <code>build</code> container (golang:1.22), a <code>docker</code> container for image builds, and a <code>kubectl</code> container for deploys. Write the <code>agent { kubernetes { yaml '…' } }</code> block.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>agent {
+    kubernetes {
+        yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+              containers:
+                - name: build
+                  image: golang:1.22
+                  command: [sleep]
+                  args: [infinity]
+                - name: docker
+                  image: docker:24
+                  command: [sleep]
+                  args: [infinity]
+                  volumeMounts:
+                    - name: sock
+                      mountPath: /var/run/docker.sock
+                - name: kubectl
+                  image: bitnami/kubectl:latest
+                  command: [sleep]
+                  args: [infinity]
+              volumes:
+                - name: sock
+                  hostPath: { path: /var/run/docker.sock }
+        '''
+    }
+}</code></pre>
+</div>
+<p>Then use <code>container('build') { sh '...' }</code> or <code>container('docker')</code> etc. in stages.</p>
+<p>(Caveat: <code>hostPath</code> for <code>docker.sock</code> is the easy mode and a security tradeoff; consider Docker-in-Docker or buildah for stricter environments.)</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Shared libraries factor pipeline logic into reusable steps; pin versions for stability.</li>
+  <li>CPS-transformed Groovy has limitations; keep pipelines simple, push complexity to <code>@NonCPS</code> library code.</li>
+  <li>Credentials have scope (global, folder, user). Use folder scope to isolate prod.</li>
+  <li><code>withCredentials</code> scopes exposure better than <code>environment { credentials(...) }</code>.</li>
+  <li>Kubernetes agents are the modern default: fresh pod per build, multi-container support.</li>
+  <li>JCasC brings Jenkins config into git; combine with RBAC and backup of <code>secrets/</code> and <code>*/config.xml</code>.</li>
+  <li>Monitor executor utilisation, plugin advisories, agent connectivity; invest in this or you'll be paged.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="05-jenkins-declarative.html"><span class="lbl">← Prev</span><span class="ttl">Jenkins — Declarative DSL</span></a>
+  <a href="07-gitlab-intro.html" class="next"><span class="lbl">Next →</span><span class="ttl">GitLab CI — Fundamentals</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

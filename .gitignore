@@ -32,4 +32,5 @@ lld/design-problems/ride
 # Editor and machine-local files
 .cache/
 .vscode/
+node_modules/
 .DS_Store

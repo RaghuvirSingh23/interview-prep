@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14 · Capstone Project — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 14</span>
+  Capstone Project
+</h1>
+<p class="lede">
+  The same production-grade release pipeline, implemented three times —
+  once in each tool. A small Python web app that builds to a
+  container, runs a proper test suite, scans for vulnerabilities,
+  signs the release, and deploys to staging then prod. Read all three
+  side by side to cement the mapping you learned in Chapter 12.
+</p>
+
+<h2 id="project">The project</h2>
+
+<div class="code" data-lang="text">
+<pre><code>hello-api/
+├── src/
+│   └── app.py                 # tiny FastAPI "hello" service
+├── tests/
+│   ├── test_unit.py
+│   └── test_integration.py    # hits live postgres
+├── Dockerfile
+├── requirements.txt
+├── pyproject.toml
+└── ci/
+    ├── deploy-staging.sh
+    └── deploy-prod.sh</code></pre>
+</div>
+
+<h4>src/app.py</h4>
+<div class="code" data-lang="sh">
+<pre><code>from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"ok": True, "message": "Hello, CI/CD"}
+
+@app.get("/health")
+def health():
+    return {"ok": True}</code></pre>
+</div>
+
+<h4>Dockerfile</h4>
+<div class="code" data-lang="sh">
+<pre><code>FROM python:3.11-slim@sha256:9f03a...        # pin by digest
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+
+EXPOSE 8000
+HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre>
+</div>
+
+<h2 id="goals">Pipeline goals</h2>
+
+<p>All three implementations must:</p>
+<ol>
+  <li>Lint + type-check on every push/PR.</li>
+  <li>Run unit tests in a matrix across Python 3.10, 3.11, 3.12.</li>
+  <li>Run integration tests against a real Postgres.</li>
+  <li>Scan dependencies for known vulnerabilities.</li>
+  <li>Build a Docker image; scan the image.</li>
+  <li>Generate an SBOM; sign the image.</li>
+  <li>Push to a container registry.</li>
+  <li>Deploy to staging automatically on main.</li>
+  <li>Deploy to prod on a version tag, with human approval.</li>
+  <li>Report on a Slack channel on success/failure.</li>
+</ol>
+
+<h2 id="gha-cap">GitHub Actions implementation</h2>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>name: CI
+
+on:
+  push: { branches: [main], tags: ['v*'] }
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install ruff mypy
+      - run: ruff check src/ tests/
+      - run: mypy src/
+
+  unit:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix: { py: ["3.10", "3.11", "3.12"] }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.py }}", cache: pip }
+      - run: pip install -r requirements.txt pytest pytest-cov
+      - run: pytest tests/test_unit.py --junitxml=unit-${{ matrix.py }}.xml
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-${{ matrix.py }}
+          path: unit-${{ matrix.py }}.xml
+
+  integration:
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: test }
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 10s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt pytest
+      - env: { DATABASE_URL: "postgres://postgres:test@localhost:5432/postgres" }
+        run: pytest tests/test_integration.py
+
+  scan-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/gh-action-pip-audit@v1.0.8   # pinned
+        with: { inputs: requirements.txt }
+
+  build-and-publish:
+    needs: [unit, integration, scan-deps]
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image:  ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          severity:  HIGH,CRITICAL
+          exit-code: "1"
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          output-file: sbom.spdx.json
+      - uses: sigstore/cosign-installer@v3
+      - run: |
+          cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          cosign attest --yes --predicate sbom.spdx.json --type spdxjson \
+            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+
+  deploy-staging:
+    needs: build-and-publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.hello-api.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_STAGING }}
+          aws-region: us-east-1
+      - run: ./ci/deploy-staging.sh "${{ needs.build-and-publish.outputs.image }}@${{ needs.build-and-publish.outputs.digest }}"
+
+  deploy-prod:
+    needs: build-and-publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: production            # approvals configured in Settings → Environments
+      url: https://hello-api.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_PROD }}
+          aws-region: us-east-1
+      - run: ./ci/deploy-prod.sh "${{ needs.build-and-publish.outputs.image }}@${{ needs.build-and-publish.outputs.digest }}"
+
+  notify:
+    needs: [deploy-staging, deploy-prod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: ${{ vars.SLACK_CHANNEL }}
+          slack-message: "CI ${{ needs.deploy-prod.result || needs.deploy-staging.result }} for ${{ github.ref_name }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}</code></pre>
+</div>
+
+<p>Under-recognised bits: OIDC to AWS (no long-lived keys), signed image + SBOM attestation, trivy vulnerability gate, concurrency cancellation only on non-main branches, required-reviewer environments gating prod.</p>
+
+<h2 id="gitlab-cap">GitLab CI implementation</h2>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.gitlab-ci.yml</span></div>
+<pre><code>include:
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+stages: [lint, test, scan, build, deploy, notify]
+
+default:
+  image: python:3.11-slim
+  cache:
+    key: { files: [requirements.txt] }
+    paths: [.pip/]
+
+variables:
+  PIP_CACHE_DIR: $CI_PROJECT_DIR/.pip
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG =~ /^v/
+
+.python:
+  before_script:
+    - pip install -r requirements.txt
+
+lint:
+  stage: lint
+  extends: .python
+  script:
+    - pip install ruff mypy
+    - ruff check src/ tests/
+    - mypy src/
+
+unit:
+  stage: test
+  needs: [lint]
+  extends: .python
+  parallel:
+    matrix:
+      - PY: ["3.10", "3.11", "3.12"]
+  image: "python:$PY"
+  script:
+    - pip install pytest pytest-cov
+    - pytest tests/test_unit.py --junitxml=unit-$PY.xml
+  artifacts:
+    when: always
+    reports: { junit: unit-*.xml }
+
+integration:
+  stage: test
+  needs: [lint]
+  extends: .python
+  services:
+    - name: postgres:16
+      alias: db
+  variables:
+    POSTGRES_PASSWORD: test
+    DATABASE_URL: "postgres://postgres:test@db:5432/postgres"
+  script:
+    - pip install pytest
+    - pytest tests/test_integration.py
+
+build:
+  stage: build
+  needs: [unit, integration]
+  image: docker:24
+  services: [docker:24-dind]
+  variables:
+    IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker build -t "$IMAGE" -t "$CI_REGISTRY_IMAGE:latest" .
+    - docker push "$IMAGE"
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+    - apk add --no-cache curl
+    - curl -sSfL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign &amp;&amp; chmod +x /usr/local/bin/cosign
+    - cosign sign --yes "$IMAGE"
+
+deploy-staging:
+  stage: deploy
+  needs: [build]
+  image: alpine:3.19
+  before_script: [apk add --no-cache curl bash aws-cli]
+  script:
+    - ./ci/deploy-staging.sh "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  environment:
+    name: staging
+    url: https://staging.hello-api.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-prod:
+  stage: deploy
+  needs: [build]
+  image: alpine:3.19
+  before_script: [apk add --no-cache curl bash aws-cli]
+  script:
+    - ./ci/deploy-prod.sh "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  environment:
+    name: production
+    url: https://hello-api.example.com
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+      when: manual
+
+notify-slack:
+  stage: notify
+  image: curlimages/curl:latest
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+        --data "{\"text\":\"CI ${CI_JOB_STATUS} for ${CI_COMMIT_REF_NAME}\"}" \
+        "$SLACK_WEBHOOK"
+  rules:
+    - when: always</code></pre>
+</div>
+
+<p>Notes: GitLab's built-in security templates handle dep scan / container scan / secret detection. Registry credentials auto-injected. <code>when: manual</code> on prod gives the button. Less ceremony than GHA because GitLab provides registry + secret templates out of the box.</p>
+
+<h2 id="jenkins-cap">Jenkins implementation</h2>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkinsfile</span></div>
+<pre><code>@Library('ci-shared-lib') _
+
+pipeline {
+    agent none
+    options {
+        timeout(time: 45, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        disableConcurrentBuilds()
+    }
+    environment {
+        IMAGE = "registry.example.com/hello-api:${env.BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Lint') {
+            agent { docker { image 'python:3.11-slim' } }
+            steps {
+                sh '''
+                    pip install ruff mypy
+                    ruff check src/ tests/
+                    mypy src/
+                '''
+            }
+        }
+
+        stage('Test') {
+            parallel {
+                stage('Unit py3.10') { agent { docker { image 'python:3.10' } }; steps { sh 'pip install -r requirements.txt pytest &amp;&amp; pytest tests/test_unit.py --junitxml=u310.xml' }; post { always { junit 'u310.xml' } } }
+                stage('Unit py3.11') { agent { docker { image 'python:3.11' } }; steps { sh 'pip install -r requirements.txt pytest &amp;&amp; pytest tests/test_unit.py --junitxml=u311.xml' }; post { always { junit 'u311.xml' } } }
+                stage('Unit py3.12') { agent { docker { image 'python:3.12' } }; steps { sh 'pip install -r requirements.txt pytest &amp;&amp; pytest tests/test_unit.py --junitxml=u312.xml' }; post { always { junit 'u312.xml' } } }
+
+                stage('Integration') {
+                    agent {
+                        kubernetes {
+                            yaml '''
+                                apiVersion: v1
+                                kind: Pod
+                                spec:
+                                  containers:
+                                    - name: test
+                                      image: python:3.11
+                                      command: [sleep]
+                                      args: [infinity]
+                                    - name: db
+                                      image: postgres:16
+                                      env:
+                                        - name: POSTGRES_PASSWORD
+                                          value: test
+                            '''
+                        }
+                    }
+                    environment { DATABASE_URL = "postgres://postgres:test@localhost:5432/postgres" }
+                    steps {
+                        container('test') {
+                            sh '''
+                                pip install -r requirements.txt pytest
+                                pytest tests/test_integration.py
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Scan deps') {
+            agent { docker { image 'python:3.11-slim' } }
+            steps { sh 'pip install pip-audit &amp;&amp; pip-audit -r requirements.txt' }
+        }
+
+        stage('Build &amp; publish') {
+            agent { label 'docker' }
+            environment { REG = credentials('registry-login') }
+            steps {
+                sh '''
+                    echo "$REG_PSW" | docker login registry.example.com -u "$REG_USR" --password-stdin
+                    docker build -t $IMAGE .
+                    docker push $IMAGE
+                    trivy image --severity HIGH,CRITICAL --exit-code 1 $IMAGE
+                    cosign sign --yes $IMAGE
+                '''
+            }
+        }
+
+        stage('Deploy staging') {
+            when { branch 'main' }
+            agent { label 'deploy' }
+            environment { KUBECONFIG = credentials('staging-kubeconfig') }
+            steps {
+                sh './ci/deploy-staging.sh $IMAGE'
+                sh 'kubectl rollout status deploy/hello-api -n staging --timeout=3m'
+            }
+            post {
+                success {
+                    slackSend channel: '#ci', color: 'good',
+                              message: "🚀 deployed $IMAGE to staging"
+                }
+            }
+        }
+
+        stage('Prod approval') {
+            when { buildingTag() }
+            agent none
+            steps {
+                timeout(time: 4, unit: 'HOURS') {
+                    input message: "Deploy ${env.TAG_NAME}?",
+                          submitter: 'release-managers'
+                }
+            }
+        }
+
+        stage('Deploy prod') {
+            when { buildingTag() }
+            agent { label 'deploy' }
+            environment { KUBECONFIG = credentials('prod-kubeconfig') }
+            steps {
+                sh './ci/deploy-prod.sh $IMAGE'
+                sh 'kubectl rollout status deploy/hello-api -n prod --timeout=5m'
+            }
+            post {
+                success {
+                    slackSend channel: '#ci', color: 'good',
+                              message: "🟢 promoted $IMAGE to production"
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            slackSend channel: '#ci', color: 'danger',
+                      message: "❌ ${env.JOB_NAME} #${env.BUILD_NUMBER} failed: ${env.BUILD_URL}"
+        }
+        cleanup { node('master') { cleanWs() } }
+    }
+}</code></pre>
+</div>
+
+<h2 id="observations">Side-by-side observations</h2>
+
+<ul>
+  <li>
+    <strong>Line counts:</strong> GHA ~110 lines, GitLab ~80, Jenkins
+    ~130. GitLab's built-in templates (secret detection, dep scan)
+    pull their weight. Jenkins needs more explicit agent declarations.
+  </li>
+  <li>
+    <strong>Secrets:</strong> GHA uses OIDC to AWS (no stored AWS
+    keys); GitLab uses CI variables + integrated registry; Jenkins
+    uses credentials store + per-stage <code>environment:</code>.
+  </li>
+  <li>
+    <strong>Approvals:</strong> GHA via environment required-reviewers;
+    GitLab via <code>when: manual</code>; Jenkins via <code>input</code>
+    in an <code>agent none</code> stage.
+  </li>
+  <li>
+    <strong>Registry:</strong> GHA to GHCR; GitLab to its built-in
+    per-project registry; Jenkins to your own registry (no built-in).
+  </li>
+  <li>
+    <strong>Parallelism:</strong> All three do matrix/parallel, but
+    Jenkins' syntax is the most verbose.
+  </li>
+  <li>
+    <strong>Security templates:</strong> GitLab wins — one-line
+    includes for SAST/dep scan/secret detection. GHA gets equivalent
+    via marketplace actions. Jenkins requires wiring tools manually.
+  </li>
+</ul>
+
+<h2 id="extensions">Suggested extensions</h2>
+
+<ol>
+  <li>Add <strong>a canary deploy</strong> stage: route 10% traffic to the new version, check error rate, promote on success.</li>
+  <li>Implement <strong>blue/green rollback</strong> with a single button.</li>
+  <li>Write a <strong>preview environment per PR</strong>: each PR gets its own URL, torn down on close.</li>
+  <li>Add <strong>performance regression tests</strong> that fail the pipeline if p95 latency degrades &gt; 10%.</li>
+  <li>Wire <strong>Renovate or Dependabot</strong> to keep pinned actions/images fresh.</li>
+  <li>Add <strong>provenance attestation</strong> following SLSA L3 requirements (GHA has <code>actions/attest-build-provenance</code>).</li>
+</ol>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Same problem, three languages. The <em>structure</em> of a production pipeline is nearly identical across tools.</li>
+  <li>Each tool has idioms where it wins: GitLab for batteries-included security scanning; GHA for marketplace breadth + OIDC UX; Jenkins for flexibility when you need to plug into anything.</li>
+  <li>Patterns like "lint → test matrix → integration → scan → build → sign → deploy w/ approval → notify" translate almost verbatim. Once you see the graph, writing the YAML/Groovy is mechanical.</li>
+</ul>
+
+<h2 id="next">Where to go from here</h2>
+<ul>
+  <li><strong>Read real pipelines.</strong> Clone a major OSS project (Django, Rails, Kubernetes, a big npm package). Read its CI. Understand every line.</li>
+  <li><strong>Build a pipeline for your own side project.</strong> Apply this tutorial's patterns. Iterate.</li>
+  <li><strong>Deploy provenance.</strong> Explore in-toto attestations, SLSA, Sigstore. You'll be ahead of 90% of teams.</li>
+  <li><strong>Learn one more tool.</strong> Buildkite, CircleCI, Drone, Argo Workflows, Tekton. They all use the same concepts with different YAML flavours. You'll pick one up in a weekend now.</li>
+  <li><strong>Teach it.</strong> The fastest way to solidify this material is to write it up in your own words, or run a lunch-and-learn for your team.</li>
+</ul>
+
+<p>Pipelines aren't glamorous, but they're one of the highest-leverage things an engineer can get right. Every minute you save every developer on every commit compounds. Go make yours great.</p>
+
+<div class="page-nav">
+  <a href="13-50-questions.html"><span class="lbl">← Prev</span><span class="ttl">The 50 Questions</span></a>
+  <a href="../exercises.html" class="next"><span class="lbl">Next →</span><span class="ttl">All Exercises</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

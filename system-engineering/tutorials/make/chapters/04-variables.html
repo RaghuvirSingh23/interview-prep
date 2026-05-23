@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4 · Variables — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 04</span>
+  Variables — All Six Flavors
+</h1>
+<p class="lede">
+  Make has six different assignment operators. The difference between
+  <code>=</code> and <code>:=</code> alone has caused more confused
+  Slack threads than I can count. Here we'll build a mental model that
+  lets you pick the right one every time.
+</p>
+
+<h2 id="why-many">Why are there six?</h2>
+
+<p>
+  Because Make variables aren't really variables — they're
+  <strong>macros</strong>. The assignment operator decides
+  <em>when</em> the right-hand side is evaluated: at the moment of
+  assignment, or every time the variable is referenced.
+</p>
+
+<p>
+  Every other language has this choice too, but hides it. In Python,
+  variables are immediate; in Clojure, <code>delay</code>/<code>force</code>
+  give you laziness. Make just makes you pick per assignment.
+</p>
+
+<p>The six:</p>
+
+<table>
+<thead><tr><th>Operator</th><th>Called</th><th>Evaluation</th></tr></thead>
+<tbody>
+<tr><td><code>=</code></td>  <td>Recursively expanded</td>  <td>Lazy — expanded at each reference</td></tr>
+<tr><td><code>:=</code></td> <td>Simply expanded</td>       <td>Strict — expanded once at assignment</td></tr>
+<tr><td><code>::=</code></td><td>Simply expanded (POSIX)</td><td>Same as <code>:=</code>. Portability flavor.</td></tr>
+<tr><td><code>?=</code></td> <td>Conditional</td>           <td>Assigns only if the variable isn't already set</td></tr>
+<tr><td><code>+=</code></td> <td>Append</td>                <td>Appends to the value, inheriting the flavor of the original</td></tr>
+<tr><td><code>!=</code></td> <td>Shell</td>                 <td>Runs shell command, stores stdout</td></tr>
+</tbody>
+</table>
+
+<h2 id="recursive">The recursive (<code>=</code>) flavor</h2>
+
+<p>
+  <code>FOO = bar</code> stores the <em>text</em> <code>bar</code>.
+  Every time you reference <code>$(FOO)</code>, Make re-scans that text
+  and expands any Make variables in it. The value is "rebuilt" at each
+  use.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>X = one
+Y = $(X) two
+X = three
+all:
+	@echo $(Y)</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+three two</code></pre>
+</div>
+
+<p>
+  Read this <em>slowly</em>. When we say <code>Y = $(X) two</code>,
+  Make stores the literal text "<code>$(X) two</code>" as the value of
+  <code>Y</code>. Then <code>X</code> gets reassigned to <code>three</code>.
+  When the recipe runs, <code>$(Y)</code> is expanded: Make re-scans
+  its stored text, sees <code>$(X)</code>, looks up <code>X</code>'s
+  <em>current</em> value (<code>three</code>), and produces
+  <code>three two</code>.
+</p>
+
+<p>This is powerful. It's also how you write infinite loops:</p>
+<div class="code" data-lang="make">
+<pre><code>FOO = $(FOO) bar
+all:
+	@echo $(FOO)</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+Makefile:1: *** Recursive variable 'FOO' references itself (eventually).  Stop.</code></pre>
+</div>
+<p>
+  Make catches the simplest case. It can't always — so be careful with
+  <code>=</code> and variables that reference themselves.
+</p>
+
+<h2 id="simple">The simple (<code>:=</code>) flavor</h2>
+
+<p>
+  <code>FOO := bar</code> expands the right-hand side immediately and
+  stores the result. Subsequent references are just lookups.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>X := one
+Y := $(X) two
+X := three
+all:
+	@echo $(Y)</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+one two</code></pre>
+</div>
+
+<p>
+  <code>Y</code> was assigned the value "<code>one two</code>" at the
+  moment <code>Y :=</code> was parsed. Later changes to <code>X</code>
+  don't affect <code>Y</code>.
+</p>
+
+<p>
+  <strong>Rule of thumb:</strong> use <code>:=</code> by default. It
+  behaves the way people expect variables to behave. Reach for
+  <code>=</code> only when you actually want late binding — which is
+  rarer than you'd think.
+</p>
+
+<div class="callout hood">
+<div class="callout-title">Why <code>::=</code> exists</div>
+<p>
+  POSIX standardised <code>::=</code> to mean "simply expanded". GNU
+  Make accepts it as a synonym for <code>:=</code>. You'll occasionally
+  see it in Makefiles that aspire to POSIX portability. Otherwise,
+  stick with <code>:=</code>.
+</p>
+</div>
+
+<h2 id="conditional">The conditional (<code>?=</code>) flavor</h2>
+
+<p>
+  <code>FOO ?= bar</code> sets <code>FOO</code> to <code>bar</code>
+  <em>only if</em> <code>FOO</code> isn't already defined. This is how
+  you write overridable defaults:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>CC ?= gcc
+CFLAGS ?= -O2 -Wall
+
+hello: hello.c
+	$(CC) $(CFLAGS) hello.c -o hello</code></pre>
+</div>
+
+<p>Now users can override:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make                        # uses CC=gcc, CFLAGS=-O2 -Wall
+$ make CC=clang               # uses clang
+$ CFLAGS=-O0 make             # override via environment
+$ make CFLAGS='-g -O0'        # override on the command line</code></pre>
+</div>
+
+<p>
+  <code>?=</code> considers "already defined" to include: the
+  environment, the command line, and any earlier assignment in a
+  Makefile. So command-line overrides win.
+</p>
+
+<div class="callout pitfall">
+<div class="callout-title">The environment and implicit <code>CC</code></div>
+<p>
+  <code>CC</code>, <code>CXX</code>, <code>CFLAGS</code>, and friends
+  have <strong>built-in default values</strong> from Make's implicit
+  rule database (more in Chapter 5). <code>CC ?= gcc</code> on most
+  systems does <em>not</em> override the default because <code>CC</code>
+  is already set to "cc" by Make itself. Use <code>CC := gcc</code> if
+  you want to force it. Or, more commonly, don't set it at all and let
+  the user pass it on the command line.
+</p>
+</div>
+
+<h2 id="append">The append (<code>+=</code>) flavor</h2>
+
+<p>
+  <code>FOO += bar</code> appends "<code> bar</code>" (with a leading
+  space) to <code>FOO</code>. If <code>FOO</code> isn't already
+  defined, it becomes "<code>bar</code>" (no leading space).
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>CFLAGS := -O2
+CFLAGS += -Wall
+CFLAGS += -Wextra</code></pre>
+</div>
+<p>
+  After all three lines: <code>CFLAGS = -O2 -Wall -Wextra</code>.
+</p>
+
+<p>
+  <code>+=</code> preserves the <em>flavor</em> of the original
+  assignment. If <code>FOO</code> was <code>=</code>, appending with
+  <code>+=</code> stores the text; if it was <code>:=</code>, the
+  right-hand side is expanded first.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>X := one
+Y  = $(X) two
+Y += $(X) three   # stores literal "$(X) three" — Y stays recursive
+X := four
+all: ; @echo $(Y)</code></pre>
+</div>
+<p>Outputs: <code>four two four three</code>.</p>
+
+<h2 id="shell">The shell (<code>!=</code>) flavor</h2>
+
+<p>
+  <code>FOO != command</code> runs <code>command</code> in a shell and
+  stores the output (with trailing newlines stripped and embedded
+  newlines replaced by spaces). Great for dynamic info:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>GIT_SHA     != git rev-parse --short HEAD
+BUILD_DATE  != date +%Y-%m-%d
+SOURCES     != find src -name '*.c'
+all:
+	@echo "Building $(GIT_SHA) on $(BUILD_DATE)"
+	@echo "Sources: $(SOURCES)"</code></pre>
+</div>
+
+<p>
+  The shell runs <em>once at parse time</em>, not every reference. If
+  you want every reference to re-run the command, use the
+  <code>$(shell …)</code> function instead:
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>GIT_SHA = $(shell git rev-parse --short HEAD)</code></pre>
+</div>
+
+<p>
+  Since this uses <code>=</code>, the <code>$(shell …)</code> is
+  re-evaluated at every reference of <code>GIT_SHA</code>. That's
+  usually wasteful — prefer <code>!=</code> or
+  <code>GIT_SHA := $(shell …)</code>.
+</p>
+
+<h2 id="reference">Referencing variables</h2>
+
+<p>
+  Reference a variable with <code>$(NAME)</code> or <code>${NAME}</code>.
+  Both work. Braces and parens are interchangeable — pick a style and
+  stick with it. I use parens; some codebases use braces to distinguish
+  Make vars from shell vars visually.
+</p>
+
+<p>
+  A one-character variable name can be referenced without braces:
+  <code>$X</code> is the same as <code>$(X)</code>. This is how
+  automatic variables like <code>$@</code> and <code>$&lt;</code> work
+  — they're really <code>$(@)</code> and <code>$(&lt;)</code>.
+</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Only the first character!</div>
+<p>
+  <code>$NAME</code> expands <code>$N</code>, leaving <code>AME</code>.
+  If <code>N</code> isn't set (and it almost never is), you get
+  <code>AME</code>. That's the bug from Exercise 3.3 (b). Use
+  <code>$(NAME)</code> or <code>${NAME}</code> for anything longer than
+  one character.
+</p>
+</div>
+
+<h2 id="scopes">Scopes — where variables live</h2>
+
+<p>Make has several layers of variable "scope":</p>
+
+<ol>
+  <li><strong>Global.</strong> Anything assigned at the top level. Visible everywhere.</li>
+  <li><strong>Command-line.</strong> <code>make FOO=bar</code>. Overrides global assignments unless the global assignment uses <code>override</code>. Wins over the environment.</li>
+  <li><strong>Environment.</strong> Shell vars at invocation time become Make vars, unless a global assignment shadows them. Lowest priority.</li>
+  <li><strong>Target-specific.</strong> <code>target: VAR := value</code>. Visible only while Make is building that target (and its prerequisites).</li>
+  <li><strong>Automatic.</strong> <code>$@</code>, <code>$&lt;</code>, etc. Set by Make during recipe execution.</li>
+</ol>
+
+<h4>Target-specific variables</h4>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS := -O2
+
+debug: CFLAGS := -O0 -g
+debug: hello
+
+hello: hello.c
+	$(CC) $(CFLAGS) hello.c -o hello</code></pre>
+</div>
+<p>
+  When building <code>hello</code> as a prerequisite of
+  <code>debug</code>, <code>CFLAGS</code> is temporarily
+  <code>-O0 -g</code>. Build it directly (<code>make hello</code>) and
+  you get <code>-O2</code>.
+</p>
+
+<p>Target-specific vars cascade to prerequisites:</p>
+<div class="code" data-lang="make">
+<pre><code>release: CFLAGS := -O3 -DNDEBUG
+release: my_program
+my_program: my_program.o    # inherits CFLAGS=-O3 ... here too
+my_program.o: my_program.c  # and here</code></pre>
+</div>
+
+<h4>The <code>override</code> directive</h4>
+<p>
+  Normally, command-line <code>FOO=bar</code> wins over any Makefile
+  assignment. <code>override</code> flips that:
+</p>
+<div class="code" data-lang="make">
+<pre><code>override CFLAGS += -Wall</code></pre>
+</div>
+<p>
+  Now <code>-Wall</code> is always added to <code>CFLAGS</code>, even
+  if the user says <code>make CFLAGS=-O2</code>. Use sparingly — you're
+  ignoring the user's wishes.
+</p>
+
+<h2 id="export">Exporting to the child shell</h2>
+
+<p>
+  Recipes run in a child process. By default that child <em>inherits
+  the environment Make itself had</em>, plus any command-line
+  overrides Make received, plus a handful of Make-specific variables
+  (<code>MAKEFLAGS</code>, etc.). <strong>Make variables you defined
+  in the Makefile are NOT exported by default.</strong>
+</p>
+
+<p>To pass a Make variable to the recipe's environment:</p>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS := -O2
+export CFLAGS
+
+all:
+	@echo "CFLAGS in shell is: $$CFLAGS"</code></pre>
+</div>
+
+<p>To export everything:</p>
+<div class="code" data-lang="make">
+<pre><code>.EXPORT_ALL_VARIABLES:
+FOO = hello
+BAR = world
+all:
+	@echo $$FOO $$BAR</code></pre>
+</div>
+
+<p>To un-export a previously exported variable: <code>unexport FOO</code>.</p>
+
+<div class="callout hood">
+<div class="callout-title">What the child shell inherits</div>
+<ul>
+  <li>Every environment variable Make had when invoked.</li>
+  <li>Every variable you <code>export</code>ed.</li>
+  <li>Every variable you passed on the command line as <code>VAR=value</code> — these are <em>automatically exported</em>, unlike Makefile assignments.</li>
+  <li><code>MAKE</code>, <code>MAKELEVEL</code>, <code>MAKEFLAGS</code>, and related — always exported.</li>
+</ul>
+</div>
+
+<h2 id="origin">Where did this value come from? <code>$(origin)</code></h2>
+
+<p>The <code>origin</code> function tells you where a variable was set:</p>
+<div class="code" data-lang="make">
+<pre><code>all:
+	@echo CC was set by: $(origin CC)
+	@echo FOO was set by: $(origin FOO)</code></pre>
+</div>
+
+<p>Possible return values:</p>
+<ul>
+  <li><code>undefined</code></li>
+  <li><code>default</code> — set by Make's built-in rules (e.g. <code>CC=cc</code>)</li>
+  <li><code>environment</code></li>
+  <li><code>environment override</code> — from env but set with <code>-e</code> flag</li>
+  <li><code>file</code> — assigned in a Makefile</li>
+  <li><code>command line</code></li>
+  <li><code>override</code> — via <code>override</code> directive</li>
+  <li><code>automatic</code> — like <code>$@</code></li>
+</ul>
+
+<p>This is occasionally invaluable when debugging "who the hell set <code>CC</code>?".</p>
+
+<h2 id="define">Multi-line variables with <code>define</code></h2>
+
+<p>For variables whose value is several lines — scripts, templates — use <code>define</code>:</p>
+
+<div class="code" data-lang="make">
+<pre><code>define HELLO_SCRIPT
+echo "line 1"
+echo "line 2"
+echo "line 3"
+endef
+
+all:
+	$(HELLO_SCRIPT)</code></pre>
+</div>
+
+<p>
+  Each line of <code>HELLO_SCRIPT</code> is passed to the recipe intact.
+  You can also choose the flavor: <code>define FOO :=</code> makes it
+  simply expanded. Without the operator, <code>define</code> is
+  recursively expanded (<code>=</code>).
+</p>
+
+<p>This is how you build reusable "functions" in Make — more in Chapter 8.</p>
+
+<h2 id="all-vars">See every variable Make knows about</h2>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -p -f /dev/null 2&gt;/dev/null | head -40</code></pre>
+</div>
+<p>
+  <code>make -p</code> dumps the entire <em>internal database</em>:
+  every variable, every rule, every default. Pointing it at
+  <code>/dev/null</code> as the Makefile gets you just Make's
+  built-ins. It's a lot — and it's worth skimming once.
+</p>
+
+<h2 id="hands-on">Hands-on: pick the right flavor</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · six flavors in one file</div>
+<div class="hands-on-body">
+<p>Create <code>flavors.mk</code>:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">flavors.mk</span></div>
+<pre><code># Recursive vs simple
+A  = hello
+B  = $(A) world
+A  = goodbye
+show1:
+	@echo "recursive: B = $(B)"
+
+C := hello
+D := $(C) world
+C := goodbye
+show2:
+	@echo "simple:    D = $(D)"
+
+# Conditional
+E ?= default
+show3:
+	@echo "conditional: E = $(E)"
+
+# Append preserves flavor
+F  = one
+F += $(A)         # stores "one $(A)"
+show4:
+	@echo "append(=): F = $(F)"
+
+G := one
+G += $(C)         # stores "one hello" — wait, C is now goodbye!
+show5:
+	@echo "append(:=): G = $(G)"
+
+# Shell
+WHOAMI != whoami
+NOW    != date +%H:%M:%S
+show6:
+	@echo "shell: $(WHOAMI) at $(NOW)"
+
+.PHONY: show1 show2 show3 show4 show5 show6
+all: show1 show2 show3 show4 show5 show6
+.PHONY: all
+.DEFAULT_GOAL := all</code></pre>
+</div>
+<p>Run:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -f flavors.mk
+recursive: B = goodbye world
+simple:    D = hello world
+conditional: E = default
+append(=): F = one goodbye
+append(:=): G = one hello
+shell: raghu at 14:23:07
+$ make -f flavors.mk E=custom show3
+conditional: E = custom</code></pre>
+</div>
+<p>Study <code>G</code> carefully. At the moment <code>G += $(C)</code>
+  was parsed, <code>C</code> was <code>hello</code>. Since <code>G</code>
+  is simply-expanded, the append evaluated <code>$(C)</code> immediately
+  and stored <code>one hello</code>. Later reassignment of <code>C</code>
+  doesn't change <code>G</code>. Contrast <code>F</code>, which stored
+  the text <code>$(A)</code> and only expands at reference time.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Predict the output</span>
+</div>
+<div class="exercise-body">
+<div class="code" data-lang="make">
+<pre><code>X  = apple
+Y  = $(X)
+X := banana
+
+all:
+	@echo Y is $(Y)
+	@echo X is $(X)</code></pre>
+</div>
+<p>What does <code>make</code> print?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>Y is banana
+X is banana</code></pre>
+</div>
+<p>
+  <code>Y</code> is recursive, so <code>$(X)</code> is re-evaluated
+  whenever <code>Y</code> is referenced. By the time the recipe runs,
+  <code>X</code> has been simply-reassigned to <code>banana</code> —
+  the latest value wins. Both echo <code>banana</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Which flavor for pkg-config?</span>
+</div>
+<div class="exercise-body">
+<p>
+  You want to include the output of <code>pkg-config --cflags libxml-2.0</code>
+  in your <code>CFLAGS</code>. Write the assignment such that the shell
+  call runs exactly once per <code>make</code> invocation, even if
+  <code>CFLAGS</code> is referenced many times.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS := -O2 -Wall $(shell pkg-config --cflags libxml-2.0)</code></pre>
+</div>
+<p>
+  Or equivalently:
+</p>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS != echo -O2 -Wall $$(pkg-config --cflags libxml-2.0)</code></pre>
+</div>
+<p>
+  The key is <code>:=</code> (or <code>!=</code>). Using
+  <code>CFLAGS = -O2 $(shell pkg-config …)</code> would re-run the
+  command every time <code>$(CFLAGS)</code> appears — which, if you
+  have 100 <code>.c</code> files each compiling with <code>$(CFLAGS)</code>,
+  is 100 forked processes. Slow.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Override behaviour</span>
+</div>
+<div class="exercise-body">
+<p>Given:</p>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS := -O2 -Wall
+all:
+	@echo CFLAGS = $(CFLAGS)</code></pre>
+</div>
+<p>What does each of the following print? Try each.</p>
+<ol type="a">
+  <li><code>make</code></li>
+  <li><code>make CFLAGS=-O0</code></li>
+  <li><code>CFLAGS=-O0 make</code></li>
+  <li><code>make -e CFLAGS=-O0</code></li>
+  <li><code>CFLAGS=-g make -e</code></li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li><code>CFLAGS = -O2 -Wall</code> — the Makefile value.</li>
+<li><code>CFLAGS = -O0</code> — command-line assignments always win.</li>
+<li><code>CFLAGS = -O2 -Wall</code> — Makefile assignments normally shadow the environment.</li>
+<li><code>CFLAGS = -O0</code> — command line still wins. <code>-e</code> only affects env-vs-Makefile.</li>
+<li><code>CFLAGS = -g</code> — <code>-e</code> flips the rule: environment wins over Makefile.</li>
+</ol>
+<p>
+  <code>-e</code> is the "environment override" flag. It's rarely a
+  good idea because it makes your build's behaviour depend on the
+  user's shell environment.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Target-specific cascading</span>
+</div>
+<div class="exercise-body">
+<p>Write a Makefile with three targets:</p>
+<ul>
+  <li><code>all</code> depends on <code>hello</code> and uses <code>CFLAGS = -O2</code>.</li>
+  <li><code>debug</code> depends on <code>hello</code> and uses <code>CFLAGS = -O0 -g</code>.</li>
+  <li><code>profile</code> depends on <code>hello</code> and uses <code>CFLAGS = -O2 -pg</code>.</li>
+</ul>
+<p>
+  Share the <code>hello</code> rule across all three. Verify that the
+  right flags are used each time.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS := -O2
+
+.PHONY: all debug profile clean
+
+all: hello
+
+debug:   CFLAGS := -O0 -g
+debug:   hello
+
+profile: CFLAGS := -O2 -pg
+profile: hello
+
+hello: hello.c
+	$(CC) $(CFLAGS) hello.c -o hello
+
+clean:
+	rm -f hello</code></pre>
+</div>
+<p>
+  To verify:
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -n all
+cc -O2 hello.c -o hello
+$ make -n debug
+cc -O0 -g hello.c -o hello
+$ make -n profile
+cc -O2 -pg hello.c -o hello</code></pre>
+</div>
+<p>
+  Notice: you must <code>make clean</code> between runs, otherwise the
+  binary is up to date and the rule doesn't re-fire. Or use
+  <code>-B</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">The self-referencing trap</span>
+</div>
+<div class="exercise-body">
+<p>Consider:</p>
+<div class="code" data-lang="make">
+<pre><code>PATH := /my/extra/bin:$(PATH)
+all:
+	@echo PATH = $(PATH)</code></pre>
+</div>
+<p>
+  Is this safe? What would it look like with <code>=</code> instead of
+  <code>:=</code>? Under what conditions could the <code>=</code>
+  version loop forever?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  With <code>:=</code>, the right-hand side is expanded <em>once</em>:
+  <code>$(PATH)</code> gets the current value of <code>PATH</code>
+  (from the environment, because PATH is always in the environment), we
+  prepend <code>/my/extra/bin:</code>, store the result. Safe.
+</p>
+<p>
+  With <code>=</code>, we'd store the <em>text</em>
+  "<code>/my/extra/bin:$(PATH)</code>". Every reference of
+  <code>$(PATH)</code> would then re-expand — and inside that
+  expansion, there's another <code>$(PATH)</code>, which expands to
+  "<code>/my/extra/bin:$(PATH)</code>", etc. Infinite loop. Make
+  detects this and errors out with "recursive variable references
+  itself".
+</p>
+<p>
+  Generalisation: <strong>self-referential assignments must use
+  <code>:=</code></strong>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.6</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Reproduce the flavour-preservation of <code>+=</code></span>
+</div>
+<div class="exercise-body">
+<p>
+  Show, with a tiny Makefile, that <code>FOO += $(BAR)</code> behaves
+  differently when <code>FOO</code> was assigned with <code>=</code>
+  vs <code>:=</code>, even though the append line looks identical.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>BAR = one
+
+R  = start
+R += $(BAR)
+
+S := start
+S += $(BAR)
+
+BAR = two
+
+show:
+	@echo "R (recursive): $(R)"
+	@echo "S (simple):    $(S)"</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make show
+R (recursive): start two
+S (simple):    start one</code></pre>
+</div>
+<p>
+  <code>R</code> kept its recursive flavour; its stored text is
+  <code>start $(BAR)</code>, re-expanded at reference time. <code>S</code>
+  is simple; the append evaluated <code>$(BAR)</code> immediately,
+  storing <code>start one</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.7</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Export discipline</span>
+</div>
+<div class="exercise-body">
+<p>Given:</p>
+<div class="code" data-lang="make">
+<pre><code>NAME := raghu
+all:
+	@echo "from Make: $(NAME)"
+	@echo "from shell: $$NAME"</code></pre>
+</div>
+<p>
+  What's the output? Now add <code>export NAME</code> before the rule.
+  What changes?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Without <code>export</code>:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>from Make: raghu
+from shell: </code></pre>
+</div>
+<p>
+  The Make-level <code>$(NAME)</code> expands to <code>raghu</code>,
+  but the child shell has no environment variable <code>NAME</code>,
+  so <code>$NAME</code> expands to empty.
+</p>
+<p>With <code>export NAME</code>:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>from Make: raghu
+from shell: raghu</code></pre>
+</div>
+<p>Now the child shell inherits <code>NAME=raghu</code> in its environment.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.8</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Build flags sniffing with <code>origin</code></span>
+</div>
+<div class="exercise-body">
+<p>
+  Write a Makefile that prints a warning if the user set
+  <code>CFLAGS</code> from the environment (not the command line),
+  because that often causes surprising builds. Hint: use
+  <code>$(origin …)</code> and <code>$(warning …)</code>.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>ifeq ($(origin CFLAGS),environment)
+$(warning CFLAGS is being set from your environment ($(CFLAGS)). This can cause unexpected builds. Consider passing it on the command line instead.)
+endif
+
+CFLAGS ?= -O2 -Wall
+
+all:
+	@echo "CFLAGS = $(CFLAGS)"</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+CFLAGS = -O2 -Wall
+$ CFLAGS=-g make
+Makefile:2: CFLAGS is being set from your environment (-g). This can cause unexpected builds. Consider passing it on the command line instead.
+CFLAGS = -g
+$ make CFLAGS=-O0
+CFLAGS = -O0</code></pre>
+</div>
+<p>
+  The command-line version doesn't trigger the warning because its
+  origin is <code>command line</code>, not <code>environment</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>=</code> is lazy — stored text, re-expanded at every reference.</li>
+  <li><code>:=</code> is strict — right-hand side expanded once, value frozen.</li>
+  <li><code>?=</code> assigns only if not already set (command-line and env count as set).</li>
+  <li><code>+=</code> appends, preserving the flavor of the original.</li>
+  <li><code>!=</code> runs a shell command and captures stdout.</li>
+  <li>Default to <code>:=</code>; reach for <code>=</code> only for late binding.</li>
+  <li>Reference with <code>$(NAME)</code> or <code>${NAME}</code>. One-char names can skip braces.</li>
+  <li>Target-specific variables cascade to prerequisites.</li>
+  <li><code>export</code>, <code>unexport</code>, <code>.EXPORT_ALL_VARIABLES:</code> control what reaches the child shell.</li>
+  <li><code>$(origin VAR)</code> tells you where a value came from.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="03-anatomy-of-a-rule.html"><span class="lbl">← Prev</span><span class="ttl">Anatomy of a Rule</span></a>
+  <a href="05-automatic-vars.html" class="next"><span class="lbl">Next →</span><span class="ttl">Automatic Vars &amp; Pattern Rules</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

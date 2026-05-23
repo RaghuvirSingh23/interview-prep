@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5 · CLIs &amp; Packaging — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 05</span>
+  CLIs &amp; Packaging
+</h1>
+<p class="lede">
+  Turning a script into a tool — argument parsing, console-script
+  entry points, modern packaging with <code>pyproject.toml</code> and
+  <code>uv</code>, testing with <code>pytest</code>, and shipping a
+  Docker image. The shape of every Python tool you'll write at work.
+</p>
+
+<h2 id="argparse">argparse — std-lib, perfectly fine</h2>
+
+<div class="code" data-lang="python">
+<pre><code>import argparse
+from pathlib import Path
+
+def build_parser() -&gt; argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="promote",
+        description="Promote artifacts between channels",
+    )
+    p.add_argument("--version", action="version", version="promote 1.0.0")
+
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("artifact", help="Manage artifacts")
+    a.add_argument("name")
+    a.add_argument("--from", dest="src", required=True,
+                   choices=["dev", "staging"])
+    a.add_argument("--to",   dest="dst", required=True,
+                   choices=["staging", "release"])
+    a.add_argument("--dry-run", action="store_true")
+    a.add_argument("--verbose", "-v", action="count", default=0)
+    a.add_argument("--manifest", type=Path, help="Path to manifest.json")
+
+    sub.add_parser("list", help="List artifacts in each channel")
+
+    return p
+
+def main(argv: list[str] | None = None) -&gt; int:
+    args = build_parser().parse_args(argv)
+    if args.cmd == "artifact":
+        ...
+    elif args.cmd == "list":
+        ...
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())</code></pre>
+</div>
+
+<p>argparse covers 95% of needs. Pass <code>argv</code> in tests rather than reading <code>sys.argv</code>.</p>
+
+<h2 id="typer">typer — argparse with types</h2>
+
+<p>If you want type-driven argument parsing for free, <code>typer</code> is hard to beat:</p>
+
+<div class="code" data-lang="python">
+<pre><code>import typer
+from pathlib import Path
+from typing import Annotated
+
+app = typer.Typer(no_args_is_help=True)
+
+@app.command()
+def artifact(
+    name: str,
+    src: Annotated[str, typer.Option("--from")] = "dev",
+    dst: Annotated[str, typer.Option("--to")]   = "staging",
+    dry_run: bool = False,
+    manifest: Path | None = None,
+):
+    """Promote ARTIFACT from --from channel to --to channel."""
+    print(f"promoting {name}: {src} → {dst}")
+    if dry_run:
+        return
+    ...
+
+@app.command(name="list")
+def list_():
+    """List artifacts in each channel."""
+    ...
+
+if __name__ == "__main__":
+    app()</code></pre>
+</div>
+
+<p>Type hints become argument types. Docstrings become <code>--help</code> text. Subcommands are just decorated functions. Same kind of project as <code>fastapi</code>, by the same author.</p>
+
+<h2 id="click">click — battle-tested workhorse</h2>
+
+<p>What <code>typer</code> wraps under the hood. Worth knowing because most pre-2020 Python CLIs use it.</p>
+
+<div class="code" data-lang="python">
+<pre><code>import click
+from pathlib import Path
+
+@click.group()
+def cli(): pass
+
+@cli.command()
+@click.argument("name")
+@click.option("--from", "src", required=True, type=click.Choice(["dev", "staging"]))
+@click.option("--to",   "dst", required=True, type=click.Choice(["staging", "release"]))
+@click.option("--dry-run", is_flag=True)
+@click.option("--manifest", type=click.Path(exists=True, path_type=Path))
+def promote(name, src, dst, dry_run, manifest):
+    """Promote NAME from --from to --to."""
+    ...
+
+if __name__ == "__main__":
+    cli()</code></pre>
+</div>
+
+<p>Pick one of the three and stick with it. Mixing them in the same project is needless cognitive overhead.</p>
+
+<h2 id="exit-codes">Exit codes that mean something</h2>
+
+<div class="code" data-lang="python">
+<pre><code>EXIT_OK            = 0
+EXIT_GENERIC_FAIL  = 1
+EXIT_CONFIG_ERROR  = 2
+EXIT_AUTH_FAILED   = 3
+EXIT_NOT_FOUND     = 4
+EXIT_INTERRUPTED   = 130    # Unix convention for SIGINT
+
+def main() -&gt; int:
+    try:
+        run()
+        return EXIT_OK
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except FileNotFoundError as e:
+        log.error("not found: %s", e); return EXIT_NOT_FOUND
+    except AuthenticationError:
+        log.error("auth failed"); return EXIT_AUTH_FAILED
+    except Exception:
+        log.exception("unexpected"); return EXIT_GENERIC_FAIL
+
+if __name__ == "__main__":
+    raise SystemExit(main())</code></pre>
+</div>
+
+<p>Distinct exit codes let scripts that wrap your tool act sensibly: <code>./promote …; if [ $? = 4 ]; then …</code>. <code>raise SystemExit(rc)</code> at the bottom is the idiom — preserves <code>finally</code> handlers, unlike <code>sys.exit(rc)</code> from anywhere.</p>
+
+<h2 id="layout">Project layout</h2>
+
+<div class="code" data-lang="text">
+<pre><code>promote/
+├── pyproject.toml           # build &amp; metadata
+├── README.md
+├── LICENSE
+├── src/
+│   └── promote/             # the package — same name as the project
+│       ├── __init__.py
+│       ├── __main__.py      # `python -m promote`
+│       ├── cli.py
+│       ├── client.py
+│       └── config.py
+└── tests/
+    ├── test_cli.py
+    └── test_client.py</code></pre>
+</div>
+
+<p>Use <code>src/&lt;package&gt;/</code> layout (not the flat <code>./&lt;package&gt;/</code>). The src layout prevents accidentally importing your in-development package because the cwd is on <code>sys.path</code>; you have to install it (even <code>pip install -e .</code>) before <code>import promote</code> works. That's a feature.</p>
+
+<h2 id="pyproject">pyproject.toml — modern packaging</h2>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">toml</span><span class="title">pyproject.toml</span></div>
+<pre><code>[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name        = "promote"
+version     = "1.0.0"
+description = "Promote artifacts between channels"
+requires-python = "&gt;=3.11"
+license     = "MIT"
+authors     = [{name = "Your Name", email = "you@example.com"}]
+readme      = "README.md"
+
+dependencies = [
+    "requests &gt;= 2.31",
+    "pydantic &gt;= 2.5",
+    "typer &gt;= 0.12",
+    "ruamel.yaml &gt;= 0.18",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest &gt;= 8",
+    "pytest-cov",
+    "mypy",
+    "ruff",
+]
+
+[project.scripts]
+promote = "promote.cli:app"          # creates a `promote` command on install
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/promote"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]   # pycodestyle, pyflakes, isort, bugbear, pyupgrade, security
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[tool.pytest.ini_options]
+addopts  = "-q --strict-markers"
+testpaths = ["tests"]</code></pre>
+</div>
+
+<p>Highlights:</p>
+<ul>
+  <li><strong><code>[project.scripts]</code></strong> creates a real CLI executable on install. <code>pip install .</code> → <code>promote</code> is on <code>$PATH</code>.</li>
+  <li><strong>Optional dependencies</strong> with <code>[project.optional-dependencies]</code> let you split <code>dev</code>, <code>test</code>, <code>docs</code>. Install with <code>pip install -e ".[dev]"</code>.</li>
+  <li><strong>Tool config</strong> in <code>[tool.X]</code> sections — ruff, mypy, pytest all read from here. One file owns everything.</li>
+</ul>
+
+<h2 id="uv">uv — the fast modern installer</h2>
+
+<p><code>uv</code> (by Astral, of Ruff fame) replaces <code>pip + venv + pip-tools + pyenv</code> with one Rust binary that's 10-100× faster. The 2026 default for new Python projects.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Install uv (one-time)
+$ curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# In a project
+$ uv venv                              # create .venv
+$ uv pip install -e ".[dev]"           # install with extras
+$ uv pip compile pyproject.toml -o requirements.lock
+$ uv pip sync requirements.lock        # exact-match install
+
+# Or the workflow API
+$ uv add requests pydantic             # adds + installs + updates lockfile
+$ uv run pytest                        # runs in the project's venv automatically
+$ uv build                             # builds sdist + wheel</code></pre>
+</div>
+
+<p>Drop-in for most pip workflows. Try it; you won't go back.</p>
+
+<h2 id="lockfiles">Lockfiles</h2>
+
+<p>"Pin all dependencies including transitive ones at exact versions, with hashes." Run <code>pip install</code> from a lockfile and you get bit-for-bit identical environments.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ uv pip compile pyproject.toml --output-file requirements.lock --generate-hashes
+# requirements.lock now has every package + transitive at exact pinned version + sha256 hashes
+
+$ uv pip sync requirements.lock        # install exactly what's in the lock</code></pre>
+</div>
+
+<p>Commit the lockfile. CI installs from it. Bumps go through PRs. This is what stops "Tuesday's build was green, Wednesday's broke because some transitive dep released a bad version."</p>
+
+<h2 id="testing">Testing — pytest essentials</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">tests/test_client.py</span></div>
+<pre><code>import pytest
+from promote.client import ArtifactoryClient, ArtifactNotFound
+
+def test_normalise_url_strips_trailing_slash():
+    c = ArtifactoryClient("https://art.example.com/", token="x")
+    assert c.base == "https://art.example.com"
+
+def test_promote_missing_raises(monkeypatch):
+    c = ArtifactoryClient("https://art.example.com", token="x")
+    monkeypatch.setattr(c, "get", lambda path: (_ for _ in ()).throw(ArtifactNotFound("nope")))
+    with pytest.raises(ArtifactNotFound):
+        c.promote("foo", "dev", "staging")
+
+@pytest.fixture
+def fake_repo(tmp_path):
+    """A tmp directory shaped like our repo layout."""
+    (tmp_path / "manifest.json").write_text('{"sha":"abc"}')
+    return tmp_path
+
+def test_load_config(fake_repo):
+    cfg = load_config(fake_repo / "manifest.json")
+    assert cfg.sha == "abc"
+
+@pytest.mark.parametrize("src,dst,ok", [
+    ("dev", "staging", True),
+    ("staging", "release", True),
+    ("dev", "release", False),                 # skip a level
+    ("release", "dev", False),                 # backwards
+])
+def test_promotion_paths(src, dst, ok):
+    assert is_valid_promotion(src, dst) is ok</code></pre>
+</div>
+
+<p>Key features:</p>
+<ul>
+  <li><strong>Fixtures</strong> via <code>@pytest.fixture</code> — set up state, return it, optionally tear down.</li>
+  <li><strong><code>tmp_path</code></strong> — built-in fixture that gives a fresh <code>Path</code> per test. No more <code>os.tmpdir</code> dance.</li>
+  <li><strong><code>monkeypatch</code></strong> — replace attributes/env vars for one test, auto-restored.</li>
+  <li><strong><code>parametrize</code></strong> — run the same test against multiple inputs.</li>
+  <li><strong><code>capsys</code></strong> for capturing stdout/stderr; <strong><code>caplog</code></strong> for log records.</li>
+</ul>
+
+<h4>Mocking HTTP</h4>
+
+<div class="code" data-lang="python">
+<pre><code>import responses
+
+@responses.activate
+def test_fetch_releases():
+    responses.add(
+        responses.GET,
+        "https://api.example.com/v1/releases",
+        json=[{"tag": "v1"}, {"tag": "v2"}],
+        status=200,
+    )
+    out = fetch_releases()
+    assert [r["tag"] for r in out] == ["v1", "v2"]</code></pre>
+</div>
+
+<p><code>responses</code> intercepts <code>requests</code> calls. <code>respx</code> for <code>httpx</code>. <code>vcrpy</code> records and replays real HTTP exchanges.</p>
+
+<h2 id="ci-tests">Running tests in CI</h2>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">.github/workflows/ci.yml</span></div>
+<pre><code>name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: uv pip install -e ".[dev]" --system
+      - run: ruff check .
+      - run: mypy src/
+      - run: pytest --cov=promote --cov-report=xml</code></pre>
+</div>
+
+<h2 id="dockerise">Containerise the CLI</h2>
+
+<p>Distroless or slim Python base + multi-stage build for tiny images.</p>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">dockerfile</span><span class="title">Dockerfile</span></div>
+<pre><code># --- stage 1: builder ---
+FROM python:3.12-slim AS build
+WORKDIR /app
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml requirements.lock ./
+RUN uv pip install --system --no-cache --requirements requirements.lock
+COPY src/ ./src/
+RUN uv pip install --system --no-cache .
+
+# --- stage 2: runtime ---
+FROM python:3.12-slim
+RUN useradd -r -u 10001 app
+COPY --from=build /usr/local/lib/python3.12/site-packages \
+                  /usr/local/lib/python3.12/site-packages
+COPY --from=build /usr/local/bin/promote /usr/local/bin/promote
+USER 10001
+ENTRYPOINT ["promote"]</code></pre>
+</div>
+
+<p>Multi-stage so the final image carries only runtime, not build tools (no <code>uv</code>, no source). Non-root user. Final image around 70 MB.</p>
+
+<h2 id="hands-on">Hands-on: ship a CLI end-to-end</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · five-minute project skeleton</div>
+<div class="hands-on-body">
+<div class="code" data-lang="sh">
+<pre><code>$ mkdir -p src/promote tests &amp;&amp; cd $_/..
+$ cat &gt; src/promote/__init__.py &lt;&lt;'EOF'
+__version__ = "0.1.0"
+EOF
+$ cat &gt; src/promote/cli.py &lt;&lt;'EOF'
+import typer
+app = typer.Typer()
+
+@app.command()
+def hello(name: str = "world"):
+    """Say hello."""
+    typer.echo(f"hello, {name}")
+
+if __name__ == "__main__":
+    app()
+EOF
+$ cat &gt; pyproject.toml &lt;&lt;'EOF'
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "promote"
+version = "0.1.0"
+requires-python = "&gt;=3.11"
+dependencies = ["typer&gt;=0.12"]
+
+[project.scripts]
+promote = "promote.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/promote"]
+EOF
+$ uv venv &amp;&amp; source .venv/bin/activate
+$ uv pip install -e .
+$ promote hello --name Raghu
+hello, Raghu
+$ uv build
+$ ls dist/
+promote-0.1.0-py3-none-any.whl  promote-0.1.0.tar.gz</code></pre>
+</div>
+<p>You now have a real installable, distributable Python CLI. Add tests, dockerise, ship.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Exit codes</span>
+</div>
+<div class="exercise-body">
+<p>Write a CLI that exits 0 on success, 2 on bad config, 4 if the requested artifact is missing. Show the wrapper logic in shell that branches on these codes.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>def main() -&gt; int:
+    try: run()
+    except ConfigError: return 2
+    except ArtifactNotFound: return 4
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())</code></pre>
+</div>
+<div class="code" data-lang="sh">
+<pre><code>./promote artifact foo --from=dev --to=staging
+case $? in
+  0) echo "ok" ;;
+  2) echo "config error — fix and rerun" ;;
+  4) echo "artifact missing — typo?" ;;
+  *) echo "unknown failure" ;;
+esac</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Subcommands with argparse</span>
+</div>
+<div class="exercise-body">
+<p>Build an argparse-based CLI with subcommands <code>build</code>, <code>test</code>, <code>publish</code>, each with its own flags.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import argparse
+
+def main():
+    p = argparse.ArgumentParser()
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    b = sub.add_parser("build")
+    b.add_argument("--target", required=True)
+
+    t = sub.add_parser("test")
+    t.add_argument("--coverage", action="store_true")
+
+    pub = sub.add_parser("publish")
+    pub.add_argument("--channel", choices=["dev", "staging", "release"])
+
+    args = p.parse_args()
+    if args.cmd == "build":   build(args.target)
+    elif args.cmd == "test":   test(args.coverage)
+    elif args.cmd == "publish": publish(args.channel)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Pytest fixture</span>
+</div>
+<div class="exercise-body">
+<p>Write a pytest fixture <code>fake_artifactory</code> that yields a fake server URL plus a teardown step that asserts no requests were left unmocked.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="python">
+<pre><code>import pytest, responses
+
+@pytest.fixture
+def fake_artifactory():
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, "https://art.test/api/v1/items",
+                 json={"items": []}, status=200)
+        yield "https://art.test"
+        # responses asserts every registered call was hit (default)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Multi-stage Docker</span>
+</div>
+<div class="exercise-body">
+<p>Write a Dockerfile that builds a Python CLI in &lt; 80 MB final image. Hint: stage 1 builds; stage 2 copies only the venv + the entrypoint binary. Use a non-root user.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The "Containerise the CLI" Dockerfile above is the canonical answer. Test the size with <code>docker build -t promote . &amp;&amp; docker images promote</code>. For under 50 MB, switch base to <code>gcr.io/distroless/python3-debian12</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 5.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Lockfile-driven CI</span>
+</div>
+<div class="exercise-body">
+<p>Set up a GitHub Actions workflow that fails the build if the lockfile is out of sync with <code>pyproject.toml</code>. Why is this useful?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>- run: |
+    uv pip compile pyproject.toml -o /tmp/check.lock
+    diff -u requirements.lock /tmp/check.lock</code></pre>
+</div>
+<p>Catches drift: someone added a dependency to <code>pyproject.toml</code> without regenerating the lockfile, so CI installs the old set. The diff fails the build and surfaces the mistake.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Pick one CLI lib (argparse / typer / click) and stick with it. Pass argv into <code>main()</code> so tests can drive it.</li>
+  <li>Use distinct exit codes; wrap with <code>raise SystemExit(rc)</code>.</li>
+  <li><code>src/&lt;package&gt;/</code> layout, <code>pyproject.toml</code> for everything, <code>[project.scripts]</code> for console entry points.</li>
+  <li><code>uv</code> replaces pip+venv+pip-tools at 10–100× speed.</li>
+  <li>Lockfiles with hashes, committed to git, used in CI.</li>
+  <li>Pytest with fixtures, parametrize, and HTTP mocking.</li>
+  <li>Multi-stage Docker for tiny final images, non-root user.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="04-data-formats.html"><span class="lbl">← Prev</span><span class="ttl">Data Formats</span></a>
+  <a href="06-automation-patterns.html" class="next"><span class="lbl">Next →</span><span class="ttl">Automation Patterns</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

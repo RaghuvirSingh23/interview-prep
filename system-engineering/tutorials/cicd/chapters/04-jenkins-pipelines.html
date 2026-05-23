@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4 · Jenkins — Pipelines — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 04</span>
+  Jenkins — Pipelines
+</h1>
+<p class="lede">
+  Pipelines are Jenkins' flagship feature. They live in your repo as
+  a <code>Jenkinsfile</code>, they're code not config, and they come in
+  two flavors: <em>Scripted</em> and <em>Declarative</em>. This chapter
+  explains both, why Declarative is almost always the right default,
+  and the Groovy essentials you'll need for the rest of the book.
+</p>
+
+<h2 id="two-flavors">Two flavors</h2>
+
+<p>When Jenkins introduced Pipelines in 2016, the first iteration was what we now call <strong>Scripted</strong>: raw Groovy, do whatever you want:</p>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Scripted Pipeline</span></div>
+<pre><code>node('linux') {
+    stage('Checkout') {
+        checkout scm
+    }
+    stage('Build') {
+        def branch = env.BRANCH_NAME
+        if (branch == 'main') {
+            sh 'make release'
+        } else {
+            sh 'make debug'
+        }
+    }
+}</code></pre>
+</div>
+
+<p>Full Groovy — loops, conditionals, functions, method calls. Wildly flexible. Also wildly easy to foot-gun: the syntax allows things that don't work, and stage visualisation in the UI is poor for dynamically-generated stages.</p>
+
+<p>In 2017 Jenkins added <strong>Declarative</strong>: a constrained DSL with a fixed structure:</p>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Declarative Pipeline</span></div>
+<pre><code>pipeline {
+    agent { label 'linux' }
+    stages {
+        stage('Checkout') {
+            steps { checkout scm }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    if (env.BRANCH_NAME == 'main') {
+                        sh 'make release'
+                    } else {
+                        sh 'make debug'
+                    }
+                }
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>
+  Notice the mandatory <code>pipeline { … }</code> wrapper, the
+  fixed <code>stages</code> → <code>stage</code> → <code>steps</code>
+  hierarchy, and the <code>script { … }</code> escape hatch when you
+  need imperative Groovy. That structure is the <em>whole point</em>:
+  it's easier to read, validate, and visualise.
+</p>
+
+<div class="callout tip">
+<div class="callout-title">Which to use</div>
+<p>
+  <strong>Declarative by default.</strong> It covers 95% of real
+  needs, has better errors, better UI support, and is readable by
+  someone who doesn't know Groovy. Use Scripted only when you need
+  dynamic stage generation at runtime — and even then, try to express
+  it with Declarative's <code>matrix</code> or generated
+  <code>stages</code> first.
+</p>
+<p>
+  This tutorial focuses on Declarative from here on. We'll use
+  Scripted only where Declarative can't reach.
+</p>
+</div>
+
+<h2 id="groovy-crash">A Groovy crash course</h2>
+
+<p>Jenkinsfiles are Groovy. You don't need to master Groovy, but you'll need these basics:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>// Strings: single or double quotes
+def name = 'world'
+def msg  = "Hello, ${name}"      // double-quoted => interpolates
+
+// Lists
+def langs = ['en', 'fr', 'de']
+langs.each { l -&gt; println l }
+
+// Maps
+def env = [NODE_VERSION: '20', PYTHON_VERSION: '3.11']
+
+// Functions
+def greet(who) {
+    return "Hello, ${who}"
+}
+
+// Closures (important — used everywhere in Jenkinsfiles)
+def loud  = { s -&gt; s.toUpperCase() }
+println loud('hi')
+
+// No semicolons needed
+def sum = 1 + 2
+
+// Null-safe navigation
+def branchName = env?.BRANCH_NAME ?: 'default'</code></pre>
+</div>
+
+<p>Key facts:</p>
+<ul>
+  <li><strong>Double-quoted strings interpolate</strong> <code>${…}</code>. Single-quoted don't. This matters when mixing Groovy with shell (see below).</li>
+  <li><strong>Closures</strong> are the primary unit of callable logic. <code>steps { sh 'make' }</code> is a closure passed to <code>steps</code>.</li>
+  <li><strong>Groovy is dynamically typed</strong>. Jenkins' Pipeline Groovy has some additional safety restrictions (CPS transformation — more in Chapter 6).</li>
+</ul>
+
+<h2 id="groovy-vs-shell">Groovy vs Shell interpolation — the trap</h2>
+
+<div class="code" data-lang="groovy">
+<pre><code>// GOOD — Groovy interpolates the var before sh runs
+def version = '1.2.3'
+sh "echo Building ${version}"
+
+// BAD — Groovy interpolates from a secret, exposing it in process listing
+withCredentials([string(credentialsId: 'api-token', variable: 'API_TOKEN')]) {
+    sh "curl -H 'Authorization: Bearer ${API_TOKEN}' https://api.example.com"
+}
+
+// GOOD — single quotes, shell sees $API_TOKEN as env var
+withCredentials([string(credentialsId: 'api-token', variable: 'API_TOKEN')]) {
+    sh 'curl -H "Authorization: Bearer $API_TOKEN" https://api.example.com'
+}</code></pre>
+</div>
+
+<p>
+  Rule: when a value is secret, use <strong>single-quoted</strong>
+  shell strings so Groovy doesn't interpolate it. The secret reaches
+  the shell only as an environment variable, and Jenkins will mask
+  <code>${variable}</code> occurrences in logs.
+</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Double-quoted secrets leak</div>
+<p>
+  <code>sh "curl -H 'Authorization: Bearer ${TOKEN}'"</code> lands
+  the token as a literal string in the resulting shell command. On
+  some Linux setups, other users can see the full command line in
+  <code>/proc</code>. Jenkins' log masking catches most prints but
+  not everything. Single-quoted shell + env var is safer.
+</p>
+</div>
+
+<h2 id="structure">Declarative structure, one block at a time</h2>
+
+<p>Every Declarative Jenkinsfile follows this shape:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent { ... }               // mandatory
+    environment { ... }         // optional — env vars for the whole pipeline
+    options { ... }             // optional — build-wide options
+    parameters { ... }          // optional — user inputs
+    triggers { ... }            // optional — cron / SCM polling
+    tools { ... }               // optional — tool auto-install (JDK, Maven, ...)
+    stages {
+        stage('Name') {
+            agent { ... }       // optional — override per-stage
+            when { ... }        // optional — should this stage run?
+            environment { ... } // optional — stage-scoped env
+            tools { ... }       // optional — stage-scoped tools
+            steps { ... }       // mandatory — what to actually do
+            post { ... }        // optional — stage-scoped post-actions
+        }
+        stage('Parallel things') {
+            parallel {          // optional — sub-stages run concurrently
+                stage('A') { steps { ... } }
+                stage('B') { steps { ... } }
+            }
+        }
+    }
+    post { ... }                // optional — pipeline-wide post-actions
+}</code></pre>
+</div>
+
+<p>Chapter 5 dives into each block. Here we give the short version:</p>
+
+<h3 id="agent"><code>agent</code></h3>
+<p>Where the pipeline (or stage) runs. <code>agent any</code>, <code>agent none</code> (require stage-level overrides), <code>agent { label 'linux' }</code>, <code>agent { docker 'node:20' }</code>, <code>agent { kubernetes { yaml '…' } }</code>.</p>
+
+<h3 id="environment"><code>environment</code></h3>
+<p>Set env vars for the block:</p>
+<div class="code" data-lang="groovy">
+<pre><code>environment {
+    NODE_VERSION = '20'
+    DB_URL       = credentials('staging-db')
+}</code></pre>
+</div>
+<p><code>credentials('id')</code> binds a Jenkins credential to an env var — with <code>username + password</code>-type credentials, it binds three: <code>DB_URL</code>, <code>DB_URL_USR</code>, <code>DB_URL_PSW</code>.</p>
+
+<h3 id="options"><code>options</code></h3>
+<p>Build-wide options:</p>
+<div class="code" data-lang="groovy">
+<pre><code>options {
+    timeout(time: 20, unit: 'MINUTES')
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    disableConcurrentBuilds()
+    ansiColor('xterm')
+}</code></pre>
+</div>
+
+<h3 id="parameters"><code>parameters</code></h3>
+<p>User-supplied inputs on manual builds:</p>
+<div class="code" data-lang="groovy">
+<pre><code>parameters {
+    string(name: 'VERSION', defaultValue: '1.0.0', description: 'Version to release')
+    choice(name: 'ENV', choices: ['staging', 'prod'])
+    booleanParam(name: 'SKIP_TESTS', defaultValue: false)
+}</code></pre>
+</div>
+<p>Accessed in steps as <code>${params.VERSION}</code>.</p>
+
+<h3 id="triggers"><code>triggers</code></h3>
+<p>Automated triggers:</p>
+<div class="code" data-lang="groovy">
+<pre><code>triggers {
+    cron('H 2 * * *')          // nightly at 02:xx (H = spread load)
+    pollSCM('H/15 * * * *')    // check git every 15 min
+}</code></pre>
+</div>
+
+<h3 id="stages-steps"><code>stages</code> / <code>steps</code></h3>
+<p>Where the work happens. We'll do them in depth next chapter.</p>
+
+<h3 id="post"><code>post</code></h3>
+<p>
+  Cleanup or notification. Conditions: <code>always</code>,
+  <code>success</code>, <code>failure</code>, <code>unstable</code>,
+  <code>changed</code>, <code>aborted</code>, <code>cleanup</code>.
+</p>
+<div class="code" data-lang="groovy">
+<pre><code>post {
+    always   { archiveArtifacts 'build/**' }
+    success  { slackSend(channel: '#ci', message: "✅ ${env.JOB_NAME} #${env.BUILD_NUMBER}") }
+    failure  { slackSend(channel: '#ci', message: "❌ ${env.JOB_NAME} #${env.BUILD_NUMBER}") }
+    cleanup  { cleanWs() }
+}</code></pre>
+</div>
+
+<h2 id="essential-steps">The steps you'll use constantly</h2>
+
+<table>
+<thead><tr><th>Step</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>sh 'cmd'</code> / <code>bat 'cmd'</code></td><td>Run a shell / Windows batch command.</td></tr>
+<tr><td><code>checkout scm</code></td><td>Pull the repo (multibranch auto).</td></tr>
+<tr><td><code>git url: '…', branch: 'main'</code></td><td>Clone a specific repo.</td></tr>
+<tr><td><code>dir('subpath') { … }</code></td><td>Run nested steps in a subdirectory.</td></tr>
+<tr><td><code>withEnv(['K=V']) { … }</code></td><td>Set env vars for a block.</td></tr>
+<tr><td><code>withCredentials([…]) { … }</code></td><td>Bind Jenkins credentials to env.</td></tr>
+<tr><td><code>archiveArtifacts 'dist/**'</code></td><td>Save files as build artifacts.</td></tr>
+<tr><td><code>junit 'reports/**/*.xml'</code></td><td>Ingest JUnit test results.</td></tr>
+<tr><td><code>publishHTML target: [reportDir: …]</code></td><td>Publish an HTML report (coverage, docs).</td></tr>
+<tr><td><code>stash</code> / <code>unstash</code></td><td>Pass files between stages.</td></tr>
+<tr><td><code>input message: '…'</code></td><td>Pause for human approval.</td></tr>
+<tr><td><code>error 'msg'</code></td><td>Fail the stage explicitly.</td></tr>
+<tr><td><code>echo 'msg'</code></td><td>Print to build log.</td></tr>
+<tr><td><code>readFile</code> / <code>writeFile</code></td><td>Read or write files from Groovy.</td></tr>
+<tr><td><code>build job: 'other-job', parameters: […]</code></td><td>Trigger another Jenkins job.</td></tr>
+</tbody>
+</table>
+
+<p>Every plugin adds steps. A useful reference: <em>Snippet Generator</em> in any pipeline job — build a step interactively and see the Groovy.</p>
+
+<h2 id="sh-vs-script">sh vs script</h2>
+
+<p>Two common escape hatches:</p>
+
+<div class="code" data-lang="groovy">
+<pre><code>stage('Work') {
+    steps {
+        // inline shell — one-liner or multiline
+        sh '''
+            set -euo pipefail
+            make
+            make test
+        '''
+
+        // escape to Groovy when Declarative can't express the logic
+        script {
+            def branches = sh(returnStdout: true, script: 'git branch -r').trim()
+            echo "Branches: ${branches}"
+            if (branches.contains('release')) {
+                echo 'Release branch exists.'
+            }
+        }
+    }
+}</code></pre>
+</div>
+
+<p>
+  <code>sh(returnStdout: true, script: '…')</code> captures stdout.
+  Without it, <code>sh</code> returns the exit code.
+  <code>returnStatus: true</code> captures the exit code without
+  failing the step — useful for conditionals.
+</p>
+
+<h2 id="env-vars">Built-in env vars</h2>
+
+<p>Inside any step, these are available:</p>
+
+<table>
+<tr><td><code>env.BUILD_NUMBER</code></td>  <td>Monotonic per job</td></tr>
+<tr><td><code>env.BUILD_ID</code></td>      <td>Same as BUILD_NUMBER in modern Jenkins</td></tr>
+<tr><td><code>env.BUILD_URL</code></td>     <td>Link to this build</td></tr>
+<tr><td><code>env.JOB_NAME</code></td>      <td>Job name</td></tr>
+<tr><td><code>env.BRANCH_NAME</code></td>   <td>(multibranch) current branch</td></tr>
+<tr><td><code>env.CHANGE_ID</code></td>     <td>(multibranch) PR number, if applicable</td></tr>
+<tr><td><code>env.CHANGE_BRANCH</code></td> <td>(multibranch) source branch of PR</td></tr>
+<tr><td><code>env.GIT_COMMIT</code></td>    <td>Full commit SHA</td></tr>
+<tr><td><code>env.GIT_BRANCH</code></td>    <td>Ref name</td></tr>
+<tr><td><code>env.NODE_NAME</code></td>     <td>Agent name</td></tr>
+<tr><td><code>env.WORKSPACE</code></td>     <td>Path to the workspace</td></tr>
+</table>
+
+<p>Use in strings (<code>${env.BUILD_NUMBER}</code>) or directly (<code>env.BUILD_NUMBER</code>). Setting <code>env.FOO = 'bar'</code> inside a <code>script</code> block sets it for the rest of the pipeline.</p>
+
+<h2 id="hands-on">Hands-on: a realistic pipeline</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · lint, test, build, archive</div>
+<div class="hands-on-body">
+<p>On your local Jenkins, create a Pipeline job and paste this:</p>
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkinsfile</span></div>
+<pre><code>pipeline {
+    agent any
+    options {
+        timeout(time: 10, unit: 'MINUTES')
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    environment {
+        APP = 'hello'
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Building ${env.APP} #${env.BUILD_NUMBER}"
+                // In a real job, this would checkout a repo.
+                sh '''
+                    mkdir -p src
+                    cat &gt; src/hello.py &lt;&lt;'EOF'
+def greet(name):
+    return f"Hello, {name}!"
+EOF
+                    cat &gt; src/test_hello.py &lt;&lt;'EOF'
+from hello import greet
+def test_greet():
+    assert greet("world") == "Hello, world!"
+EOF
+                '''
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                sh 'python3 -m py_compile src/*.py'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh '''
+                    cd src
+                    python3 -m pytest -v --junitxml=../test-results.xml || true
+                '''
+            }
+            post {
+                always { junit 'test-results.xml' }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                sh '''
+                    mkdir -p dist
+                    tar czf dist/${APP}-${BUILD_NUMBER}.tar.gz src/
+                    ls -la dist/
+                '''
+            }
+        }
+    }
+
+    post {
+        success { echo "✅ build #${env.BUILD_NUMBER} succeeded" }
+        failure { echo "❌ build #${env.BUILD_NUMBER} failed" }
+        always  { archiveArtifacts artifacts: 'dist/**', fingerprint: true }
+    }
+}</code></pre>
+</div>
+<p>Save, Build Now, and watch each stage go green. Check the "Test Result Trend" graph (bottom of the job page) after a couple of builds — <code>junit</code> feeds that.</p>
+<p>Now edit a test to fail (assert on a wrong string) and re-run. Notice: because the <code>Test</code> stage uses <code>|| true</code>, pytest's failure doesn't stop the pipeline, but <code>junit</code> marks the build <em>UNSTABLE</em>. Remove the <code>|| true</code> and you'll get a <em>FAILED</em> build instead.</p>
+</div>
+</div>
+
+<h2 id="multibranch">Multibranch pipelines</h2>
+
+<p>
+  The killer feature for most teams: <strong>multibranch
+  pipelines</strong>. You configure Jenkins once to point at a repo;
+  Jenkins then:
+</p>
+<ol>
+  <li>Discovers every branch.</li>
+  <li>For each branch that has a <code>Jenkinsfile</code>, creates a sub-job.</li>
+  <li>Runs the pipeline on every push.</li>
+  <li>For every PR, runs the pipeline using the Jenkinsfile from the PR branch.</li>
+</ol>
+
+<p>To set up: Dashboard → New Item → <strong>Multibranch Pipeline</strong>. Add a Branch Source (GitHub, GitLab, Bitbucket, git). Save. Scan. Watch Jenkins discover and build every branch.</p>
+
+<p>
+  Inside a multibranch pipeline, <code>env.BRANCH_NAME</code> tells
+  you which branch is being built, and <code>env.CHANGE_ID</code>
+  is set if the build is for a PR. Use in <code>when</code>
+  conditions:
+</p>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy to staging') {
+    when { branch 'main' }
+    steps { sh './deploy.sh staging' }
+}
+stage('Deploy to prod') {
+    when { buildingTag() }       // only on git tag
+    steps { sh './deploy.sh prod' }
+}</code></pre>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Scripted or Declarative?</span>
+</div>
+<div class="exercise-body">
+<p>For each snippet, say if it's Scripted or Declarative and how you can tell:</p>
+<div class="code" data-lang="groovy">
+<pre><code>(a)  node('linux') { stage('X') { sh 'make' } }
+(b)  pipeline { agent any; stages { stage('X') { steps { sh 'make' } } } }
+(c)  pipeline { agent any; stages { stage('X') { sh 'make' } } }</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li>(a) Scripted — <code>node { … }</code> as the outermost block is Scripted syntax.</li>
+<li>(b) Declarative — the <code>pipeline { agent { stages { stage { steps { … } } } } }</code> shape.</li>
+<li>(c) Declarative but <em>invalid</em> — <code>stage</code> requires a <code>steps</code> block in Declarative. Would fail with a syntax error.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Secret-safe sh</span>
+</div>
+<div class="exercise-body">
+<p>Fix this snippet so the token isn't interpolated by Groovy:</p>
+<div class="code" data-lang="groovy">
+<pre><code>withCredentials([string(credentialsId: 'gh', variable: 'GH_TOKEN')]) {
+    sh "curl -H 'Authorization: token ${GH_TOKEN}' https://api.github.com/user"
+}</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>withCredentials([string(credentialsId: 'gh', variable: 'GH_TOKEN')]) {
+    sh 'curl -H "Authorization: token $GH_TOKEN" https://api.github.com/user'
+}</code></pre>
+</div>
+<p>Single-quoted Groovy string ⇒ no interpolation. Shell sees <code>$GH_TOKEN</code> and expands it from the environment, which Jenkins has populated. Logs mask the value.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Conditional stage</span>
+</div>
+<div class="exercise-body">
+<p>Write a <code>Deploy</code> stage that runs only when the build is for a tag starting with <code>v</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy') {
+    when { tag pattern: 'v.*', comparator: 'REGEXP' }
+    steps { sh './deploy.sh' }
+}</code></pre>
+</div>
+<p>Or with <code>buildingTag()</code> + an env check:</p>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy') {
+    when {
+        allOf {
+            buildingTag()
+            expression { env.TAG_NAME?.startsWith('v') }
+        }
+    }
+    steps { sh './deploy.sh' }
+}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Capture output</span>
+</div>
+<div class="exercise-body">
+<p>Write a step that captures the current git SHA in a Groovy variable and echoes it.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>script {
+    def sha = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+    echo "Building commit ${sha}"
+    env.GIT_SHA = sha            // available downstream
+}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Input approval</span>
+</div>
+<div class="exercise-body">
+<p>Add a "Deploy to prod" stage that pauses and asks "Really deploy v1.0.0 to prod?" and only proceeds if a user in the <code>release-managers</code> group confirms within 30 minutes.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Deploy to prod') {
+    when { branch 'main' }
+    steps {
+        timeout(time: 30, unit: 'MINUTES') {
+            input message: "Really deploy ${env.BUILD_NUMBER} to prod?",
+                  ok: 'Deploy',
+                  submitter: 'release-managers'
+        }
+        sh './deploy.sh prod'
+    }
+}</code></pre>
+</div>
+<p><code>input</code> holds an executor while waiting. Consider wrapping in a <code>stage('Wait for approval') { agent none; …}</code> so approvals don't tie up a build agent.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 4.6</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Stash/unstash</span>
+</div>
+<div class="exercise-body">
+<p>Two stages where "build" runs on <code>linux</code> and "package" runs on <code>macos</code>. Pass the <code>dist/</code> directory between them.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>stage('Build') {
+    agent { label 'linux' }
+    steps {
+        sh 'make'
+        stash name: 'dist', includes: 'dist/**'
+    }
+}
+stage('Package') {
+    agent { label 'macos' }
+    steps {
+        unstash 'dist'
+        sh 'hdiutil create dist/app.dmg -srcfolder dist/app'
+    }
+}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Pipelines come in Scripted (raw Groovy) and Declarative (structured DSL). Prefer Declarative.</li>
+  <li>Jenkinsfile is Groovy. Know enough to read closures, interpolation, and maps.</li>
+  <li>Single-quoted shell strings prevent Groovy from interpolating secrets.</li>
+  <li>Structure: <code>pipeline { agent, options, environment, parameters, triggers, stages, post }</code>.</li>
+  <li>Core steps: <code>sh</code>, <code>checkout</code>, <code>stash</code>/<code>unstash</code>, <code>archiveArtifacts</code>, <code>junit</code>, <code>withCredentials</code>, <code>input</code>.</li>
+  <li>Multibranch pipelines auto-build every branch and every PR — start here for any serious project.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="03-jenkins-intro.html"><span class="lbl">← Prev</span><span class="ttl">Jenkins — Architecture</span></a>
+  <a href="05-jenkins-declarative.html" class="next"><span class="lbl">Next →</span><span class="ttl">Jenkins — Declarative DSL</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

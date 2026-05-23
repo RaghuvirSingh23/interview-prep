@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · Networking &amp; Storage — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 10</span>
+  Networking &amp; Storage
+</h1>
+<p class="lede">
+  Service deep-dive, Ingress, NetworkPolicy, DNS, plus the storage
+  side: PV, PVC, StorageClass, volume modes, and the patterns that
+  actually work in production.
+</p>
+
+<h2 id="network-model">The Kubernetes network model</h2>
+
+<p>The model has three rules:</p>
+<ol>
+  <li><strong>Every Pod gets its own IP.</strong> No NAT inside the cluster.</li>
+  <li><strong>Every Pod can talk to every other Pod, by IP.</strong> Cross-node, cross-namespace, no rewriting.</li>
+  <li><strong>The network plugin (CNI) makes this true.</strong> Calico, Cilium, Flannel, Weave — pick one; the API doesn't care.</li>
+</ol>
+
+<p>This is fundamentally different from Docker's default bridge networking. K8s assumes a flat-ish network. The plumbing is the CNI's problem.</p>
+
+<h2 id="service-types">Service types — full coverage</h2>
+
+<h4>ClusterIP (default)</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  type: ClusterIP
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080 }]</code></pre>
+</div>
+<p>Internal-only. Allocates a cluster-internal virtual IP. Reachable from any pod. Not reachable from outside the cluster.</p>
+
+<h4>NodePort</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  type: NodePort
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080, nodePort: 30080 }]</code></pre>
+</div>
+<p>ClusterIP <em>plus</em> a port (30000–32767) on every node. Reach the service via <code>&lt;any-node-IP&gt;:30080</code>. Crude; mostly for demos. Don't use in production — use Ingress or a real LoadBalancer.</p>
+
+<h4>LoadBalancer</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  type: LoadBalancer
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8080 }]</code></pre>
+</div>
+<p>NodePort plus the cloud provider provisions an external LB pointing at the NodePorts. AWS → ALB/NLB; GCP → Cloud LB; Azure → Standard LB. On bare-metal, you need MetalLB or similar.</p>
+
+<h4>Headless</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  clusterIP: None
+  selector: { app: db }
+  ports: [{ port: 5432 }]</code></pre>
+</div>
+<p>No virtual IP. DNS resolves directly to all matching Pod IPs. Used by StatefulSets so each pod gets a unique DNS name (<code>db-0.db.svc</code>, etc.).</p>
+
+<h4>ExternalName</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  type: ExternalName
+  externalName: my-db.us-east-1.rds.amazonaws.com</code></pre>
+</div>
+<p>DNS CNAME — service name resolves to an external host. Useful for "make in-cluster apps see <code>db</code> regardless of whether it's running in-cluster or out".</p>
+
+<h2 id="dns">In-cluster DNS</h2>
+
+<p>Every Service is auto-resolvable via cluster DNS (CoreDNS). The naming pattern:</p>
+
+<div class="code" data-lang="text">
+<pre><code>&lt;service&gt;.&lt;namespace&gt;.svc.cluster.local
+
+# From the same namespace, just:
+http://api/
+
+# From another namespace:
+http://api.team-alpha/
+http://api.team-alpha.svc.cluster.local/
+
+# Headless service — resolves to all Pod IPs:
+$ nslookup db
+db.default.svc.cluster.local
+Addresses: 10.244.0.5, 10.244.0.6, 10.244.0.7
+
+# Specific stateful pod:
+$ nslookup db-0.db
+db-0.db.default.svc.cluster.local
+Address: 10.244.0.5</code></pre>
+</div>
+
+<p>Pods get DNS configured to search the cluster's domain by default, so short names work within a namespace.</p>
+
+<h2 id="ingress">Ingress — HTTP routing</h2>
+
+<p>An Ingress is a set of HTTP routing rules: "<code>foo.example.com/api</code> goes to <code>api</code> Service, <code>foo.example.com/web</code> goes to <code>web</code> Service". You don't run Ingress yourself — you install an <strong>Ingress controller</strong> (nginx-ingress, Traefik, HAProxy, AWS ALB, GCP GCE, Cilium) which watches Ingress objects and configures itself accordingly.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx                # which controller handles this
+  tls:
+    - hosts: ["app.example.com"]
+      secretName: app-tls                 # tls.crt, tls.key in this Secret
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port: { number: 80 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: { number: 80 }</code></pre>
+</div>
+
+<p>One cloud LB → many services routed by host/path. The cost-saver vs. one LB per Service.</p>
+
+<h4>Install an ingress controller (kind)</h4>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml
+$ kubectl wait --namespace ingress-nginx \
+    --for=condition=ready pod \
+    --selector=app.kubernetes.io/component=controller \
+    --timeout=90s</code></pre>
+</div>
+
+<p>For TLS, install <code>cert-manager</code> and use a <code>ClusterIssuer</code> for Let's Encrypt — most people pair it with Ingress for automatic HTTPS.</p>
+
+<h2 id="gateway-api">Gateway API — the modern replacement</h2>
+
+<p>Ingress is showing its age — annotations are vendor-specific, multi-tenant routing is awkward. The <strong>Gateway API</strong> (graduated v1 in 2023) is the successor: distinct resources for <code>GatewayClass</code>, <code>Gateway</code>, <code>HTTPRoute</code>, <code>TLSRoute</code>, with proper role separation between platform admins and app teams.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: { name: external, namespace: gateways }
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - { kind: Secret, name: example-tls }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: api, namespace: team-alpha }
+spec:
+  parentRefs:
+    - { name: external, namespace: gateways }
+  hostnames: ["api.example.com"]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: / } }]
+      backendRefs:
+        - { name: api, port: 80 }</code></pre>
+</div>
+
+<p>Adoption is uneven; Ingress still rules in 2026. Worth knowing the direction.</p>
+
+<h2 id="networkpolicy">NetworkPolicy — pod-level firewalling</h2>
+
+<p>By default, every Pod can talk to every other Pod. NetworkPolicy lets you restrict that. Without one, your namespace boundaries are <em>name</em>-level, not <em>network</em>-level.</p>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-allow-frontend
+  namespace: prod
+spec:
+  podSelector: { matchLabels: { app: api } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: frontend } }
+        - namespaceSelector: { matchLabels: { name: monitoring } }
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: db } } }]
+      ports: [{ protocol: TCP, port: 5432 }]
+    - to: [{ namespaceSelector: { matchLabels: { name: kube-system } } }]
+      ports: [{ protocol: UDP, port: 53 }]</code></pre>
+</div>
+
+<p>Read: "pods labelled <code>app: api</code> in prod accept ingress only from <code>app: frontend</code> pods or any pod in the <code>monitoring</code> namespace, on port 8080. They can egress only to <code>app: db</code> on 5432 and to kube-system DNS on 53."</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Default-deny is opt-in</div>
+<p>Without a NetworkPolicy, all traffic is allowed. The moment you create <em>any</em> NetworkPolicy targeting a pod (via <code>podSelector</code>), <strong>all other traffic to/from that pod is denied</strong>. So a half-written policy can lock things out fast.</p>
+<p>The mature pattern: a baseline "default-deny-all" NetworkPolicy in each namespace, plus per-app allow rules. Test in staging.</p>
+</div>
+
+<h4>Default-deny baseline</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-all, namespace: prod }
+spec:
+  podSelector: {}                # all pods in this namespace
+  policyTypes: [Ingress, Egress]
+  # no ingress / egress blocks => deny everything</code></pre>
+</div>
+
+<p>Then layer on allow-rules. Same model as a sane corp firewall.</p>
+
+<h2 id="storage">Storage — PV, PVC, StorageClass</h2>
+
+<p>Storage in K8s is split across three resources for separation of concerns:</p>
+
+<table>
+<thead><tr><th>Resource</th><th>Who writes it</th><th>What it says</th></tr></thead>
+<tbody>
+<tr><td><strong>StorageClass</strong></td><td>Cluster admin</td><td>"This is a class of storage available in the cluster — fast SSD, slow HDD, regional, etc."</td></tr>
+<tr><td><strong>PersistentVolumeClaim (PVC)</strong></td><td>App author</td><td>"I want some storage of class X, size Y, accessMode Z."</td></tr>
+<tr><td><strong>PersistentVolume (PV)</strong></td><td>Auto-provisioned (or admin)</td><td>"Here's a piece of actual storage matching that claim."</td></tr>
+</tbody>
+</table>
+
+<h4>Static vs dynamic provisioning</h4>
+
+<p><strong>Static</strong>: admin pre-creates PVs; users claim them via PVCs. Old-school.</p>
+<p><strong>Dynamic</strong>: user creates a PVC referencing a StorageClass; the cluster's CSI driver provisions a fresh PV matching the request. The default in 2026.</p>
+
+<h4>StorageClass</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: ebs.csi.aws.com               # the CSI driver
+parameters:
+  type: gp3
+  encrypted: "true"
+  fsType: ext4
+reclaimPolicy: Delete                      # delete the underlying disk when PV is removed
+volumeBindingMode: WaitForFirstConsumer    # don't pick a zone until a Pod is scheduled
+allowVolumeExpansion: true                 # let users grow the PVC later</code></pre>
+</div>
+
+<p><code>WaitForFirstConsumer</code> matters in multi-AZ clusters: with <code>Immediate</code>, the PV is provisioned in some AZ and the Pod is then forced into that AZ. Wait-for-first lets the scheduler pick the Pod's AZ first, then provision storage there.</p>
+
+<h4>PVC</h4>
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: data, namespace: prod }
+spec:
+  storageClassName: fast-ssd
+  accessModes: [ReadWriteOnce]              # the only mode most cloud disks support
+  resources:
+    requests: { storage: 50Gi }</code></pre>
+</div>
+
+<h4>Mounting in a Pod</h4>
+<div class="code" data-lang="yaml">
+<pre><code>spec:
+  containers:
+    - name: app
+      image: my-app:1.0
+      volumeMounts:
+        - { name: data, mountPath: /var/lib/app }
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: data</code></pre>
+</div>
+
+<p>For StatefulSets, use <code>volumeClaimTemplates</code> (Chapter 9) — one PVC auto-created per pod with stable identity.</p>
+
+<h2 id="access-modes">Access modes</h2>
+
+<table>
+<thead><tr><th>Mode</th><th>Meaning</th><th>Reality</th></tr></thead>
+<tbody>
+<tr><td><code>ReadWriteOnce</code> (RWO)</td><td>Read+write by one node</td><td>EBS, GCP PD, Azure Disk — most block storage</td></tr>
+<tr><td><code>ReadOnlyMany</code> (ROX)</td><td>Read-only by many nodes</td><td>Object stores, some NFS</td></tr>
+<tr><td><code>ReadWriteMany</code> (RWX)</td><td>Read+write by many nodes</td><td>NFS, EFS, FSx, CephFS, NetApp — file storage</td></tr>
+<tr><td><code>ReadWriteOncePod</code> (RWOP)</td><td>One Pod, one node</td><td>Newer, stricter than RWO</td></tr>
+</tbody>
+</table>
+
+<p>Most apps use RWO; you typically have one writer pod. Reach for RWX only when you genuinely need shared writers — and brace for the perf and consistency tradeoffs that come with networked file systems.</p>
+
+<h2 id="ephemeral">Ephemeral storage — emptyDir, projected, downwardAPI</h2>
+
+<h4>emptyDir</h4>
+<div class="code" data-lang="yaml">
+<pre><code>volumes:
+  - name: cache
+    emptyDir: {}
+  # or memory-backed
+  - name: scratch
+    emptyDir:
+      medium: Memory
+      sizeLimit: 1Gi</code></pre>
+</div>
+<p>Created when the Pod starts on a node, deleted when the Pod is removed. Lives on node-local disk (or RAM if <code>medium: Memory</code>). Use for scratch space and inter-container communication.</p>
+
+<h4>projected</h4>
+<div class="code" data-lang="yaml">
+<pre><code>volumes:
+  - name: combined
+    projected:
+      sources:
+        - configMap: { name: app-config }
+        - secret:    { name: db-creds }
+        - serviceAccountToken:
+            path: token
+            expirationSeconds: 3600</code></pre>
+</div>
+<p>Mounts multiple sources at one path. Modern ServiceAccount tokens use this — short-lived, auto-rotated.</p>
+
+<h4>downwardAPI</h4>
+<div class="code" data-lang="yaml">
+<pre><code>env:
+  - name: POD_NAME
+    valueFrom: { fieldRef: { fieldPath: metadata.name } }
+  - name: POD_IP
+    valueFrom: { fieldRef: { fieldPath: status.podIP } }
+  - name: NODE_NAME
+    valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+  - name: CPU_LIMIT
+    valueFrom: { resourceFieldRef: { containerName: app, resource: limits.cpu } }</code></pre>
+</div>
+<p>Expose pod metadata into the container. Critical for self-aware logging (which pod am I?), graceful shutdown messages, and JVM heap-tuning to <code>$CPU_LIMIT</code>.</p>
+
+<h2 id="csi">CSI — the Container Storage Interface</h2>
+
+<p>Kubernetes itself doesn't know how to talk to AWS EBS or GCP PD. CSI drivers translate. Each cloud provider ships its own. On-prem options: Rook/Ceph, Longhorn, OpenEBS, Portworx.</p>
+
+<p>Day-to-day, you only care that a CSI driver exists for your storage and is registered as a StorageClass. You'll see CSI drivers as <code>DaemonSet</code>s in <code>kube-system</code>.</p>
+
+<h2 id="resize">Resizing PVCs</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl patch pvc data -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'</code></pre>
+</div>
+
+<p>Works if the StorageClass has <code>allowVolumeExpansion: true</code>. The CSI driver expands the underlying disk; for filesystem expansion, the Pod usually needs a restart.</p>
+
+<p>You can grow but generally not shrink. Plan ahead.</p>
+
+<h2 id="snapshots">VolumeSnapshots</h2>
+
+<div class="code" data-lang="yaml">
+<pre><code>apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata: { name: data-snap-2026-04-23 }
+spec:
+  volumeSnapshotClassName: csi-snapclass
+  source:
+    persistentVolumeClaimName: data</code></pre>
+</div>
+<p>Restore by creating a PVC with <code>dataSource</code> referencing the snapshot. Backup automation often uses this.</p>
+
+<h2 id="hands-on">Hands-on: TLS-terminated Ingress to a Service</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · expose hello with HTTPS in kind</div>
+<div class="hands-on-body">
+<p>Set up cluster with port maps, install ingress-nginx, deploy hello, expose via Ingress with self-signed TLS.</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">kind-config.yaml</span></div>
+<pre><code>kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 80,  hostPort: 80,  protocol: TCP }
+      - { containerPort: 443, hostPort: 443, protocol: TCP }
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kind create cluster --config kind-config.yaml
+$ kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+$ kubectl wait --namespace ingress-nginx \
+    --for=condition=ready pod \
+    --selector=app.kubernetes.io/component=controller \
+    --timeout=120s
+
+# self-signed cert (for testing only)
+$ openssl req -x509 -newkey rsa:2048 -nodes -keyout tls.key -out tls.crt \
+    -subj "/CN=hello.local" -days 365
+$ kubectl create secret tls hello-tls --cert=tls.crt --key=tls.key
+
+# deploy app
+$ kubectl create deploy hello --image=hashicorp/http-echo --replicas=2 -- -text=hi
+$ kubectl expose deploy hello --port=80 --target-port=5678
+$ kubectl apply -f - &lt;&lt;'EOF'
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: hello }
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [hello.local], secretName: hello-tls }]
+  rules:
+    - host: hello.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: hello, port: { number: 80 } } }
+EOF
+
+$ echo "127.0.0.1 hello.local" | sudo tee -a /etc/hosts
+$ curl -k https://hello.local/
+hi</code></pre>
+</div>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Service DNS</span>
+</div>
+<div class="exercise-body">
+<p>From a pod in namespace <code>app</code>, what's the DNS name for a Service <code>db</code> in namespace <code>data</code>? Two valid forms.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>db.data</code> (short, with namespace) or <code>db.data.svc.cluster.local</code> (FQDN). From within <code>data</code> itself, just <code>db</code> works.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Default-deny + allow</span>
+</div>
+<div class="exercise-body">
+<p>Write two NetworkPolicies for namespace <code>prod</code>: (a) deny all by default; (b) allow only DNS egress and ingress from same-namespace pods on port 8080.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code># (a)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: prod }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# (b)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-baseline, namespace: prod }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+  ingress:
+    - from: [{ podSelector: {} }]                    # any pod in same namespace
+      ports: [{ protocol: TCP, port: 8080 }]</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why Ingress?</span>
+</div>
+<div class="exercise-body">
+<p>Why do you usually want one Ingress + one cloud LB rather than one Service of <code>type: LoadBalancer</code> per app? Give two reasons.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><strong>Cost.</strong> Cloud LBs cost ~$20–30/month each. 50 services × 50 LBs = $1k/month wasted; one shared Ingress ALB serves them all.</li>
+<li><strong>Centralised L7 features</strong>: TLS termination, rate limiting, auth, redirects, rewrites — all in one place rather than configured per service.</li>
+</ol>
+<p>Plus: easier IP allowlisting, single point for cert renewal, one place for WAF rules.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">RWO across two nodes</span>
+</div>
+<div class="exercise-body">
+<p>You have an EBS-backed PVC mounted in a Deployment with replicas=2. Both pods need to write. What goes wrong, and how do you fix the design?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Goes wrong: EBS is RWO. The first pod attaches; the second pod, scheduled to a different node, fails with "Multi-Attach error". If both happen to land on the same node, EBS will let both attach, but two writers to the same filesystem corrupts it.</p>
+<p>Fix the design:</p>
+<ol>
+<li>If state-shared writes are essential, use RWX storage (EFS/FSx/NetApp/Ceph) — accept the perf cost.</li>
+<li>If pods can be sharded, use a StatefulSet with <code>volumeClaimTemplates</code> — each pod gets its own RWO PVC.</li>
+<li>If state belongs in a database, use one writer (a primary Postgres pod) and many readers, plus an external object store for blobs.</li>
+</ol>
+<p>Most "two writers want the same disk" cases are an architectural smell, not a storage problem.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 10.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Resize a PVC</span>
+</div>
+<div class="exercise-body">
+<p>Your <code>data</code> PVC is at 50Gi and 90% full. Resize to 100Gi. What's the minimum interruption?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ kubectl patch pvc data -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'</code></pre>
+</div>
+<p>Provided the StorageClass has <code>allowVolumeExpansion: true</code>:</p>
+<ol>
+<li>The CSI driver expands the underlying disk in-place — no data movement, takes seconds.</li>
+<li>The PVC's <code>status.conditions</code> shows <code>FileSystemResizePending</code>.</li>
+<li>For most modern CSI drivers, the filesystem is also expanded online, no Pod restart needed. Some require a restart — check the driver's docs.</li>
+</ol>
+<p>For a StatefulSet pod where you can't avoid a restart: rolling restart pod-by-pod, the new pods come up with the larger filesystem.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>K8s networking: every pod gets a real IP, every pod can reach every other pod, the CNI plugin makes it true.</li>
+  <li>Service types: ClusterIP (default), NodePort (crude), LoadBalancer (per-cloud), Headless (StatefulSet), ExternalName (CNAME).</li>
+  <li>In-cluster DNS: <code>service.namespace.svc.cluster.local</code>; short-form within the same namespace.</li>
+  <li>Ingress = HTTP routing; needs an Ingress controller installed; one controller fronting many services saves cost. Gateway API is the modern successor.</li>
+  <li>NetworkPolicy = pod-level firewalls. <strong>Default-deny is opt-in</strong>; baseline + allow rules.</li>
+  <li>Storage: PVC (claim) + StorageClass (class) + PV (actual disk, usually auto-provisioned via CSI).</li>
+  <li>Access modes: RWO (default for cloud disks), RWX (file storage), RWOP (newer strict mode).</li>
+  <li>Use <code>WaitForFirstConsumer</code>, <code>allowVolumeExpansion: true</code> on production StorageClasses.</li>
+  <li>Snapshots via VolumeSnapshot for backups; resize via PVC patch when expansion is allowed.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="11-k8s-workloads.html"><span class="lbl">← Prev</span><span class="ttl">Workloads</span></a>
+  <a href="13-k8s-production.html" class="next"><span class="lbl">Next →</span><span class="ttl">Production Patterns</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14 · Capstone Project — Python · Automation · K8s</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">Python · Automation · K8s</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-python-refresher.html">Python refresher</a></li>
+      <li><a href="02-python-toolbox.html">Python toolbox</a></li>
+      <li><a href="03-http-and-apis.html">HTTP &amp; APIs</a></li>
+      <li><a href="04-data-formats.html">Data formats</a></li>
+      <li><a href="05-clis-and-packaging.html">CLIs &amp; packaging</a></li>
+      <li><a href="06-automation-patterns.html">Automation patterns</a></li>
+      <li><a href="07-docker-fundamentals.html">Docker — fundamentals</a></li>
+      <li><a href="08-docker-production.html">Docker — production</a></li>
+      <li><a href="09-k8s-mental-model.html">Kubernetes — mental model</a></li>
+      <li><a href="10-k8s-core-resources.html">Core resources</a></li>
+      <li><a href="11-k8s-workloads.html">Workloads</a></li>
+      <li><a href="12-k8s-networking-storage.html">Networking &amp; storage</a></li>
+      <li><a href="13-k8s-production.html">Production patterns</a></li>
+      <li><a href="14-helm-gitops-operators.html">Helm, GitOps, operators</a></li>
+      <li><a href="15-jenkins-on-k8s.html">Jenkins on Kubernetes</a></li>
+      <li><a href="16-50-questions.html">The 50 Questions</a></li>
+      <li><a href="17-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 14</span>
+  Capstone — A Python Promotion Bot Running in Kubernetes
+</h1>
+<p class="lede">
+  We'll build a small Python tool that promotes artifacts between
+  channels (dev → staging) by polling Artifactory and creating K8s
+  Jobs in the cluster. It uses every pattern from the previous
+  chapters — typed Python, retries, idempotency, CLI, packaging,
+  containerisation, RBAC, ConfigMap/Secret, CronJob. Real-shape
+  automation in ~200 lines.
+</p>
+
+<h2 id="goals">What we'll build</h2>
+
+<p>Imagine: every <em>n</em> minutes, an automation needs to:</p>
+<ol>
+  <li>List all artifacts in the <code>dev</code> channel.</li>
+  <li>For each that has been validated (an annotation says so), promote it to <code>staging</code>.</li>
+  <li>Record what was promoted; never re-promote.</li>
+  <li>Trigger a "smoke test" K8s Job to validate the promoted artifact.</li>
+  <li>Report success/failure to a Slack channel.</li>
+</ol>
+
+<p>Scope: this exact pattern is the unsung hero of every embedded CI/CD pipeline, because the alternative is humans clicking buttons in Artifactory at 2 AM.</p>
+
+<h2 id="architecture">Architecture</h2>
+
+<div class="code" data-lang="text">
+<pre><code>          ┌──────────────────────────────┐
+          │  CronJob: promote-bot         │
+          │  every 10 minutes             │
+          └────────┬─────────────────────-┘
+                   │ runs Python tool
+                   ▼
+       ┌───────────────────────────────┐
+       │ promote-bot Pod                │
+       │ - reads ConfigMap: rules        │
+       │ - reads Secret: API tokens      │
+       │ - lists artifacts (Artifactory) │
+       │ - filters by label              │
+       │ - promotes via API              │
+       │ - creates K8s Job (smoke test)  │
+       │ - posts Slack message           │
+       └───────────────────────────────┘
+                   │ creates
+                   ▼
+       ┌──────────────────────────────┐
+       │ Job: smoke-test-&lt;sha&gt;        │
+       │ pulls promoted image          │
+       │ runs sanity tests             │
+       └──────────────────────────────┘</code></pre>
+</div>
+
+<h2 id="layout">Project layout</h2>
+
+<div class="code" data-lang="text">
+<pre><code>promote-bot/
+├── pyproject.toml
+├── README.md
+├── Dockerfile
+├── deploy/
+│   ├── namespace.yaml
+│   ├── rbac.yaml
+│   ├── configmap.yaml
+│   ├── secret-template.yaml
+│   ├── cronjob.yaml
+│   └── kustomization.yaml
+├── src/
+│   └── promote_bot/
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── cli.py
+│       ├── config.py
+│       ├── artifactory.py
+│       ├── k8s.py
+│       ├── slack.py
+│       └── promoter.py
+└── tests/
+    ├── test_artifactory.py
+    └── test_promoter.py</code></pre>
+</div>
+
+<h2 id="config">Config (Pydantic settings)</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">src/promote_bot/config.py</span></div>
+<pre><code>from pathlib import Path
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+import yaml
+
+class Settings(BaseSettings):
+    """Loaded from env (PROMOTE_*) and/or a config YAML."""
+    nexus_url:    str = Field(...)
+    nexus_token:  str = Field(...)               # via Secret
+    src_channel:  str = "dev"
+    dst_channel:  str = "staging"
+    label:        str = "qa-approved"
+    dry_run:      bool = False
+    slack_webhook: str | None = None              # optional, via Secret
+    namespace:    str = "promote"
+    smoke_image:  str = "registry.example.com/smoke:1.0"
+
+    model_config = SettingsConfigDict(
+        env_prefix="PROMOTE_",
+        case_sensitive=False,
+    )
+
+def load_extra_yaml(settings: Settings, path: Path) -&gt; Settings:
+    """Optional override from a config YAML mounted as a ConfigMap."""
+    if not path.exists():
+        return settings
+    extras = yaml.safe_load(path.read_text()) or {}
+    return settings.model_copy(update=extras)</code></pre>
+</div>
+
+<h2 id="artifactory">Artifactory client</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">src/promote_bot/artifactory.py</span></div>
+<pre><code>from __future__ import annotations
+import logging
+from dataclasses import dataclass
+from requests import Session
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+log = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class Artifact:
+    name: str
+    sha:  str
+    channel: str
+    qa_approved: bool
+
+class Artifactory:
+    def __init__(self, base_url: str, token: str):
+        self.base = base_url.rstrip('/')
+        self.s = Session()
+        self.s.headers.update({"Authorization": f"Bearer {token}",
+                                "Accept": "application/json",
+                                "User-Agent": "promote-bot/1.0"})
+        retry = Retry(
+            total=5, backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "PUT", "POST", "DELETE"),
+            respect_retry_after_header=True,
+        )
+        self.s.mount("https://", HTTPAdapter(max_retries=retry, pool_maxsize=20))
+
+    def list_artifacts(self, channel: str) -&gt; list[Artifact]:
+        r = self.s.get(f"{self.base}/api/repositories/{channel}-local/items",
+                       timeout=(5, 30))
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        return [Artifact(
+            name=i["name"], sha=i["properties"].get("sha", ""),
+            channel=channel,
+            qa_approved=i["properties"].get("qa-approved", "false").lower() == "true",
+        ) for i in items]
+
+    def already_promoted(self, name: str, channel: str) -&gt; bool:
+        r = self.s.get(f"{self.base}/api/storage/{channel}-local/{name}",
+                       timeout=(5, 15))
+        return r.status_code == 200
+
+    def promote(self, name: str, src: str, dst: str) -&gt; None:
+        r = self.s.post(
+            f"{self.base}/api/copy/{src}-local/{name}",
+            params={"to": f"/{dst}-local/{name}"},
+            timeout=(5, 60),
+        )
+        r.raise_for_status()
+        log.info("promoted %s: %s → %s", name, src, dst)</code></pre>
+</div>
+
+<h2 id="k8s-client">Kubernetes client (the official Python SDK)</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">src/promote_bot/k8s.py</span></div>
+<pre><code>from __future__ import annotations
+import logging
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+
+log = logging.getLogger(__name__)
+
+def load_config():
+    """Try in-cluster first; fall back to ~/.kube/config (for dev)."""
+    try:
+        config.load_incluster_config()
+        log.info("using in-cluster config")
+    except config.ConfigException:
+        config.load_kube_config()
+        log.info("using ~/.kube/config")
+
+def submit_smoke_job(namespace: str, sha: str, image: str) -&gt; str:
+    job_name = f"smoke-{sha[:8]}"
+    body = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": job_name,
+            "namespace": namespace,
+            "labels": {
+                "app": "smoke-test",
+                "promote-bot/sha": sha[:8],
+            },
+        },
+        "spec": {
+            "backoffLimit": 1,
+            "ttlSecondsAfterFinished": 86400,
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [{
+                        "name": "smoke",
+                        "image": image,
+                        "args": ["--sha", sha],
+                        "resources": {
+                            "requests": {"cpu": "100m", "memory": "128Mi"},
+                            "limits":   {              "memory": "128Mi"},
+                        },
+                    }],
+                }
+            },
+        },
+    }
+
+    batch = client.BatchV1Api()
+    try:
+        batch.create_namespaced_job(namespace=namespace, body=body)
+        log.info("created Job %s", job_name)
+    except ApiException as e:
+        if e.status == 409:
+            log.info("Job %s already exists (idempotent)", job_name)
+        else:
+            raise
+    return job_name</code></pre>
+</div>
+
+<p>Note the 409-handling — that's idempotency. If the bot ran 30 seconds ago and the Job exists, treat as success; never duplicate.</p>
+
+<h2 id="slack">Slack notifier</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">src/promote_bot/slack.py</span></div>
+<pre><code>import logging, requests
+
+log = logging.getLogger(__name__)
+
+def notify(webhook: str | None, text: str, ok: bool = True) -&gt; None:
+    if not webhook:
+        log.info("no slack webhook; skipping notify: %s", text)
+        return
+    payload = {"text": ("✅ " if ok else "❌ ") + text}
+    try:
+        r = requests.post(webhook, json=payload, timeout=(3, 10))
+        r.raise_for_status()
+    except requests.RequestException as e:
+        # Don't fail the whole run for a slack outage
+        log.warning("slack notify failed: %s", e)</code></pre>
+</div>
+
+<h2 id="promoter">The reconciler</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">src/promote_bot/promoter.py</span></div>
+<pre><code>from __future__ import annotations
+import logging, time
+from .artifactory import Artifactory, Artifact
+from .config import Settings
+from .k8s import submit_smoke_job
+from .slack import notify
+
+log = logging.getLogger(__name__)
+
+def reconcile(s: Settings) -&gt; tuple[int, int]:
+    """One pass: returns (n_promoted, n_failed)."""
+    art = Artifactory(s.nexus_url, s.nexus_token)
+    candidates = art.list_artifacts(s.src_channel)
+    log.info("found %d in %s", len(candidates), s.src_channel)
+
+    eligible = [a for a in candidates if a.qa_approved]
+    log.info("%d are qa-approved", len(eligible))
+
+    promoted = failed = 0
+    for a in eligible:
+        if art.already_promoted(a.name, s.dst_channel):
+            log.info("idempotent skip %s (already in %s)", a.name, s.dst_channel)
+            continue
+        try:
+            if s.dry_run:
+                log.info("DRY-RUN would promote %s: %s → %s",
+                         a.name, s.src_channel, s.dst_channel)
+            else:
+                art.promote(a.name, s.src_channel, s.dst_channel)
+                submit_smoke_job(s.namespace, a.sha, s.smoke_image)
+                notify(s.slack_webhook,
+                       f"promoted `{a.name}` from {s.src_channel} → {s.dst_channel}")
+            promoted += 1
+        except Exception:
+            log.exception("promotion failed for %s", a.name)
+            notify(s.slack_webhook,
+                   f"promotion FAILED for `{a.name}`", ok=False)
+            failed += 1
+
+    return promoted, failed</code></pre>
+</div>
+
+<h2 id="cli">CLI entrypoint</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">src/promote_bot/cli.py</span></div>
+<pre><code>from __future__ import annotations
+import logging, json, sys, os
+from pathlib import Path
+import typer
+from .config import Settings, load_extra_yaml
+from .k8s import load_config as load_k8s_config
+from .promoter import reconcile
+
+app = typer.Typer(no_args_is_help=True)
+log = logging.getLogger("promote_bot")
+
+def configure_logging():
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter(
+        '{"ts":"%(asctime)s","lvl":"%(levelname)s","logger":"%(name)s","msg":%(message)s}',
+        defaults={"msg": "%s"},
+    ))
+    # The trick: emit JSON-shaped logs but keep python's % formatting
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), handlers=[h])
+
+@app.command()
+def run(
+    config_file: Path = typer.Option(None, "--config", help="Optional YAML config"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+):
+    """Run one reconcile pass and exit."""
+    configure_logging()
+    s = Settings()
+    if config_file:
+        s = load_extra_yaml(s, config_file)
+    if dry_run:
+        s = s.model_copy(update={"dry_run": True})
+    load_k8s_config()
+
+    log.info("starting promote_bot src=%s dst=%s dry_run=%s",
+             s.src_channel, s.dst_channel, s.dry_run)
+    promoted, failed = reconcile(s)
+    log.info("done: %d promoted, %d failed", promoted, failed)
+    raise typer.Exit(code=0 if failed == 0 else 1)
+
+if __name__ == "__main__":
+    app()</code></pre>
+</div>
+
+<h2 id="pyproject">pyproject.toml</h2>
+
+<div class="code" data-lang="text">
+<pre><code>[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "promote-bot"
+version = "1.0.0"
+requires-python = "&gt;=3.11"
+dependencies = [
+    "requests &gt;= 2.31",
+    "kubernetes &gt;= 30.1",
+    "pydantic &gt;= 2.5",
+    "pydantic-settings &gt;= 2.1",
+    "typer &gt;= 0.12",
+    "ruamel.yaml &gt;= 0.18",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "responses", "ruff", "mypy"]
+
+[project.scripts]
+promote-bot = "promote_bot.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/promote_bot"]</code></pre>
+</div>
+
+<h2 id="docker">Dockerfile</h2>
+
+<div class="code" data-lang="text">
+<pre><code>FROM python:3.12-slim AS build
+WORKDIR /app
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml ./
+COPY src/ ./src/
+RUN uv pip install --system --no-cache .
+
+FROM python:3.12-slim
+RUN useradd -r -u 10001 bot
+COPY --from=build /usr/local/lib/python3.12/site-packages \
+                  /usr/local/lib/python3.12/site-packages
+COPY --from=build /usr/local/bin/promote-bot /usr/local/bin/promote-bot
+USER 10001
+ENTRYPOINT ["promote-bot"]
+CMD ["run"]</code></pre>
+</div>
+
+<h2 id="deploy">Kubernetes manifests</h2>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">deploy/namespace.yaml</span></div>
+<pre><code>apiVersion: v1
+kind: Namespace
+metadata:
+  name: promote
+  labels:
+    pod-security.kubernetes.io/enforce: restricted</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">deploy/rbac.yaml</span></div>
+<pre><code>apiVersion: v1
+kind: ServiceAccount
+metadata: { name: promote-bot, namespace: promote }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: promote-bot, namespace: promote }
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs:    ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs:    ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: promote-bot, namespace: promote }
+subjects: [{ kind: ServiceAccount, name: promote-bot, namespace: promote }]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: promote-bot }</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">deploy/configmap.yaml</span></div>
+<pre><code>apiVersion: v1
+kind: ConfigMap
+metadata: { name: promote-bot-config, namespace: promote }
+data:
+  config.yaml: |
+    nexus_url: https://nexus.example.com
+    src_channel: dev
+    dst_channel: staging
+    label: qa-approved
+    namespace: promote
+    smoke_image: registry.example.com/smoke:1.0</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">deploy/secret-template.yaml</span></div>
+<pre><code>apiVersion: v1
+kind: Secret
+metadata: { name: promote-bot-secrets, namespace: promote }
+type: Opaque
+stringData:                       # in real life, sourced via External Secrets / Vault
+  PROMOTE_NEXUS_TOKEN: "REPLACE_ME"
+  PROMOTE_SLACK_WEBHOOK: "REPLACE_ME"</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">deploy/cronjob.yaml</span></div>
+<pre><code>apiVersion: batch/v1
+kind: CronJob
+metadata: { name: promote-bot, namespace: promote }
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: promote-bot
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: bot
+              image: registry.example.com/promote-bot:1.0.0
+              imagePullPolicy: IfNotPresent
+              args: ["run", "--config", "/etc/promote/config.yaml"]
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+                - name: PROMOTE_NEXUS_URL
+                  valueFrom: { configMapKeyRef:
+                    { name: promote-bot-config, key: config.yaml } }   # parsed in code
+              envFrom:
+                - secretRef: { name: promote-bot-secrets }
+              resources:
+                requests: { cpu: 100m,  memory: 128Mi }
+                limits:   {              memory: 128Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              volumeMounts:
+                - { name: config, mountPath: /etc/promote, readOnly: true }
+                - { name: tmp,    mountPath: /tmp }
+          volumes:
+            - { name: config, configMap: { name: promote-bot-config } }
+            - { name: tmp,    emptyDir: {} }</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">deploy/kustomization.yaml</span></div>
+<pre><code>apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: promote
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - configmap.yaml
+  - secret-template.yaml
+  - cronjob.yaml</code></pre>
+</div>
+
+<h2 id="tests">Tests — what to cover</h2>
+
+<div class="code" data-lang="python">
+<div class="code-hdr"><span class="lang">python</span><span class="title">tests/test_promoter.py</span></div>
+<pre><code>import pytest, responses
+from promote_bot.config import Settings
+from promote_bot.promoter import reconcile
+from unittest.mock import patch
+
+@pytest.fixture
+def settings():
+    return Settings(
+        nexus_url="https://nexus.test",
+        nexus_token="t",
+        src_channel="dev",
+        dst_channel="staging",
+        smoke_image="x:1.0",
+        namespace="promote",
+        dry_run=True,
+    )
+
+@responses.activate
+def test_reconcile_skips_unapproved(settings):
+    responses.add(
+        responses.GET,
+        "https://nexus.test/api/repositories/dev-local/items",
+        json={"items": [{
+            "name": "fw-1", "properties": {"sha": "abc", "qa-approved": "false"}}]},
+        status=200,
+    )
+    with patch("promote_bot.promoter.submit_smoke_job") as mock_job:
+        promoted, failed = reconcile(settings)
+    assert promoted == 0 and failed == 0
+    mock_job.assert_not_called()
+
+@responses.activate
+def test_reconcile_dry_run_doesnt_promote(settings):
+    responses.add(
+        responses.GET,
+        "https://nexus.test/api/repositories/dev-local/items",
+        json={"items": [{
+            "name": "fw-1",
+            "properties": {"sha": "abc", "qa-approved": "true"}}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://nexus.test/api/storage/staging-local/fw-1",
+        status=404,
+    )
+    with patch("promote_bot.promoter.submit_smoke_job") as mock_job:
+        promoted, failed = reconcile(settings)
+    assert promoted == 1 and failed == 0
+    mock_job.assert_not_called()             # dry_run=True</code></pre>
+</div>
+
+<h2 id="run-it">Run it</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Build &amp; load image into kind
+$ docker build -t promote-bot:1.0.0 .
+$ kind load docker-image promote-bot:1.0.0
+
+# Replace the placeholder image ref in cronjob.yaml or use kustomize edit
+$ sed -i 's|registry.example.com/promote-bot:1.0.0|promote-bot:1.0.0|' deploy/cronjob.yaml
+
+# Apply
+$ kubectl apply -k deploy/
+
+# Trigger an immediate run for testing
+$ kubectl -n promote create job --from=cronjob/promote-bot promote-now
+$ kubectl -n promote logs job/promote-now -f
+
+# Watch the smoke-test Jobs the bot creates
+$ kubectl -n promote get jobs -l app=smoke-test -w</code></pre>
+</div>
+
+<h2 id="extensions">Extensions</h2>
+
+<ol>
+  <li><strong>Operator-ify it.</strong> Replace the CronJob with a Kopf controller that watches for a custom <code>PromotionRequest</code> resource. Users <code>kubectl apply</code> a request; the operator promotes. We covered the pattern in Chapter 12.</li>
+  <li><strong>Add metrics.</strong> Prometheus client emitting <code>promote_total</code>, <code>promote_failures</code>, <code>promote_duration_seconds</code>. Push to a Pushgateway since this is a short-lived Job, or expose <code>/metrics</code> if you switch to a Deployment.</li>
+  <li><strong>Add a real ledger.</strong> Persist promoted SHAs in a Postgres or DynamoDB table for audit. The bot reads on startup and refuses to re-promote anything seen.</li>
+  <li><strong>Implement rollback.</strong> A second CronJob (or CLI subcommand) that demotes from staging based on a list of bad SHAs.</li>
+  <li><strong>Add a CRD for rules.</strong> Today the rule is hardcoded in code. Make it declarative: a <code>PromotionRule</code> CRD with src/dst/label/schedule, and the bot reconciles all rules.</li>
+  <li><strong>Wire up External Secrets.</strong> The token in the Secret manifest is a placeholder. In production, ESO syncs it from Vault.</li>
+  <li><strong>Argo CD it.</strong> Put <code>deploy/</code> in a config repo, point an Argo CD Application at it, never <code>kubectl apply</code> manually again.</li>
+</ol>
+
+<h2 id="recap">What this exercise demonstrates</h2>
+
+<p>Every chapter's pattern shows up:</p>
+<table>
+<thead><tr><th>Chapter</th><th>Where it appears</th></tr></thead>
+<tbody>
+<tr><td>1 · Refresher</td><td>Type hints, dataclasses, exception handling</td></tr>
+<tr><td>2 · Toolbox</td><td>pathlib, logging, env vars</td></tr>
+<tr><td>3 · HTTP</td><td>Session + Retry + timeouts in Artifactory client</td></tr>
+<tr><td>4 · Data formats</td><td>Pydantic Settings + YAML config</td></tr>
+<tr><td>5 · CLI &amp; packaging</td><td>typer, pyproject.toml, console-script</td></tr>
+<tr><td>6 · Automation</td><td>Idempotency (already-promoted check, 409 on Job), structured logs, dry-run, retries</td></tr>
+<tr><td>7 · K8s mental model</td><td>Reconcile pattern: list desired, compare, act</td></tr>
+<tr><td>8 · Core resources</td><td>Namespace, ConfigMap, Secret, ServiceAccount, Role, RoleBinding</td></tr>
+<tr><td>9 · Workloads</td><td>CronJob with Forbid concurrency; Jobs with TTL</td></tr>
+<tr><td>11 · Production patterns</td><td>SecurityContext, resource limits, Pod Security restricted</td></tr>
+<tr><td>12 · Helm/GitOps</td><td>Kustomize for deploy; ready to point Argo CD at</td></tr>
+</tbody>
+</table>
+
+<h2 id="next">Where to go from here</h2>
+<ul>
+  <li><strong>Read the kubernetes-client-python source.</strong> The official SDK is auto-generated from OpenAPI — once you know the resource model, the API maps 1:1.</li>
+  <li><strong>Write a Kopf operator.</strong> Half a day; you'll come out understanding controllers from the inside.</li>
+  <li><strong>Run kube-prometheus-stack on kind.</strong> See your own metrics and the cluster's, locally. Best way to learn what to monitor.</li>
+  <li><strong>Read the Linux kernel's cgroup v2 docs.</strong> Resource limits, eviction, and OOM behaviour all bottom out there. Once you've read them, K8s' resource model stops being magic.</li>
+  <li><strong>Build something real.</strong> Pipeline glue, CI utilities, deployment helpers. Python + K8s API + a CronJob is a small but immensely productive sweet spot.</li>
+</ul>
+
+<p>You now have all three legs: Python as a comfortable working language, automation patterns that survive contact with reality, and a working mental model of Kubernetes. The combination is unreasonably effective. Go ship something.</p>
+
+<div class="page-nav">
+  <a href="16-50-questions.html"><span class="lbl">← Prev</span><span class="ttl">The 50 Questions</span></a>
+  <a href="../exercises.html" class="next"><span class="lbl">Next →</span><span class="ttl">All Exercises</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

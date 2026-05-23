@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2 · Pipeline Thinking — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 02</span>
+  Pipeline Thinking
+</h1>
+<p class="lede">
+  A tool-agnostic chapter. We'll cover the six concepts that every
+  CI/CD system implements — jobs, stages, artifacts, caches,
+  triggers, environments — and the reasoning behind each. These
+  ideas transfer between tools and between decades.
+</p>
+
+<h2 id="jobs">Jobs: the unit of work</h2>
+
+<p>
+  A <strong>job</strong> is one self-contained unit of work: a
+  sequence of shell-ish commands run in one environment, which
+  succeeds or fails as a whole. Think of it as a tiny shell script
+  with inputs, outputs, and a pass/fail result.
+</p>
+
+<p>Properties of a well-scoped job:</p>
+<ul>
+  <li><strong>One responsibility.</strong> "Run unit tests." Not "run unit tests, then build the docker image, then deploy."</li>
+  <li><strong>Deterministic result.</strong> Same inputs, same result, every time.</li>
+  <li><strong>Parallel-safe.</strong> Nothing in the job assumes another job ran first, except via explicit dependencies.</li>
+  <li><strong>Reasonable runtime.</strong> Under 10 minutes for "fast-feedback" jobs. If it's longer, split it.</li>
+</ul>
+
+<p>Every tool has a name for this:</p>
+<ul>
+  <li>Jenkins: a <em>Stage</em> (loosely) or a <em>Freestyle job</em> (old way).</li>
+  <li>GitLab CI: a <em>job</em>.</li>
+  <li>GitHub Actions: a <em>job</em> (containing <em>steps</em>).</li>
+</ul>
+
+<h2 id="stages">Stages: grouping for order</h2>
+
+<p>
+  A <strong>stage</strong> is a set of jobs that logically belong
+  together and run (conceptually) in parallel. Stages run
+  sequentially: every job in stage N must finish before any job in
+  stage N+1 starts.
+</p>
+
+<div class="code" data-lang="text">
+<pre><code>stage: lint  ─────── lint-js, lint-py, lint-shell      (parallel)
+stage: test  ─────── test-unit, test-integration       (parallel, after lint)
+stage: build ─────── build-image, build-docs           (parallel, after test)
+stage: deploy ────── deploy-staging                     (sequential, after build)</code></pre>
+</div>
+
+<p>
+  This is the classic "stages" model. It's simple, easy to understand,
+  and conservative: jobs in stage N never start early, even if all
+  their real prerequisites finished.
+</p>
+
+<p>
+  That conservatism is also the problem. If <code>lint-js</code>
+  finishes in 10 seconds and <code>lint-py</code> takes 5 minutes,
+  <code>test-unit</code> waits the full 5 minutes before starting —
+  even if it doesn't actually depend on <code>lint-py</code>.
+</p>
+
+<p>
+  Hence the modern <strong>DAG</strong> model: jobs declare their
+  specific prerequisites, and a job can start as soon as <em>its
+  own</em> prereqs are done — not when the whole previous stage is
+  done. GitLab calls this <code>needs:</code>, GHA calls it
+  <code>needs:</code>, Jenkins has <code>parallel</code> blocks
+  and Scripted pipelines.
+</p>
+
+<h2 id="artifacts">Artifacts: passing files between jobs</h2>
+
+<p>
+  Each job usually runs in a fresh workspace — an empty directory
+  with the repo checked out. If job A builds <code>dist/</code> and
+  job B needs <code>dist/</code> to deploy, B needs to download
+  what A produced. That's an <strong>artifact</strong>.
+</p>
+
+<p>Two kinds of passing:</p>
+<ol>
+  <li><strong>In-pipeline:</strong> job A uploads, job B downloads, artifact lives as long as the pipeline run.</li>
+  <li><strong>Cross-pipeline:</strong> job A publishes to a persistent store (a container registry, npm, S3, an artifact manager like Nexus/Artifactory). Subsequent runs — including future pipelines — consume from that store.</li>
+</ol>
+
+<p>
+  Artifacts have two rules of hygiene:
+</p>
+<ul>
+  <li><strong>Small and specific.</strong> Uploading <code>node_modules/</code> as an artifact is almost never right — use a cache.</li>
+  <li><strong>Stored briefly.</strong> If you persist every <code>dist/</code> from every PR forever, you'll fill a TB a month. Every tool has retention policies — configure them.</li>
+</ul>
+
+<h4>Artifact syntax snapshot</h4>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkins — archive and retrieve</span></div>
+<pre><code>// producer
+archiveArtifacts artifacts: 'dist/**/*', fingerprint: true
+
+// consumer (within same pipeline, using stash/unstash)
+stash name: 'build', includes: 'dist/**'
+// … in a later stage:
+unstash 'build'</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitLab CI — artifacts</span></div>
+<pre><code>build:
+  script: make dist
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
+deploy:
+  needs: [build]      # automatically downloads build's artifacts
+  script: ./deploy.sh dist/</code></pre>
+</div>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions — actions/upload-artifact</span></div>
+<pre><code>jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist/ }
+      - run: ./deploy.sh dist/</code></pre>
+</div>
+
+<h2 id="caches">Caches: speeding up repeated work</h2>
+
+<p>
+  A cache is also a file store — but with different semantics: it's
+  <em>best-effort</em>, it doesn't need to be present for the job to
+  succeed, and it persists across pipeline runs specifically to avoid
+  redownloading/rebuilding.
+</p>
+
+<p>Classic cache targets:</p>
+<ul>
+  <li><code>~/.npm</code>, <code>~/.yarn/cache</code>, <code>node_modules/</code> for Node.</li>
+  <li><code>~/.m2</code> for Maven, <code>~/.gradle/caches</code> for Gradle.</li>
+  <li><code>~/.cache/pip</code> for Python.</li>
+  <li><code>~/.cargo/registry</code>, <code>target/</code> for Rust.</li>
+  <li>Docker layer cache for image builds.</li>
+</ul>
+
+<p>Cache keys typically include a hash of the lockfile:</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions — cache</span></div>
+<pre><code>- uses: actions/cache@v4
+  with:
+    path: ~/.npm
+    key:  npm-${{ hashFiles('**/package-lock.json') }}
+    restore-keys: |
+      npm-</code></pre>
+</div>
+
+<p>
+  The <code>restore-keys</code> fallback lets a partial match land a
+  slightly-stale cache rather than no cache.
+</p>
+
+<div class="callout pitfall">
+<div class="callout-title">Cache vs artifact — don't confuse them</div>
+<ul>
+<li><strong>Artifact:</strong> required for downstream jobs; persisted with retention; pipeline-run-scoped.</li>
+<li><strong>Cache:</strong> optional speed-up; global; key-scoped.</li>
+</ul>
+<p>
+  Symptoms of confusion: "why is my build non-deterministic?" (you
+  cached compiled outputs); "why did my deploy fail?" (you treated
+  an artifact as a cache).
+</p>
+</div>
+
+<h2 id="triggers">Triggers: what kicks off a run</h2>
+
+<p>Most common triggers:</p>
+
+<table>
+<thead><tr><th>Trigger</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td><code>push</code></td>          <td>Any push to any branch, or a specific branch.</td></tr>
+<tr><td><code>pull_request</code> / MR</td><td>Open, sync, or close a PR/MR.</td></tr>
+<tr><td><code>schedule</code></td>      <td>Cron: run nightly at 03:00 UTC.</td></tr>
+<tr><td><code>manual</code></td>        <td>Button click in the UI or CLI.</td></tr>
+<tr><td><code>tag</code></td>           <td>Push of a tag matching a pattern (e.g. <code>v*</code>).</td></tr>
+<tr><td><code>upstream</code></td>      <td>Another pipeline finished — trigger downstream.</td></tr>
+<tr><td><code>API</code></td>           <td>A webhook or CLI call.</td></tr>
+</tbody>
+</table>
+
+<p>
+  Well-designed pipelines do <em>different things</em> for different
+  triggers. A push to a feature branch runs lint + test; a push to
+  main also runs build + publish; a tag push also deploys to prod.
+  Combining triggers with <code>if</code>/<code>rules</code>/<code>when</code>
+  conditions is how you express this.
+</p>
+
+<h2 id="env">Environments: where deploys go</h2>
+
+<p>An <strong>environment</strong> is a name for a deploy target: <em>staging</em>, <em>prod</em>, <em>preview-PR-123</em>. Each is associated with:</p>
+
+<ul>
+  <li>A URL, often.</li>
+  <li>A set of secrets (different for staging vs prod).</li>
+  <li>Deploy history and rollback options.</li>
+  <li>Access control: who can deploy here?</li>
+</ul>
+
+<p>
+  All three tools support environments, though the terminology
+  differs. Jenkins represents them loosely (as differentiated
+  credentials, or via plugins). GitLab and GHA have first-class
+  <code>environment:</code> syntax with built-in history views.
+</p>
+
+<h2 id="parallelism">Parallelism strategies</h2>
+
+<h4>Fan-out, fan-in</h4>
+<p>Most common: one job produces an artifact, then N jobs consume it in parallel, then a final job aggregates results.</p>
+
+<h4>Matrix</h4>
+<p>
+  "Run this job once for every combination of these variables." Used
+  for <em>test-across-versions</em> (Node 16/18/20; Python
+  3.9/3.10/3.11; Ubuntu/macOS/Windows):
+</p>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GitHub Actions — matrix</span></div>
+<pre><code>jobs:
+  test:
+    strategy:
+      matrix:
+        os:   [ubuntu-latest, macos-latest, windows-latest]
+        node: [18, 20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ matrix.node }} }
+      - run: npm ci &amp;&amp; npm test</code></pre>
+</div>
+
+<p>That's 9 jobs running in parallel. GitLab has <code>parallel:matrix:</code>; Jenkins has <code>matrix { axes { ... } }</code> in Declarative.</p>
+
+<h4>Sharding</h4>
+<p>
+  Break a huge test suite into N chunks, run N jobs that each take
+  1/N of the tests. Most test runners have built-in sharding
+  (<code>jest --shard=1/4</code>, <code>pytest-xdist</code>, <code>mocha-parallel-tests</code>).
+</p>
+
+<h2 id="graph-thinking">Pipelines as graphs (again)</h2>
+
+<p>The "stages" metaphor is a simplified graph — every job in stage N depends on every job in stage N-1. You get back clarity for this cost:</p>
+
+<div class="code" data-lang="text">
+<pre><code>Stages view (simple):
+
+ ┌─ lint-js     ┐   ┌─ test-unit  ┐
+ ├─ lint-py     ┤→→→├─ test-integ ┤→→→ build → deploy
+ └─ lint-shell  ┘   └─ test-db    ┘
+
+DAG view (true):
+
+  lint-js ─────┐
+  lint-py ─────┼──┬── test-unit ─────────── build ── deploy
+  lint-shell ──┘  ├── test-integ ──────────/
+                  └── test-db  (only needs lint-py) ┘</code></pre>
+</div>
+
+<p>
+  In DAG mode, <code>test-unit</code> can start after all the lint
+  jobs it actually depends on (none, really — tests don't care whether
+  the JS linter is happy). Real-world pipelines shave significant
+  wall-clock time by modelling dependencies truthfully.
+</p>
+
+<h2 id="pitfalls">Pipeline anti-patterns</h2>
+
+<ul>
+  <li><strong>The monolithic job.</strong> One 20-minute job that does everything. Fails? You re-run everything. Split into stages.</li>
+  <li><strong>The sleep-based sync.</strong> "Wait 60 seconds for the deploy to finish" — use real health checks.</li>
+  <li><strong>The secret in logs.</strong> <code>echo $DB_PASSWORD</code>. Happens more than you'd think.</li>
+  <li><strong>The cache that hides breakage.</strong> Your cache is warm, builds pass. A fresh clone breaks. Run a weekly "fresh-cache" build.</li>
+  <li><strong>The phantom success.</strong> A job "passes" because its failure is silently ignored. <code>|| true</code> at the end of a bash line is the usual cause.</li>
+  <li><strong>The manual step disguised as automation.</strong> "The pipeline deploys, but first someone has to SSH in and…" — automate it or it doesn't count.</li>
+  <li><strong>The unreviewable YAML.</strong> A 2000-line <code>.gitlab-ci.yml</code>. Use <code>include:</code>, reusable workflows, or shared libraries.</li>
+</ul>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Draw the graph</span>
+</div>
+<div class="exercise-body">
+<p>A team describes their pipeline: "lint, then unit tests, then build the docker image and also run integration tests (which need the built image). Then push the image. If it's main, also deploy to staging." Draw it as a DAG.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<pre><code>  lint → test-unit → build-image ─┬─→ test-integ ─┐
+                                  │                ├→ push-image ─→ deploy-staging (if main)
+                                  └────────────────┘</code></pre>
+</div>
+<p>Key subtlety: integration tests <em>need</em> the built image, but the push can happen only after integ passes. A naïve stage-based model would run <code>test-integ</code> in parallel with <code>push-image</code> — wrong, because you'd publish images that later fail integ tests.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Artifact or cache?</span>
+</div>
+<div class="exercise-body">
+<p>Classify each as artifact or cache:</p>
+<ol type="a">
+  <li><code>dist/app.tar.gz</code> produced by build, consumed by deploy.</li>
+  <li><code>~/.npm</code> reused between runs to avoid re-downloading.</li>
+  <li>A test coverage XML report, uploaded so the UI can show it.</li>
+  <li>A pre-compiled Rust <code>target/</code> directory reused to speed compiles.</li>
+  <li>The final SBOM (software bill of materials) published with the release.</li>
+</ol>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li>(a) artifact — deploy needs it.</li>
+<li>(b) cache — optional speed-up.</li>
+<li>(c) artifact — the UI is a consumer.</li>
+<li>(d) cache — rebuilding from scratch is correct, just slow.</li>
+<li>(e) artifact — shipped with the release, persisted long-term.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Pick the triggers</span>
+</div>
+<div class="exercise-body">
+<p>You're designing a pipeline. What triggers should cause: (a) the full build with tests to run? (b) a deploy to staging? (c) a deploy to prod?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>A sensible default:</p>
+<ul>
+<li><strong>Full build + tests:</strong> every push to any branch, and every PR open/sync. Also nightly via schedule.</li>
+<li><strong>Deploy to staging:</strong> successful build on the <code>main</code> branch.</li>
+<li><strong>Deploy to prod:</strong> push of a tag matching <code>v*</code>, OR a manual button (humans still pick). Never automatic on main.</li>
+</ul>
+<p>This is the Continuous Delivery flavor. Continuous Deployment would auto-deploy to prod on successful main push — rare in practice without robust rollback.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Anti-pattern audit</span>
+</div>
+<div class="exercise-body">
+<p>For a real pipeline you have access to, identify at least one of the seven anti-patterns listed above. Propose a fix.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>No "right" answer — but very common real finds:</p>
+<ul>
+<li>A <code>sleep 30</code> before a curl-based health check. Replace with a retry loop that polls until healthy.</li>
+<li>A 1200-line YAML without any <code>include:</code>. Extract common jobs.</li>
+<li>A <code>|| true</code> at the end of a flaky test. Either fix the flake or quarantine it, don't hide it.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 2.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Matrix choice</span>
+</div>
+<div class="exercise-body">
+<p>You maintain a Python library supporting Python 3.9–3.12 on Ubuntu, macOS, and Windows. How many jobs does a full matrix produce? How many do you <em>actually</em> need to ship safely? What heuristics could you use to trim?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Full matrix: 4 × 3 = 12 jobs. You probably don't need all 12 on every PR:</p>
+<ul>
+<li>On PR: minimum + maximum Python × only Ubuntu = 2 jobs (fast feedback).</li>
+<li>On main branch: full 12.</li>
+<li>Nightly: full 12 + oldest-supported dependencies pinned.</li>
+</ul>
+<p>Every tool supports conditional matrices via rules/<code>if</code>. This is often the single biggest cost lever on CI spend.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Job = unit of work. Stage = group of jobs running in parallel; stages sequence. DAG = truer model.</li>
+  <li>Artifacts carry required files between jobs; caches are best-effort speed-ups. Don't confuse them.</li>
+  <li>Triggers: push, PR, schedule, manual, tag, upstream, API. Different triggers → different pipelines.</li>
+  <li>Environments name deploy targets; they pair with secrets and access control.</li>
+  <li>Parallelism comes in three flavors: fan-out, matrix, sharding.</li>
+  <li>The seven anti-patterns will bite every pipeline eventually. Audit yours quarterly.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="01-cicd-fundamentals.html"><span class="lbl">← Prev</span><span class="ttl">CI/CD Fundamentals</span></a>
+  <a href="03-jenkins-intro.html" class="next"><span class="lbl">Next →</span><span class="ttl">Jenkins — Architecture</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

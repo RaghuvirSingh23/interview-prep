@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · The 50 Questions</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 13</span>
+  The 50 Questions
+</h1>
+<p class="lede">
+  Fifty questions an interviewer might ask about C, C++, Linux, and
+  debugging. They are not trivia. Each one tests whether you understand
+  the model behind the answer. Read the answer fully — the
+  &ldquo;why&rdquo; matters more than the verb.
+</p>
+
+<div class="callout">
+  <strong>How to use this chapter.</strong> Try to answer each
+  question out loud before reading. If your answer matches the first
+  sentence but not the &ldquo;why&rdquo; paragraph, you have a gap.
+  Plug it before the interview, not during.
+</div>
+
+<h2 id="c-language">C language &amp; pointers (1–10)</h2>
+
+<div class="qa">
+  <h3>1. What does <code>int *p, q;</code> declare?</h3>
+  <p><strong>One pointer and one int.</strong> The <code>*</code>
+  binds to <code>p</code>, not to the type. To declare two pointers
+  write <code>int *p, *q;</code> &mdash; or, better, <code>int *p; int *q;</code>
+  on separate lines. This is why systems-programming style guides
+  insist on one declaration per line.</p>
+</div>
+
+<div class="qa">
+  <h3>2. What is the difference between an array and a pointer?</h3>
+  <p>An array is an aggregate: it has a fixed size known at compile
+  time and its <em>name</em> evaluates to its first element in most
+  contexts (the &ldquo;array decay&rdquo; rule). A pointer is just an
+  address. <code>sizeof(arr)</code> gives the array's byte size;
+  <code>sizeof(p)</code> gives the pointer's size (8 on 64-bit). The
+  exceptions where arrays don't decay are <code>sizeof</code>,
+  <code>&amp;arr</code>, and the initialiser of a character array
+  from a string literal.</p>
+</div>
+
+<div class="qa">
+  <h3>3. Read this declaration: <code>char *(*f[3])(int)</code>.</h3>
+  <p><strong>An array of 3 pointers to functions taking int and
+  returning <code>char *</code>.</strong> Read declarations
+  &ldquo;spirally&rdquo;: start at the name <code>f</code>, go right
+  if you can (<code>[3]</code> &rarr; array of 3), then left
+  (<code>*</code> &rarr; of pointers), then right inside the parens
+  (<code>(int)</code> &rarr; to functions taking int), then left
+  (<code>char *</code> &rarr; returning <code>char *</code>). When
+  in doubt, run <code>cdecl</code>.</p>
+</div>
+
+<div class="qa">
+  <h3>4. Why does <code>if (-1 &lt; sizeof(x))</code> always evaluate
+  false?</h3>
+  <p><code>sizeof</code> returns <code>size_t</code>, an unsigned
+  type. The comparison promotes <code>-1</code> to a huge unsigned
+  value (<code>SIZE_MAX</code>). Always be wary of mixing signed and
+  unsigned in comparisons; turn on
+  <code>-Wsign-compare</code>/<code>-Wconversion</code>.</p>
+</div>
+
+<div class="qa">
+  <h3>5. What is undefined behaviour for signed integer overflow,
+  and why does the compiler care?</h3>
+  <p>Signed overflow is UB in C and C++. The compiler is permitted
+  to assume it doesn't happen, which lets it optimise loops like
+  <code>for (int i = 0; i &lt;= n; i++)</code> assuming
+  <code>i</code> can never wrap. If you actually want wrap, use
+  unsigned arithmetic, or build with <code>-fwrapv</code>, or use
+  <code>__builtin_add_overflow</code> for safe checked arithmetic.</p>
+</div>
+
+<div class="qa">
+  <h3>6. Why is <code>strncpy</code> dangerous?</h3>
+  <p>It does <em>not</em> guarantee a NUL terminator. If the source
+  is at least as long as <code>n</code>, the destination is left
+  unterminated. It also pads with NULs if the source is shorter
+  &mdash; bad for performance on large buffers. Prefer
+  <code>snprintf(dst, n, "%s", src)</code> or
+  <code>strlcpy</code> (BSD/POSIX 2024).</p>
+</div>
+
+<div class="qa">
+  <h3>7. What is strict aliasing, and why is the
+  <code>char *</code> exception special?</h3>
+  <p>The compiler assumes pointers of unrelated types don't alias
+  the same memory, allowing it to keep values in registers across
+  stores via foreign types. Casting an <code>int*</code> to
+  <code>float*</code> and dereferencing is UB. The exception:
+  <code>char *</code>, <code>unsigned char *</code>, and
+  <code>std::byte *</code> may alias anything. To reinterpret bytes
+  legally, use <code>memcpy</code> &mdash; the compiler optimises
+  it to a register move.</p>
+</div>
+
+<div class="qa">
+  <h3>8. When does <code>const</code> on a function parameter
+  matter?</h3>
+  <p>On a pointer-to-const (<code>const char *</code>), it
+  documents and enforces that the function won't modify the
+  pointee. On a top-level <code>const</code> on the parameter
+  itself (<code>void f(int const x)</code>), it's a local promise
+  with no effect on the caller. Top-level <code>const</code> on
+  function parameters is ignored when matching declarations.</p>
+</div>
+
+<div class="qa">
+  <h3>9. What is a <code>volatile</code> variable for, and what
+  is it <em>not</em>?</h3>
+  <p>It tells the compiler that the variable can change in ways the
+  compiler can't see &mdash; memory-mapped I/O registers, signal
+  handlers writing <code>sig_atomic_t</code>. It is <strong>not</strong>
+  for thread synchronisation; for that you need atomics or mutexes.
+  <code>volatile</code> doesn't insert memory barriers.</p>
+</div>
+
+<div class="qa">
+  <h3>10. What does <code>restrict</code> tell the compiler?</h3>
+  <p>That the pointer is the only access path to the object it
+  points to within its scope. It enables vectorisation and
+  redundant-load elimination. Lying to the compiler with
+  <code>restrict</code> is UB &mdash; do not use it on overlapping
+  buffers.</p>
+</div>
+
+<h2 id="cpp">C++ (11–20)</h2>
+
+<div class="qa">
+  <h3>11. Explain RAII in one sentence.</h3>
+  <p>Resource lifetime is bound to object lifetime: acquire in
+  the constructor, release in the destructor. The destructor runs
+  on every exit path &mdash; normal return, exception, early break
+  &mdash; which is what makes it bulletproof.</p>
+</div>
+
+<div class="qa">
+  <h3>12. What's the difference between
+  <code>unique_ptr</code> and <code>shared_ptr</code>?</h3>
+  <p><code>unique_ptr</code> is a thin wrapper: one owner, no
+  overhead beyond the pointer. <code>shared_ptr</code> owns a
+  control block with a reference count; copies bump the count,
+  destructions decrement it, the resource dies on zero. Prefer
+  <code>unique_ptr</code> by default; reach for <code>shared_ptr</code>
+  only when ownership is genuinely shared (caches, async work).</p>
+</div>
+
+<div class="qa">
+  <h3>13. What's a dangling reference and how do you avoid it?</h3>
+  <p>A reference (or pointer) to an object whose lifetime has ended.
+  Common cause: returning a reference to a local; binding a
+  reference to a temporary that immediately dies. Prevent with
+  ownership-aware design (RAII, <code>unique_ptr</code>) and by
+  knowing the lifetime extension rules (<code>const T&amp;</code>
+  to a temporary in a local extends its lifetime; the same in a
+  return value does <em>not</em>).</p>
+</div>
+
+<div class="qa">
+  <h3>14. What is the rule of zero, three, five?</h3>
+  <p>Rule of zero: if your class manages no resources directly,
+  let the compiler generate everything. Rule of three: if you
+  define a destructor, copy ctor, or copy assignment, you usually
+  need all three. Rule of five: with C++11, also define move ctor
+  and move assignment (or <code>= delete</code> them) so moves
+  don't fall back to copies.</p>
+</div>
+
+<div class="qa">
+  <h3>15. What does <code>std::move</code> actually do?</h3>
+  <p>Nothing at runtime &mdash; it's a static cast to an rvalue
+  reference. It's a way of telling the next function that this
+  object is about to die, so it can steal its guts instead of
+  copying. The cast is harmless if no move ctor exists; it just
+  falls back to copy.</p>
+</div>
+
+<div class="qa">
+  <h3>16. When should a virtual destructor be declared?</h3>
+  <p>Whenever the class will be deleted polymorphically through a
+  base pointer. Without virtual, only the base destructor runs and
+  derived resources leak. Mark the destructor virtual or make the
+  class non-polymorphic with <code>final</code>.</p>
+</div>
+
+<div class="qa">
+  <h3>17. What does <code>noexcept</code> buy you?</h3>
+  <p>It's a contract: this function will not throw. Important on
+  move constructors and move assignment, because containers like
+  <code>std::vector</code> will fall back to <em>copy</em> on
+  reallocation if the move can throw &mdash; in the name of strong
+  exception safety. A non-<code>noexcept</code> move silently
+  destroys performance.</p>
+</div>
+
+<div class="qa">
+  <h3>18. What is a lambda, and what does the capture clause
+  do?</h3>
+  <p>A lambda is syntactic sugar for an unnamed function-object
+  class with an <code>operator()</code>. The capture clause
+  generates members initialised from local variables:
+  <code>[x]</code> by copy, <code>[&amp;x]</code> by reference.
+  Capturing <code>this</code> stores the pointer; capturing
+  <code>*this</code> stores a copy of the object (C++17).</p>
+</div>
+
+<div class="qa">
+  <h3>19. Why does iterator invalidation matter?</h3>
+  <p>Modifying a container often invalidates outstanding iterators
+  and references. <code>vector</code>: any reallocation
+  invalidates all; insertions invalidate from the insertion point.
+  <code>map</code>/<code>set</code>: only the erased iterator is
+  invalidated. Using an invalidated iterator is UB &mdash; ASan
+  catches some, not all.</p>
+</div>
+
+<div class="qa">
+  <h3>20. What does <code>constexpr</code> mean, and how is it
+  different from <code>const</code>?</h3>
+  <p><code>const</code> means &ldquo;I won't modify this&rdquo;.
+  <code>constexpr</code> means &ldquo;evaluatable at compile time
+  if the inputs are&rdquo;. <code>constexpr</code> functions can
+  also run at runtime; they are a superset, not an alternative.
+  C++20 added <code>consteval</code> for &ldquo;must run at
+  compile time&rdquo;.</p>
+</div>
+
+<h2 id="memory-ub">Memory &amp; UB (21–25)</h2>
+
+<div class="qa">
+  <h3>21. Sketch a process's virtual memory layout.</h3>
+  <p>From low to high addresses: the text segment (read-only code),
+  rodata, initialised data (<code>.data</code>),
+  uninitialised data (<code>.bss</code>), the heap growing up,
+  shared libraries somewhere in the middle (ASLR-randomised),
+  the stack growing down from a high address, then the kernel
+  page above. <code>cat /proc/self/maps</code> shows the truth on
+  any Linux box.</p>
+</div>
+
+<div class="qa">
+  <h3>22. What is the strict aliasing rule's safe escape?</h3>
+  <p><code>memcpy</code>. <code>memcpy(&amp;f, &amp;i, sizeof f)</code>
+  is well-defined regardless of types and modern compilers reduce
+  it to a single move instruction at <code>-O2</code>.
+  C++20 added <code>std::bit_cast</code> as a more elegant
+  spelling.</p>
+</div>
+
+<div class="qa">
+  <h3>23. What is alignment, and what is an unaligned access?</h3>
+  <p>Each type has an alignment requirement &mdash; the address
+  must be a multiple of that value. <code>int</code> typically
+  4, <code>double</code> 8. An unaligned access on x86 is slow
+  but defined; on ARM and other RISC ISAs it can fault. UBSan's
+  <code>-fsanitize=alignment</code> catches these.</p>
+</div>
+
+<div class="qa">
+  <h3>24. What is a use-after-free, and how does ASan catch it?</h3>
+  <p>Reading or writing memory after <code>free</code>. ASan
+  poisons freed regions in shadow memory and quarantines them
+  for a while before recycling, so most UAFs hit the poison and
+  are reported with the original allocation and free
+  stacks.</p>
+</div>
+
+<div class="qa">
+  <h3>25. Why is reading an uninitialised local UB, not just
+  &ldquo;some garbage value&rdquo;?</h3>
+  <p>Because the compiler may assume it has a single value for
+  the duration of an expression and drop redundant reads, but a
+  later read can still observe a different value &mdash; it has
+  &ldquo;wobbly&rdquo; values. Optimisers exploit the UB
+  assumption, so the consequence isn't just garbage; it's
+  arbitrary control-flow miscompilation.</p>
+</div>
+
+<h2 id="build-link">Build, link &amp; ABI (26–30)</h2>
+
+<div class="qa">
+  <h3>26. What's the difference between declaration and
+  definition?</h3>
+  <p>A declaration introduces a name and type; a definition
+  allocates storage or provides the function body. You can
+  declare many times, define once. <code>extern int x;</code> is
+  a declaration; <code>int x = 0;</code> is a definition.</p>
+</div>
+
+<div class="qa">
+  <h3>27. Static vs. shared library &mdash; how do they
+  differ?</h3>
+  <p>Static (<code>.a</code>): archive of object files, copied
+  into the executable at link time. Bigger binary, no runtime
+  resolution, immune to library shuffling.
+  Shared (<code>.so</code>): mapped at runtime by the dynamic
+  loader, code shared across processes, picks up library updates
+  automatically &mdash; but breaks on ABI mismatch and adds
+  startup cost.</p>
+</div>
+
+<div class="qa">
+  <h3>28. What is name mangling and why does C++ need it?</h3>
+  <p>To support overloading, namespaces, and templates, C++
+  encodes the full signature into the symbol name. <code>nm
+  -C</code> demangles. To call C++ from C, wrap headers in
+  <code>extern "C" { }</code> so symbols are emitted unmangled.</p>
+</div>
+
+<div class="qa">
+  <h3>29. What is RPATH, and how does it differ from
+  <code>LD_LIBRARY_PATH</code>?</h3>
+  <p>RPATH is a path embedded in the ELF binary
+  (<code>DT_RPATH</code>/<code>DT_RUNPATH</code>) telling the
+  loader where to look for shared libraries.
+  <code>LD_LIBRARY_PATH</code> is an environment variable that
+  the loader consults too. Search order:
+  <code>LD_LIBRARY_PATH</code> &rarr; <code>DT_RUNPATH</code>
+  &rarr; <code>/etc/ld.so.cache</code> &rarr; default dirs.
+  Use <code>$ORIGIN</code> in RPATH to make the binary
+  relocatable.</p>
+</div>
+
+<div class="qa">
+  <h3>30. How do you debug an ELF binary you didn't build &mdash;
+  no source, stripped?</h3>
+  <p>Disassemble with <code>objdump -d</code>; inspect the
+  symbol table with <code>nm</code> (often empty);
+  <code>readelf -a</code> for sections, dynamic libraries,
+  RPATH; <code>strings</code> for embedded literals;
+  <code>strace</code>/<code>ltrace</code> to watch syscalls and
+  library calls live; GDB attached can still set address
+  breakpoints. If you have a <code>build-id</code>,
+  <code>debuginfod</code> can pull symbols from the
+  distributor.</p>
+</div>
+
+<h2 id="linux-process">Linux process model &amp; I/O (31–38)</h2>
+
+<div class="qa">
+  <h3>31. What happens during <code>fork</code>?</h3>
+  <p>The kernel duplicates the address space (copy-on-write),
+  the file descriptor table, and most attributes; the child gets
+  PID 0 from <code>fork</code>'s return, the parent gets the
+  child's PID. Only the calling thread is duplicated &mdash;
+  this is why <code>fork</code> in a multithreaded program is a
+  trap unless you immediately <code>exec</code>.</p>
+</div>
+
+<div class="qa">
+  <h3>32. What is a zombie process and how do you reap it?</h3>
+  <p>A child that has exited but whose parent hasn't called
+  <code>wait</code>/<code>waitpid</code>. The kernel keeps the
+  exit status until reaped. Reap by calling <code>wait</code>,
+  setting up a <code>SIGCHLD</code> handler, or using
+  <code>signalfd</code>/<code>signal(SIGCHLD, SIG_IGN)</code>
+  on Linux to auto-reap.</p>
+</div>
+
+<div class="qa">
+  <h3>33. Why is <code>printf</code> in a signal handler unsafe?</h3>
+  <p>It's not async-signal-safe: it takes locks (stdio
+  <code>flockfile</code>), allocates, and may have been
+  interrupted mid-state. Use <code>write(2)</code> directly with
+  pre-formatted buffers, or set a <code>volatile sig_atomic_t</code>
+  flag and act on it from main. Best of all, use
+  <code>signalfd</code>: signals become readable events.</p>
+</div>
+
+<div class="qa">
+  <h3>34. What's the difference between
+  <code>fsync</code> and <code>fdatasync</code>?</h3>
+  <p><code>fsync</code> persists file data <em>and</em> metadata
+  (size, mtime) before returning. <code>fdatasync</code> persists
+  only the data and the metadata strictly required to read it
+  back. After atomic-replace + <code>rename</code>, you must
+  also <code>fsync</code> the parent <em>directory</em> &mdash;
+  the <code>rename</code> entry isn't durable otherwise.</p>
+</div>
+
+<div class="qa">
+  <h3>35. How do you do an atomic file replace?</h3>
+  <p>Write to a sibling tempfile in the same directory,
+  <code>fsync</code> it, <code>rename(2)</code> over the target
+  (atomic on the same filesystem), then <code>fsync</code> the
+  directory. Readers see either the old file or the new file,
+  never a partial one.</p>
+</div>
+
+<div class="qa">
+  <h3>36. What is <code>O_DIRECT</code>, and when would you use
+  it?</h3>
+  <p>Bypasses the page cache; reads/writes go to the device.
+  Useful for databases that manage their own cache and want
+  determinism, or for benchmarking. Brings strict alignment
+  requirements (block-aligned buffer, offset, length). Most
+  applications want the page cache.</p>
+</div>
+
+<div class="qa">
+  <h3>37. What is <code>epoll</code>, and what's the difference
+  between level- and edge-triggered?</h3>
+  <p><code>epoll</code> is Linux's scalable readiness
+  notification API. Level-triggered (default): keeps notifying
+  while the fd is ready. Edge-triggered (<code>EPOLLET</code>):
+  notifies only on the transition; you must read until
+  <code>EAGAIN</code> on every event, otherwise you'll miss
+  data. Edge-triggered with non-blocking I/O is what scalable
+  servers use.</p>
+</div>
+
+<div class="qa">
+  <h3>38. What does <code>SCM_RIGHTS</code> let you do?</h3>
+  <p>Pass open file descriptors between processes through a Unix
+  domain socket via <code>sendmsg</code>/<code>recvmsg</code>
+  with an ancillary message. The receiving process gets a fresh
+  fd in its table, sharing the underlying open-file
+  description. The pattern behind privileged-helper designs.</p>
+</div>
+
+<h2 id="threads">Threads &amp; concurrency (39–43)</h2>
+
+<div class="qa">
+  <h3>39. What is a data race?</h3>
+  <p>Two or more threads accessing the same memory, at least
+  one writing, with no happens-before relation between them. In
+  C and C++, a data race is undefined behaviour &mdash; not a
+  &ldquo;maybe wrong value&rdquo;. The fix: mutex, atomic with
+  proper memory order, or eliminate the sharing.</p>
+</div>
+
+<div class="qa">
+  <h3>40. Why must condition-variable waits use a predicate
+  loop?</h3>
+  <p>Spurious wakeups, missed signals, and races between signal
+  and wait. The pattern is
+  <code>while (!ready) cv.wait(lock);</code>, never
+  <code>if</code>. The lock must be held while testing the
+  predicate; <code>wait</code> drops it during sleep and
+  re-acquires it before returning.</p>
+</div>
+
+<div class="qa">
+  <h3>41. Acquire/release vs. sequentially consistent &mdash;
+  what's the trade-off?</h3>
+  <p>Sequentially consistent (<code>memory_order_seq_cst</code>,
+  the default) gives a single global order across all atomic
+  operations &mdash; expensive on weak-memory CPUs (ARM, RISC-V).
+  Acquire/release pairs are cheaper and enough for most
+  producer/consumer patterns: a release on the producer
+  happens-before any acquire on the consumer that observes its
+  value. Use seq_cst until profiling proves you need finer
+  control.</p>
+</div>
+
+<div class="qa">
+  <h3>42. What is false sharing?</h3>
+  <p>Two threads writing to different variables that share a
+  cache line. The MESI protocol shuttles the line between cores,
+  destroying performance. Detect with <code>perf c2c</code>; fix
+  by padding/aligning to <code>std::hardware_destructive_interference_size</code>
+  (typically 64 bytes on x86, 128 on ARM big.LITTLE).</p>
+</div>
+
+<div class="qa">
+  <h3>43. How does TSan detect races?</h3>
+  <p>It instruments every memory access at compile time and
+  maintains a vector clock per thread. Each location remembers
+  the last access; when a new access has no happens-before to
+  the previous one and at least one is a write, it reports.
+  Costs ~5&times; CPU and ~10&times; memory; deterministic
+  enough to find races even when their effect would be
+  invisible.</p>
+</div>
+
+<h2 id="perf-debug">Perf &amp; debugging (44–50)</h2>
+
+<div class="qa">
+  <h3>44. The program is slow. Where do you start?</h3>
+  <p>In order: (1) <code>time</code> &mdash; user vs system vs
+  wall, do they make sense? (2) <code>strace -c</code> &mdash;
+  is it stuck in syscalls? (3) <code>perf stat</code> &mdash;
+  IPC, branch mispredict, cache misses; (4) <code>perf record
+  -g</code> + flamegraph &mdash; where is CPU going? (5) source
+  &amp; data layout. Don't optimise without measuring.</p>
+</div>
+
+<div class="qa">
+  <h3>45. What does an IPC of 0.3 tell you?</h3>
+  <p>Most cycles aren't retiring instructions &mdash; the CPU is
+  stalled. Look at the breakdown:
+  <code>perf stat -d</code> gives L1/LLC misses, branch
+  mispredicts. Common causes are random-access pointer chasing,
+  giant working sets, or branch-heavy code. IPC above ~2 means
+  the CPU is doing real work.</p>
+</div>
+
+<div class="qa">
+  <h3>46. How do you get a useful core dump on a modern
+  systemd box?</h3>
+  <p><code>ulimit -c unlimited</code>, ensure
+  <code>/proc/sys/kernel/core_pattern</code> routes to
+  <code>systemd-coredump</code> (it does by default), reproduce
+  the crash, then <code>coredumpctl list</code> /
+  <code>coredumpctl debug PID</code> to drop into GDB on the
+  dump. Build with <code>-g</code> and don't strip; the binary
+  must be exactly the one that crashed.</p>
+</div>
+
+<div class="qa">
+  <h3>47. What is a watchpoint and when is it gold?</h3>
+  <p>A watchpoint breaks when a memory address is read or written.
+  GDB uses hardware debug registers (DR0&ndash;DR3 on x86, four
+  total) when available; software watchpoints are 1000&times;
+  slower. Gold for &ldquo;who is corrupting this field?&rdquo;:
+  set the watchpoint after the value goes wrong, restart, and
+  catch the writer in the act.</p>
+</div>
+
+<div class="qa">
+  <h3>48. ASan reported a heap-buffer-overflow with an allocation
+  stack 8 frames deep. How do you read it?</h3>
+  <p>Top of the report: type of error, address, size, access.
+  Then three stacks: where the bad access happened, where the
+  buffer was allocated, and (for UAF) where it was freed. Map
+  the access frame to your source first; usually it's an
+  off-by-one in a loop bound or strncpy-style mistake. Build
+  with <code>-fno-omit-frame-pointer -g</code> for crisp stacks.</p>
+</div>
+
+<div class="qa">
+  <h3>49. Your program is being killed but you see no error
+  message. Why?</h3>
+  <p>Usually the OOM killer. Check
+  <code>dmesg | grep -i oom</code> or
+  <code>journalctl -k | grep -i kill</code>. Other suspects:
+  parent sending SIGKILL, exceeded ulimit (<code>ulimit -a</code>),
+  cgroup memory limit, supervisor-imposed timeout. Exit code
+  137 (128 + 9) is the giveaway for SIGKILL; 139 (128 + 11) is
+  segfault.</p>
+</div>
+
+<div class="qa">
+  <h3>50. You've fixed the bug. How do you make sure it never
+  comes back?</h3>
+  <p>(1) Add a regression test that reliably reproduces it
+  pre-fix. (2) Run it in CI under sanitizers
+  (<code>-fsanitize=address,undefined</code> and a separate TSan
+  build for threading code). (3) If it was a build/link issue,
+  pin the toolchain or add the offending flag to the warning
+  set as <code>-Werror</code>. (4) Write a one-paragraph
+  post-mortem in the commit body so the next person to touch
+  the area knows the history. <em>The bug you don't write a
+  test for is the bug you'll ship again.</em></p>
+</div>
+
+<div class="callout">
+  <strong>If you only remember three things from this chapter:</strong>
+  <ol>
+    <li>Always pair an answer with the model behind it &mdash; &ldquo;why&rdquo; over &ldquo;what&rdquo;.</li>
+    <li>UB is not &ldquo;wrong value&rdquo; &mdash; it's permission for the compiler to miscompile your code arbitrarily.</li>
+    <li>The shortest path from broken to fixed: reproduce, sanitise, instrument, hypothesise, verify.</li>
+  </ol>
+</div>
+
+<h2 id="recap">Recap</h2>
+
+<ul>
+  <li>C/C++ traps: array vs. pointer, signed/unsigned mixing, strict aliasing, lifetime, alignment.</li>
+  <li>C++ rules: RAII first, ownership second; rule of five; <code>noexcept</code> moves; iterator invalidation.</li>
+  <li>Linux model: fork-exec-wait, signals are async-signal-unsafe, atomic file replace = tmp + fsync + rename + dir fsync.</li>
+  <li>Concurrency: data races are UB, predicate loops on condvars, acquire/release before seq_cst, false sharing kills throughput.</li>
+  <li>Debugging: time &rarr; strace &rarr; perf stat &rarr; perf record &rarr; flamegraph; sanitizers in CI; coredumpctl for postmortem; watchpoints for &ldquo;who corrupted this&rdquo;.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="12-kernel-adjacent.html"><span class="lbl">← Prev</span><span class="ttl">Kernel-adjacent debug</span></a>
+  <a href="14-capstone.html" class="next"><span class="lbl">Next →</span><span class="ttl">Capstone</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

@@ -3,7 +3,7 @@
  * Problem: LRU Cache using Doubly Linked List
  * ============================================================================
  * Difficulty: Medium
- * Source: LeetCode 146 / NextHop.AI Design Round
+ * Source: LeetCode 146 / interview practice design round
  * Time: 30-40 minutes
  * 
  * DESCRIPTION:

@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · Debugging Make — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 11</span>
+  Debugging Make
+</h1>
+<p class="lede">
+  When a Makefile misbehaves, you need tools. This chapter is every
+  technique I use — <code>-n</code>, <code>-p</code>, <code>--debug</code>,
+  <code>--trace</code>, <code>$(info)</code>, the Make "database dump",
+  and <em>remake</em>, a drop-in GNU Make fork with a real debugger.
+</p>
+
+<h2 id="dry-run"><code>-n</code> — dry run</h2>
+
+<p>
+  <code>make -n</code> (or <code>--just-print</code>) prints every
+  recipe line it <em>would</em> run, without executing anything. This
+  is the first tool to reach for.
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -n
+cc -O2 -c src/main.c -o build/main.o
+cc -O2 -c src/greet.c -o build/greet.o
+cc    build/main.o build/greet.o -o build/hello</code></pre>
+</div>
+
+<p>When combined with <code>-W file</code> (<code>--what-if</code>), it answers "what would happen if I modified <em>file</em>":</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -n -W include/greet.h
+cc -O2 -c src/main.c -o build/main.o
+cc -O2 -c src/greet.c -o build/greet.o
+cc    build/main.o build/greet.o -o build/hello</code></pre>
+</div>
+
+<p>
+  Without touching anything, you've learned that touching
+  <code>greet.h</code> triggers both compile units and a relink.
+</p>
+
+<h2 id="database-dump"><code>-p</code> — Make's internal database</h2>
+
+<p>
+  <code>make -p</code> dumps <em>everything Make knows</em>: variables,
+  rules, implicit rules, directories, targets, timestamps. It's
+  verbose — ~6000 lines for a plain-vanilla invocation. Page through
+  it:
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -p -f /dev/null 2&gt;/dev/null | less
+$ make -p                              # for your Makefile specifically</code></pre>
+</div>
+
+<p>Useful <code>-p</code> greps:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code># All variables ending with _DEPS
+$ make -p 2&gt;/dev/null | grep '_DEPS ='
+
+# The origin and value of CFLAGS
+$ make -p 2&gt;/dev/null | grep -A1 'CFLAGS'
+
+# Every built-in pattern rule
+$ make -p -f /dev/null 2&gt;/dev/null | grep '^%'</code></pre>
+</div>
+
+<p>
+  Add <code>-n</code> to <code>-p</code> for "dry run + dump" — a
+  safe post-mortem if <code>make</code> itself succeeds but behaves
+  oddly.
+</p>
+
+<h2 id="debug"><code>--debug</code></h2>
+
+<p>Several flavors:</p>
+
+<table>
+<thead><tr><th>Flag</th><th>Shows</th></tr></thead>
+<tbody>
+<tr><td><code>--debug=basic</code> or <code>-d</code></td><td>Decisions Make made: "target X needs rebuild because Y is newer"</td></tr>
+<tr><td><code>--debug=verbose</code></td>                  <td>Basic + searched implicit rules, skipped prereqs</td></tr>
+<tr><td><code>--debug=implicit</code></td>                 <td>Just implicit rule searches</td></tr>
+<tr><td><code>--debug=jobs</code></td>                     <td>Process scheduling, parallelism, exit codes</td></tr>
+<tr><td><code>--debug=makefile</code></td>                 <td>Re-reading of included makefiles</td></tr>
+<tr><td><code>--debug=all</code> or <code>-d</code></td>   <td>Everything</td></tr>
+<tr><td><code>--debug=none</code></td>                     <td>Disable (from <code>MAKEFLAGS</code>, etc.)</td></tr>
+</tbody>
+</table>
+
+<p>Combine: <code>--debug=basic,jobs</code>. Most useful starter: <code>--debug=basic</code>.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make --debug=basic hello
+GNU Make 4.4.1
+...
+Reading makefiles...
+Updating goal targets....
+File 'hello' does not exist.
+ File 'main.o' does not exist.
+  Must remake target 'main.o'.
+cc -O2 -c main.c -o main.o
+...</code></pre>
+</div>
+
+<p>If Make refuses to rebuild something you expected it to rebuild, <code>--debug=basic</code> usually tells you why in one line.</p>
+
+<h2 id="trace"><code>--trace</code></h2>
+
+<p>
+  GNU Make 4.0+. Prefixes each executed recipe line with the rule it
+  came from and the reason it's running:
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make --trace
+Makefile:12: update target 'build/main.o' due to: src/main.c
+cc -O2 -c src/main.c -o build/main.o
+Makefile:8: update target 'build/hello' due to: build/main.o
+cc build/main.o -o build/hello</code></pre>
+</div>
+
+<p>
+  <code>--trace</code> is often more actionable than
+  <code>--debug=basic</code> because it maps each command back to a
+  specific Makefile line.
+</p>
+
+<h2 id="info-fns">Printf debugging: <code>$(info)</code>, <code>$(warning)</code>, <code>$(error)</code></h2>
+
+<p>These we met in Chapter 6. Used for inspecting values at parse time.</p>
+
+<div class="code" data-lang="make">
+<pre><code>$(info CC       = $(CC))
+$(info CFLAGS   = $(CFLAGS))
+$(info SRC      = $(SRC))
+$(info OBJ      = $(OBJ))
+$(info MAKECMDGOALS = $(MAKECMDGOALS))
+$(info MAKEFILE_LIST = $(MAKEFILE_LIST))</code></pre>
+</div>
+
+<p>Put these at the top of a misbehaving Makefile and re-run. 80% of "why is this variable empty?" bugs die immediately.</p>
+
+<p>The <code>$(error)</code> variant halts immediately. Useful for guards:</p>
+<div class="code" data-lang="make">
+<pre><code>ifndef PROD_HOST
+$(error PROD_HOST must be set for 'deploy')
+endif</code></pre>
+</div>
+
+<h2 id="inspect-one-var">The "print-VAR" idiom</h2>
+
+<p>A tiny pattern rule every Makefile should have:</p>
+<div class="code" data-lang="make">
+<pre><code>print-%:
+	@echo '$* = $($*)'
+	@echo '  origin = $(origin $*)'
+	@echo '  flavor = $(flavor $*)'
+	@echo '  value  = $(value $*)'</code></pre>
+</div>
+
+<p>Now:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make print-CFLAGS
+CFLAGS = -O2 -Wall -MMD -MP
+  origin = file
+  flavor = simple
+  value  = -O2 -Wall -MMD -MP
+
+$ make print-SRC
+SRC = src/main.c src/greet.c
+  origin = file
+  flavor = simple
+  value  = $(wildcard src/*.c)</code></pre>
+</div>
+
+<p>The <code>value</code> line shows the unexpanded template — often more diagnostic than the expanded value.</p>
+
+<h2 id="missing-sep">Common errors and what they mean</h2>
+
+<table>
+<thead><tr><th>Error</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>*** missing separator. Stop.</code></td>
+<td>A recipe line without a leading tab. Or a continuation of a non-recipe line that Make can't make sense of.</td></tr>
+<tr><td><code>*** No rule to make target 'X', needed by 'Y'.  Stop.</code></td>
+<td>A prereq <code>X</code> doesn't exist and no rule explains how to build it. Typo, missing file, wrong path.</td></tr>
+<tr><td><code>make: Nothing to be done for 'X'.</code></td>
+<td>The target exists and is up to date — OR it's a phony target accidentally shadowed by a real file. Check <code>.PHONY</code>.</td></tr>
+<tr><td><code>*** Recursive variable 'X' references itself (eventually). Stop.</code></td>
+<td>You wrote <code>X = $(X) foo</code>. Switch to <code>:=</code> or <code>+=</code>.</td></tr>
+<tr><td><code>*** recipe commences before first target.  Stop.</code></td>
+<td>A tab-indented line appeared before Make saw a rule. Often caused by stray indentation inside a conditional, or misplaced <code>endef</code>.</td></tr>
+<tr><td><code>commands commence before first target.</code></td>
+<td>Old-spelling of the above. Same bug.</td></tr>
+<tr><td><code>*** target pattern contains no '%'.</code></td>
+<td>Bad static pattern rule syntax. The middle argument must contain <code>%</code>.</td></tr>
+<tr><td><code>warning: overriding recipe for target 'X'</code></td>
+<td>Two non-<code>::</code> rules define a recipe for the same target. Usually a duplicate you forgot about.</td></tr>
+<tr><td><code>warning: undefined variable 'X'</code></td>
+<td>Only with <code>--warn-undefined-variables</code>. Typo in a variable name. Fix it.</td></tr>
+</tbody>
+</table>
+
+<h2 id="warn-undef">Always run with <code>--warn-undefined-variables</code></h2>
+
+<p>
+  Put this near the top of your Makefile (or set it in
+  <code>MAKEFLAGS</code>):
+</p>
+<div class="code" data-lang="make">
+<pre><code>MAKEFLAGS += --warn-undefined-variables</code></pre>
+</div>
+
+<p>
+  Catches typos instantly. <code>$(CFLGS)</code> instead of
+  <code>$(CFLAGS)</code> would silently expand to empty — with this
+  flag, Make warns, and you save yourself an afternoon.
+</p>
+
+<h2 id="remake"><em>remake</em> — a Make with a debugger</h2>
+
+<p>
+  <a href="https://bashdb.sourceforge.net/remake/">remake</a> is a
+  fork of GNU Make that adds a proper interactive debugger. It
+  installs alongside Make.
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ brew install remake        # macOS
+$ apt install remake          # Debian/Ubuntu
+$ remake -X                   # enter debugger at start
+
+remake&gt; target hello
+remake&gt; step
+remake&gt; show variable CFLAGS
+remake&gt; where
+remake&gt; quit</code></pre>
+</div>
+
+<p>
+  Treat it as <code>gdb</code> for Make. When <code>$(info)</code>
+  isn't enough and you need to trace through expansion live, remake is
+  worth the install. It also gives you nicer error messages (source
+  line and column for <code>missing separator</code>).
+</p>
+
+<h2 id="verbose-build">Build transcripts</h2>
+
+<p>Sometimes you want every executed command, readably:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -j 1 --output-sync=target | tee build.log 2&gt;&amp;1</code></pre>
+</div>
+
+<p>Forcing <code>-j 1</code> preserves sequential order so the log is coherent. Redirect and grep later.</p>
+
+<h2 id="timestamps">Inspecting timestamps</h2>
+
+<p>When "Make isn't rebuilding X", check the timestamps:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ stat -f "%m %N" build/*.o  include/*.h   # macOS / BSD
+$ stat -c "%Y %n" build/*.o  include/*.h   # Linux</code></pre>
+</div>
+
+<p>You're looking for an <code>.o</code> that's older than a <code>.h</code> it should depend on. If the <code>.o</code> is newer, Make considers it up-to-date — correctly, per its rules. Bug is in your dependencies.</p>
+
+<h2 id="dump-includes">Which Makefiles did Make actually read?</h2>
+
+<div class="code" data-lang="make">
+<pre><code>$(info Makefile list: $(MAKEFILE_LIST))</code></pre>
+</div>
+<p>
+  <code>MAKEFILE_LIST</code> grows as Make reads files via
+  <code>include</code>. If you expected an include to fire and it
+  didn't, this tells you.
+</p>
+
+<h2 id="hands-on">Hands-on: debug a broken build</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · three-bug scavenger hunt</div>
+<div class="hands-on-body">
+<p>Here's a Makefile with three bugs. See how fast you can find them.</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">broken.mk</span></div>
+<pre><code>CC     = cc
+CFLGS  = -O2 -Wall
+SRC    = $(wildcard src/*.c)
+OBJ    = $(SRC:.c=.o)
+
+.PHONY: all clean
+all : hello
+
+hello: $(OBJ)
+    $(CC) $(CFLAGS) $^ -o $@
+
+%.o: %.c
+	$(CC) $(CFLGS) -c $&lt; -o $@
+
+clean:
+	rm -f hello *.o</code></pre>
+</div>
+<p>Try to build. What goes wrong?</p>
+<details class="solution">
+<summary>Show solution — three bugs</summary>
+<div>
+<ol>
+<li><strong>Bug 1: tabs vs spaces.</strong> The <code>$(CC) $(CFLAGS) $^ -o $@</code> line under <code>hello:</code> begins with spaces, not a tab. Error: <code>*** missing separator</code>. Fix by retyping the indent with a real tab.</li>
+<li><strong>Bug 2: typo in variable name.</strong> The recipes use <code>$(CFLAGS)</code> (which is never set), but the variable is defined as <code>CFLGS</code>. The compile commands silently use an empty string. Running with <code>MAKEFLAGS += --warn-undefined-variables</code> would catch this. Fix by renaming to <code>CFLAGS</code>.</li>
+<li><strong>Bug 3: OBJ paths.</strong> <code>SRC</code> is <code>src/main.c src/greet.c ...</code>; the substitution <code>$(SRC:.c=.o)</code> gives <code>src/main.o src/greet.o ...</code>, but the pattern rule <code>%.o: %.c</code> will produce <em>top-level</em> <code>main.o greet.o ...</code> because that's where Make will write them unless the pattern specifies otherwise. Mismatch: Make can't find <code>src/main.o</code> because the rule makes <code>main.o</code> from <code>main.c</code>, not from <code>src/main.c</code>. Debug: <code>make -n</code> or <code>make print-OBJ</code>. Fix: write a path-aware rule: <code>$(SRC:src/%.c=src/%.o)</code> as your OBJ, and a matching pattern rule <code>src/%.o: src/%.c</code>. Or move OBJ to <code>build/</code> as in Chapter 9.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">print-%</span>
+</div>
+<div class="exercise-body">
+<p>Add the <code>print-%</code> rule to an existing Makefile of yours. Verify it works on <code>CC</code>, <code>CFLAGS</code>, and a variable defined by your own code.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>You wrote the rule and ran <code>make print-CC</code> etc. Now it's in your pocket for the next time a colleague asks "what's <code>$(FOO)</code> evaluating to?".</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Explain this behavior</span>
+</div>
+<div class="exercise-body">
+<p>A user complains:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+cc -c main.c -o main.o
+$ make
+cc -c main.c -o main.o          # it keeps rebuilding even though nothing changed</code></pre>
+</div>
+<p>How do you diagnose what's going on?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Run <code>make --debug=basic</code>:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make --debug=basic
+ File 'main.o' does not exist.</code></pre>
+</div>
+<p>Interesting — Make thinks <code>main.o</code> doesn't exist, but we clearly just built it. Possibilities:</p>
+<ul>
+<li>The recipe doesn't actually write <code>main.o</code> (typo in target name? outputs to a different path?).</li>
+<li>Something (a clean script in a hook, a CI artifact cleaner) is deleting it.</li>
+<li>Make is looking in the wrong directory (<code>vpath</code>, <code>VPATH</code> confusion).</li>
+</ul>
+<p><code>ls -la main.o</code> after the build confirms whether the file actually exists. If it does but Make doesn't see it, check <code>make -p 2&gt;/dev/null | grep main.o</code> for what path Make expects.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why didn't it rebuild?</span>
+</div>
+<div class="exercise-body">
+<p>A colleague edited <code>util.h</code> and expected <code>util.o</code> to rebuild, but it didn't. Walk through the steps you'd take to diagnose.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><code>make -W include/util.h -n</code> — what <em>would</em> rebuild if that file were newer? If nothing, the dependency is missing.</li>
+<li><code>make -p | grep util.o</code> — what prereqs does Make think <code>util.o</code> has? If only <code>util.c</code>, the header dep isn't known.</li>
+<li>Check if the project uses <code>-MMD -MP</code>. If yes, look for <code>build/util.d</code> — does it list <code>util.h</code>?</li>
+<li>Is the <code>-include $(DEP)</code> line present and is <code>$(DEP)</code> non-empty? (<code>make print-DEP</code>)</li>
+</ol>
+<p>Most likely cause: a stale dep file, or <code>-include</code> was accidentally removed, or the dep file wasn't produced (missing <code>-MMD</code> in CFLAGS).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Parse-time vs build-time info</span>
+</div>
+<div class="exercise-body">
+<p>You want to print "Starting build…" at the <em>start</em> of the build (after rules are known, before recipes run), and "Done." at the end. How?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  A top-level <code>$(info)</code> fires at parse time — which is
+  essentially "start of build". For "end of build", add a phony
+  target that depends on the real goal:
+</p>
+<div class="code" data-lang="make">
+<pre><code>$(info Starting build...)
+
+.PHONY: all done
+all: done
+
+done: $(BIN)
+	@echo "Done."
+
+# … real targets …</code></pre>
+</div>
+<p>
+  Or use a "last goal" hook via a canned recipe. Make doesn't have a
+  built-in "finalizer", so the cleanest way is to make the real goal a
+  prereq of a thin wrapper.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Trace a rebuild decision</span>
+</div>
+<div class="exercise-body">
+<p>Using <code>--trace</code>, determine the exact reason Make rebuilds a target of your choice. Copy the line it prints and explain it.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Example output from running <code>make --trace</code> after <code>touch src/greet.c</code>:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>Makefile:23: update target 'build/greet.o' due to: src/greet.c
+cc -O2 -MMD -MP -c src/greet.c -o build/greet.o
+Makefile:18: update target 'build/hello' due to: build/greet.o
+cc build/main.o build/greet.o -o build/hello</code></pre>
+</div>
+<p>
+  Reads: "at Makefile line 23, update target <code>build/greet.o</code>
+  because the prerequisite <code>src/greet.c</code> is newer". Then
+  line 18 triggers for the same reason one level up. This is how
+  Make decisions become legible.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Build a check-target</span>
+</div>
+<div class="exercise-body">
+<p>
+  Write a Makefile fragment that, before anything else, verifies the
+  required tools (<code>cc</code>, <code>pkg-config</code>,
+  <code>python3</code>) exist on <code>PATH</code>. Error clearly if
+  any is missing.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>REQUIRED := cc pkg-config python3
+
+define check_tool
+$(if $(shell command -v $(1) 2&gt;/dev/null),, \
+    $(error Required tool '$(1)' not found in PATH))
+endef
+
+$(foreach t,$(REQUIRED),$(call check_tool,$(t)))</code></pre>
+</div>
+<p>
+  Fires at parse time — before any recipe runs. Clean failure mode.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>make -n</code> — dry run, shows what <em>would</em> run.</li>
+  <li><code>make -W file -n</code> — "what if this file changed".</li>
+  <li><code>make -p</code> — dump Make's internal database.</li>
+  <li><code>make --debug=basic</code> / <code>--trace</code> — why each target is rebuilding.</li>
+  <li><code>$(info) $(warning) $(error)</code> — printf debugging at parse time.</li>
+  <li>The <code>print-%</code> pattern rule — inspect any variable on demand.</li>
+  <li><code>MAKEFLAGS += --warn-undefined-variables</code> — catches typos.</li>
+  <li><em>remake</em> — Make with a real debugger.</li>
+  <li>Check timestamps with <code>stat</code> when "why isn't this rebuilding?" is the question.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="10-parallel-make.html"><span class="lbl">← Prev</span><span class="ttl">Parallel Make</span></a>
+  <a href="12-recursive-harmful.html" class="next"><span class="lbl">Next →</span><span class="ttl">Recursive Make Considered Harmful</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

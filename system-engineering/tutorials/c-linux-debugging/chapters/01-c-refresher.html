@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1 · C — the working subset</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 01</span>
+  C — the working subset
+</h1>
+<p class="lede">
+  C is small but treacherous. This chapter covers the parts you can
+  trust, the parts you can't, and the rules behind both. Pointers,
+  arrays, integer promotion, structs, declarators, and the idioms a
+  systems programmer reaches for daily.
+</p>
+
+<h2 id="hello">A "hello, world" worth re-reading</h2>
+
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">hello.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+
+int main(int argc, char *argv[]) {
+    printf("hello, %s\n", argc &gt; 1 ? argv[1] : "world");
+    return 0;
+}
+</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -std=c17 -Wall -Wextra -Wpedantic -O2 -g hello.c -o hello
+$ ./hello there
+hello, there
+</code></pre>
+</div>
+
+<p>Things that should be reflex from line one:</p>
+
+<ul>
+  <li><strong><code>-std=c17</code></strong> (or <code>-std=c11</code> on older compilers, <code>-std=c23</code> on bleeding-edge). Don't compile against the unstated implementation default.</li>
+  <li><strong><code>-Wall -Wextra -Wpedantic</code></strong> always. Add <code>-Wshadow -Wconversion -Wnull-dereference -Wstrict-prototypes</code> to taste.</li>
+  <li><strong><code>-O2 -g</code></strong> gives optimised code with debug symbols. <code>-Og</code> gives a debug-friendly build with most opts off.</li>
+  <li><strong><code>-fsanitize=address,undefined</code></strong> is your friend during development. Chapter 11.</li>
+</ul>
+
+<h2 id="types">Types — what they really are</h2>
+
+<p>Integer types in C are sized by the implementation, with minimums:</p>
+
+<table>
+<thead><tr><th>Type</th><th>Min size</th><th>Common on 64-bit Linux</th></tr></thead>
+<tbody>
+<tr><td><code>char</code></td>      <td>1 byte (≥8 bits)</td><td>1 byte, signedness implementation-defined</td></tr>
+<tr><td><code>short</code></td>     <td>≥16 bits</td>        <td>2 bytes</td></tr>
+<tr><td><code>int</code></td>       <td>≥16 bits</td>        <td>4 bytes</td></tr>
+<tr><td><code>long</code></td>      <td>≥32 bits</td>        <td>8 bytes (LP64)</td></tr>
+<tr><td><code>long long</code></td> <td>≥64 bits</td>        <td>8 bytes</td></tr>
+<tr><td><code>size_t</code></td>    <td>unsigned, big enough for any object size</td><td>8 bytes</td></tr>
+<tr><td><code>ptrdiff_t</code></td> <td>signed pointer difference</td><td>8 bytes</td></tr>
+</tbody>
+</table>
+
+<p>For anything where width matters — file formats, wire protocols, cross-platform code — use the fixed-width types from <code>&lt;stdint.h&gt;</code>:</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdint.h&gt;
+#include &lt;inttypes.h&gt;
+
+uint32_t  u32;
+int64_t   i64;
+uintptr_t addr;        /* integer big enough for a pointer */
+
+printf("%" PRIu32 " %" PRId64 "\n", u32, i64);
+</code></pre>
+</div>
+
+<p>Use <code>PRIu32</code>/<code>PRId64</code>/<code>PRIxPTR</code> macros for printf — they give the right format string regardless of platform.</p>
+
+<h2 id="signedness">Signedness and integer promotion</h2>
+
+<p>The single most-foot-gunned area of C. Two rules, learned the hard way:</p>
+
+<ol>
+  <li><strong>Anything narrower than <code>int</code> is promoted to <code>int</code> in expressions.</strong> A <code>uint8_t a = 0xff; uint8_t b = 0xff;</code> then <code>a * b</code> is computed as <code>int</code> — no overflow, value 0xfe01.</li>
+  <li><strong>Mixing signed and unsigned converts the signed to unsigned</strong> if the unsigned type is at least as wide. <code>-1 &lt; 1u</code> is <code>false</code>, because <code>-1</code> becomes <code>UINT_MAX</code>.</li>
+</ol>
+
+<div class="code" data-lang="c">
+<pre><code>int   x = -1;
+unsigned y = 1;
+if (x &lt; y) puts("yes"); else puts("no");
+/* prints "no" — x is converted to unsigned (huge), then compared. */
+</code></pre>
+</div>
+
+<p>Practical defenses:</p>
+<ul>
+  <li>Compile with <code>-Wsign-compare -Wsign-conversion</code>. The warnings sting; fix them.</li>
+  <li>Prefer signed types for arithmetic where you don't need the high bit. Use unsigned for bit-fiddling.</li>
+  <li>Indices into arrays: <code>size_t</code> (unsigned), but be careful with downward loops.</li>
+</ul>
+
+<h2 id="pointers">Pointers — the four-line summary</h2>
+
+<div class="code" data-lang="c">
+<pre><code>int  x = 42;
+int *p = &amp;x;       /* p points at x */
+int  y = *p;       /* dereference: y is now 42 */
+*p = 7;            /* through p, store into x; now x == 7 */
+</code></pre>
+</div>
+
+<p>Common rookie traps:</p>
+
+<div class="code" data-lang="c">
+<pre><code>int *p;            /* p is uninitialised — points anywhere */
+*p = 5;            /* UB: write to who-knows-where */
+
+int *q = NULL;
+*q = 5;            /* UB: NULL deref. Often a SIGSEGV — but NOT guaranteed. */
+
+int *r;
+{
+    int local = 10;
+    r = &amp;local;
+}
+printf("%d\n", *r);  /* UB: r dangles, local has gone out of scope. */
+</code></pre>
+</div>
+
+<p>Sanitizers catch all three; running unchecked code "on Tuesday" doesn't.</p>
+
+<h2 id="arrays-pointers">Arrays vs pointers — the iconic confusion</h2>
+
+<p>An array is <em>not</em> a pointer. But array names <em>decay</em> to pointers in most expression contexts.</p>
+
+<div class="code" data-lang="c">
+<pre><code>int a[10];
+
+sizeof(a)  == 40    /* (assuming int is 4) */
+sizeof(&amp;a) == 8     /* size of a pointer-to-array-of-10-ints, which is 8 on x86_64 */
+
+int *p = a;         /* OK: a decays to int* in this context */
+sizeof(p)  == 8     /* p is a pointer; sizeof gives pointer size */
+
+void f(int x[10]) {
+    sizeof(x);      /* this is sizeof(int*) — 8. The "[10]" was a polite lie. */
+}
+</code></pre>
+</div>
+
+<p>Three-line rule of thumb:</p>
+<ol>
+  <li>Inside the scope where it was declared, an array remembers its size.</li>
+  <li>Pass an array to a function: it becomes a pointer, the size is gone, you must pass the size separately.</li>
+  <li><code>sizeof</code>, <code>&amp;</code>, and string literals as initialisers are the contexts where the array doesn't decay.</li>
+</ol>
+
+<h2 id="declarators">Declarators — read them spirally</h2>
+
+<p>C declarations read inside-out (and right-to-left for the modifiers). The classic exercises:</p>
+
+<div class="code" data-lang="c">
+<pre><code>int  *p;            /* p is a pointer to int */
+int  *p[10];        /* p is an array[10] of pointers to int */
+int (*p)[10];       /* p is a pointer to an array[10] of int */
+int (*f)(int);      /* f is a pointer to a function taking int and returning int */
+int  *f(int);       /* f is a function taking int and returning a pointer to int */
+int (*fp[10])(int); /* fp is an array[10] of pointers to function (int) -&gt; int */
+</code></pre>
+</div>
+
+<p>When in doubt, <code>cdecl</code> (or the website cdecl.org) translates to English. Memorise the spiral rule and you'll read function-pointer-heavy code without flinching.</p>
+
+<h2 id="strings">Strings — null-terminated bytes, that's all</h2>
+
+<p>A C string is "an array of <code>char</code> terminated by a <code>'\0'</code> byte". <strong>The terminator is part of the contract.</strong> Forget it once and you have UB.</p>
+
+<div class="code" data-lang="c">
+<pre><code>char  s[] = "hello";    /* 6 bytes: h e l l o \0 */
+char *t   = "hello";    /* pointer to a (read-only!) string literal */
+t[0] = 'H';             /* UB: writing to a string literal */
+
+size_t n = strlen(s);   /* 5 — does not count the \0 */
+</code></pre>
+</div>
+
+<p>Functions to know cold from <code>&lt;string.h&gt;</code>:</p>
+
+<table>
+<tr><td><code>strlen</code></td>      <td>length, not counting NUL</td></tr>
+<tr><td><code>strcpy</code> / <code>strncpy</code></td><td>both treacherous; prefer <code>snprintf</code> or <code>strlcpy</code></td></tr>
+<tr><td><code>strcmp</code></td>      <td>≤0/0/≥0 like Unix sort</td></tr>
+<tr><td><code>strchr</code> / <code>strrchr</code></td><td>find char</td></tr>
+<tr><td><code>strstr</code></td>      <td>find substring</td></tr>
+<tr><td><code>memcpy</code></td>      <td>raw bytes; non-overlapping; faster than strcpy</td></tr>
+<tr><td><code>memmove</code></td>     <td>raw bytes; allows overlap</td></tr>
+<tr><td><code>memcmp</code></td>      <td>raw bytes equality</td></tr>
+<tr><td><code>memset</code></td>      <td>fill region</td></tr>
+</table>
+
+<div class="callout pitfall">
+<div class="callout-title">strcpy is a footgun, strncpy is a different footgun</div>
+<p><code>strcpy</code> writes until it sees a NUL — buffer-overflow paradise. <code>strncpy</code> writes exactly <code>n</code> bytes, padding with NULs <em>or truncating without NUL-terminating</em>. Read that twice. Use <code>snprintf(dst, sizeof dst, "%s", src)</code> or BSD's <code>strlcpy</code> for sane copying.</p>
+</div>
+
+<h2 id="structs">Structs and aggregates</h2>
+
+<div class="code" data-lang="c">
+<pre><code>struct Point {
+    int x;
+    int y;
+};
+
+struct Point p = { .x = 1, .y = 2 };    /* designated initialiser */
+struct Point q = p;                      /* member-wise copy */
+
+p.x = 5;
+struct Point *pp = &amp;p;
+pp-&gt;x = 5;                               /* same as (*pp).x = 5 */
+</code></pre>
+</div>
+
+<p>Structs are passed by value. To avoid copies, pass <code>const T *</code>. Structs may have padding — never <code>memcmp</code> two structs to test equality unless you've zero-initialised them.</p>
+
+<p>Anonymous unions and structs (C11) are useful for tagged unions and SoA-ish layouts. Bitfields are portable in spelling but their layout is implementation-defined — don't rely on them for wire formats.</p>
+
+<h2 id="enums">Enums and tagged unions</h2>
+
+<div class="code" data-lang="c">
+<pre><code>typedef enum { OK, ERR_NOT_FOUND, ERR_BUSY, ERR_FATAL } Status;
+
+typedef struct {
+    enum { V_INT, V_STR } tag;
+    union {
+        int   i;
+        char *s;
+    };
+} Value;
+
+Value v = { .tag = V_INT, .i = 42 };
+switch (v.tag) {
+    case V_INT: printf("%d\n", v.i); break;
+    case V_STR: printf("%s\n", v.s); break;
+}
+</code></pre>
+</div>
+
+<p>Enums in C are not strongly typed — they're <code>int</code>s in a trench coat. <code>-Wswitch -Wswitch-enum</code> gets you compile-time checks that every enumerator is handled.</p>
+
+<h2 id="functions">Functions, static, extern, inline</h2>
+
+<table>
+<thead><tr><th>Storage class</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>static</code> on a function</td><td>internal linkage — the symbol is private to the translation unit</td></tr>
+<tr><td><code>static</code> on a local var</td><td>persistent, zero-initialised, lifetime is the program</td></tr>
+<tr><td><code>extern</code> on a global</td><td>declaration only; the definition lives elsewhere</td></tr>
+<tr><td><code>inline</code></td><td>hint to inline; with C99/C11 has subtle rules — use <code>static inline</code> in headers</td></tr>
+<tr><td><code>_Noreturn</code> / <code>noreturn</code> (C23: <code>[[noreturn]]</code>)</td><td>function never returns (e.g. <code>exit</code>, <code>abort</code>) — helps the compiler prune control flow</td></tr>
+</tbody>
+</table>
+
+<h2 id="errors">Errors — the C convention</h2>
+
+<p>Most POSIX functions return <code>0</code>/non-negative on success and <code>-1</code> on failure, setting <code>errno</code>. Many libc functions return <code>NULL</code> on failure. Always check.</p>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+
+FILE *f = fopen(path, "r");
+if (!f) {
+    fprintf(stderr, "fopen %s: %s\n", path, strerror(errno));
+    return 1;
+}
+</code></pre>
+</div>
+
+<p>Use <code>perror("fopen")</code> or <code>strerror(errno)</code>; never invent your own error string from the integer value (<code>errno</code> values aren't stable across systems for the textual descriptions).</p>
+
+<h2 id="memory">Manual memory — malloc/free</h2>
+
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdlib.h&gt;
+
+size_t n = 1000;
+int *xs = malloc(n * sizeof *xs);   /* sizeof *xs, not sizeof(int) — survives type renames */
+if (!xs) { perror("malloc"); return 1; }
+
+memset(xs, 0, n * sizeof *xs);
+
+xs = realloc(xs, 2*n * sizeof *xs); /* realloc may move; on failure returns NULL and old ptr survives */
+if (!xs) { /* original is leaked here unless captured */ }
+
+free(xs);
+xs = NULL;                          /* defensive: prevents double-free smuggling in */
+</code></pre>
+</div>
+
+<p>The four laws of <code>malloc</code>:</p>
+<ol>
+  <li>Every <code>malloc</code> needs exactly one <code>free</code>.</li>
+  <li>Don't <code>free</code> the same pointer twice.</li>
+  <li>Don't use after <code>free</code>.</li>
+  <li>Check for <code>NULL</code> on every allocation.</li>
+</ol>
+
+<p>You won't follow them perfectly. That's why ASan exists.</p>
+
+<h2 id="idioms">Idioms worth memorising</h2>
+
+<div class="code" data-lang="c">
+<pre><code>/* Array length, only for true arrays (not pointers) */
+#define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
+
+/* Compile-time assert */
+_Static_assert(sizeof(int) == 4, "this code assumes 32-bit int");
+
+/* Compound literal — anonymous struct */
+foo(&amp;(struct point){.x=1, .y=2});
+
+/* Designated initialiser leaves unset members zero */
+struct Config c = { .timeout_ms = 5000 };  /* every other field is 0 */
+
+/* min/max as macros (no side effects in args, please) */
+#define MIN(a,b) ((a) &lt; (b) ? (a) : (b))
+#define MAX(a,b) ((a) &gt; (b) ? (a) : (b))
+
+/* Container-of: from a pointer to a struct member, get a pointer to the struct.
+   Linux kernel idiom; C11 has __typeof__. */
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
+</code></pre>
+</div>
+
+<h2 id="hands-on">Hands-on: a tiny program with -Wall, -fsanitize</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · catch a bug at compile time, then at run time</div>
+<div class="hands-on-body">
+<div class="code" data-lang="c">
+<div class="code-hdr"><span class="lang">c</span><span class="title">buggy.c</span></div>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+int main(void) {
+    char buf[8];
+    strcpy(buf, "hello, world");   /* writes 13 bytes into 8-byte buffer */
+    printf("%s\n", buf);
+    return 0;
+}
+</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ cc -O2 -Wall buggy.c -o buggy
+buggy.c:6:5: warning: 'strcpy' writing 13 bytes into a region of size 8 [-Wstringop-overflow=]
+
+$ cc -O1 -g -fsanitize=address buggy.c -o buggy
+$ ./buggy
+=================================================================
+==12345==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x... at pc 0x...
+WRITE of size 13 at 0x... thread T0
+    #0 0x...  in main buggy.c:6
+...
+</code></pre>
+</div>
+<p>Two layers of safety net. The compiler caught the obvious one; ASan would have caught it even if the source were obscured (e.g. <code>strcpy(buf, runtime_string)</code>).</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Predict the output</span>
+</div>
+<div class="exercise-body">
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stdio.h&gt;
+int main(void) {
+    int   x = -1;
+    unsigned y = 1;
+    if (x &lt; y) puts("less");
+    else        puts("not less");
+
+    char a = 0x80;
+    int  b = a;
+    printf("%d\n", b);
+    return 0;
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><strong>"not less"</strong> — <code>x</code> is converted to <code>unsigned</code> (huge value).</p>
+<p><strong>-128 or 128</strong> — depends on whether <code>char</code> is signed by default. On most x86_64 Linuxes, <code>char</code> is signed and you get <code>-128</code>. Compile with <code>-funsigned-char</code> and you get 128. Always specify <code>signed char</code> or <code>unsigned char</code> when the bit value matters.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Read these declarations</span>
+</div>
+<div class="exercise-body">
+<p>Translate to English:</p>
+<div class="code" data-lang="c">
+<pre><code>(a) char *(*p)[10];
+(b) int (*signal(int, void (*)(int)))(int);
+(c) const char * const *argv;
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol type="a">
+<li><code>p</code> is a <em>pointer to an array of 10 pointers to char</em>.</li>
+<li>Famous one: <code>signal</code> is a <em>function taking an int and a pointer to a function (int)→void, returning a pointer to a function (int)→int</em>. That's the actual POSIX signature for <code>signal()</code>.</li>
+<li><code>argv</code> is a <em>pointer to a const pointer to a const char</em>. You can't change what the pointers point to or the strings they point at — but you can change <code>argv</code> itself.</li>
+</ol>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">strncpy without NUL</span>
+</div>
+<div class="exercise-body">
+<p>This compiles cleanly with <code>-Wall</code>. Find the bug.</p>
+<div class="code" data-lang="c">
+<pre><code>void store(const char *src, char *dst) {
+    strncpy(dst, src, 16);
+    printf("stored: %s\n", dst);
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>If <code>strlen(src) &gt;= 16</code>, <code>strncpy</code> writes 16 bytes <em>without a NUL terminator</em>. The subsequent <code>printf("%s", dst)</code> reads past the buffer until it finds one — UB and information leak. Fix:</p>
+<div class="code" data-lang="c">
+<pre><code>snprintf(dst, 16, "%s", src);    /* always NUL-terminates */
+</code></pre>
+</div>
+<p>Or use <code>strlcpy</code> if available. Or use a real string type (C++ <code>std::string</code>, or your codebase's wrapper).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Container-of in action</span>
+</div>
+<div class="exercise-body">
+<p>Given a <code>list_node</code> embedded in a struct, write a function that returns the enclosing struct from a <code>list_node *</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="c">
+<pre><code>#include &lt;stddef.h&gt;
+
+struct list_node { struct list_node *next; };
+
+struct task {
+    int priority;
+    struct list_node link;
+    char name[32];
+};
+
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
+
+struct task *task_from_node(struct list_node *n) {
+    return container_of(n, struct task, link);
+}
+</code></pre>
+</div>
+<p>This is the cornerstone of intrusive data structures (Linux kernel uses it everywhere). The cast through <code>char*</code> is what makes pointer arithmetic in bytes well-defined.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Find the leak / UB</span>
+</div>
+<div class="exercise-body">
+<div class="code" data-lang="c">
+<pre><code>char *strdup_upper(const char *s) {
+    size_t n = strlen(s);
+    char *out = malloc(n);
+    for (size_t i = 0; i &lt; n; i++)
+        out[i] = toupper((unsigned char)s[i]);
+    return out;
+}
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><strong>Buffer too small:</strong> <code>malloc(n)</code> doesn't include the NUL terminator. Need <code>n + 1</code>.</li>
+<li><strong>Not NUL-terminated:</strong> the caller can't safely use it as a C string.</li>
+<li><strong>No NULL check:</strong> <code>malloc</code> can fail.</li>
+<li><strong>Potential <code>toupper</code> UB:</strong> <code>toupper</code> takes an <code>int</code> with the value of an <code>unsigned char</code> or <code>EOF</code>. Passing a signed <code>char</code> can be UB if it's negative. The <code>(unsigned char)</code> cast is correct.</li>
+</ol>
+<div class="code" data-lang="c">
+<pre><code>char *strdup_upper(const char *s) {
+    size_t n = strlen(s);
+    char *out = malloc(n + 1);
+    if (!out) return NULL;
+    for (size_t i = 0; i &lt; n; i++)
+        out[i] = toupper((unsigned char)s[i]);
+    out[n] = '\0';
+    return out;
+}
+</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Compile with <code>-std=c17 -Wall -Wextra -Wpedantic -O2 -g</code> and run dev with <code>-fsanitize=address,undefined</code>.</li>
+  <li>Use fixed-width types from <code>&lt;stdint.h&gt;</code> when bytes matter; <code>size_t</code> for indices and sizes.</li>
+  <li>Mind the unsigned-comparison trap and integer promotion to <code>int</code>.</li>
+  <li>Arrays decay to pointers in most contexts; <code>sizeof</code>, <code>&amp;</code>, and string-literal initialisers are the exceptions.</li>
+  <li>Read declarations spirally; use <code>cdecl</code> when in doubt.</li>
+  <li>Strings are NUL-terminated byte arrays. <code>strcpy</code>/<code>strncpy</code> are footguns; prefer <code>snprintf</code> or <code>strlcpy</code>.</li>
+  <li>The four laws of malloc; the four laws are why sanitizers exist.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="../index.html"><span class="lbl">← Prev</span><span class="ttl">Introduction</span></a>
+  <a href="02-cpp-refresher.html" class="next"><span class="lbl">Next →</span><span class="ttl">C++, the modern subset</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

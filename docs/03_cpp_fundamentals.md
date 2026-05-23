@@ -779,5 +779,5 @@ constexpr int cube(int x) {
 
 ---
 
-*Good luck with your NextHop.AI interview!*
+*Good luck with your interview preparation!*
 

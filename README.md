@@ -1,12 +1,12 @@
-# NextHop.AI Interview Preparation
+# Interview Prep
 
-A comprehensive preparation kit for the NextHop.AI Software Engineer interview.
+A comprehensive preparation kit for software engineering interviews.
 
 ---
 
 ## Interview Process Overview
 
-Based on the NextHop.AI Candidate Navigator:
+Based on common software engineering interview loops:
 
 | Round | Focus | Duration |
 |-------|-------|----------|
@@ -20,7 +20,7 @@ Based on the NextHop.AI Candidate Navigator:
 ## Repository Structure
 
 ```
-NH_prep/
+interview-prep/
 ├── README.md                    # This file - study guide
 ├── docs/                        # CS Fundamentals & Language Reference
 │   ├── 01_oop_cpp.md           # OOP concepts in C++
@@ -40,6 +40,8 @@ NH_prep/
 │   ├── 08_cap_theorem.md       # Distributed systems theory
 │   ├── 09_rate_limiting.md     # Throttling algorithms
 │   └── 10_observability.md     # Logging, metrics, tracing
+├── system-engineering/          # Hands-on systems tutorials
+│   └── tutorials/               # CI/CD, Make, Python/Kubernetes, C/Linux debugging
 ├── lld/                         # Low-Level Design practice
 │   ├── 01_lru_cache_basic.cpp
 │   ├── 02_lru_cache_threadsafe.cpp
@@ -138,14 +140,14 @@ These are high-impact, frequently asked in interviews, and used daily in product
 ### Week 2: DSA Practice
 
 **Day 1-2: Linked Lists**
-- [ ] `01_split_odd_even.cpp` - NextHop sample!
+- [ ] `01_split_odd_even.cpp` - Interview practice sample
 - [ ] `02_reverse_linked_list.cpp`
 - [ ] `03_merge_sorted_lists.cpp`
 - [ ] `04_detect_cycle.cpp`
 - [ ] `05_lru_cache_dll.cpp` - Bridges to LLD
 
 **Day 3-4: Trees**
-- [ ] `01_shortest_path_nodes.cpp` - NextHop sample!
+- [ ] `01_shortest_path_nodes.cpp` - Interview practice sample
 - [ ] `02_level_order_traversal.cpp`
 - [ ] `03_lowest_common_ancestor.cpp`
 - [ ] `04_validate_bst.cpp`
@@ -336,6 +338,6 @@ dll.splice(pos, dll, it);  // Move element in O(1)
 
 ---
 
-**Good luck with your NextHop.AI interview!**
+**Good luck with your interview preparation!**
 
 *Remember: The goal is not just to solve problems, but to demonstrate your problem-solving process and communication skills.*

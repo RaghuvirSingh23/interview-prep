@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>6 · Functions — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 06</span>
+  Functions
+</h1>
+<p class="lede">
+  Make has a real function library — text manipulation, file-name
+  munging, conditionals, iteration, even user-defined functions. Under
+  the hood, Make is a text-processing language of surprising power.
+  Here's every function you'll actually use.
+</p>
+
+<h2 id="call-syntax">Calling a function</h2>
+
+<p>The syntax is <code>$(func arg1,arg2,...)</code> — note: commas separate arguments, and <strong>leading spaces in arguments are stripped</strong>, but trailing spaces are preserved. That trips everyone up at least once.</p>
+
+<div class="code" data-lang="make">
+<pre><code>$(subst foo,bar,hello foo world)          # hello bar world
+$(patsubst %.c,%.o,main.c greet.c)         # main.o greet.o
+$(filter %.c,main.c greet.h util.c)        # main.c util.c</code></pre>
+</div>
+
+<p>Functions can nest, and values can be variables, and you can line-break with backslash-continuation:</p>
+<div class="code" data-lang="make">
+<pre><code>CLEAN_SRC := $(patsubst %.c,%.o, \
+                $(filter %.c, $(wildcard src/*)))</code></pre>
+</div>
+
+<h2 id="text-fns">Text manipulation</h2>
+
+<table>
+<thead><tr><th>Function</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>$(subst FROM,TO,TEXT)</code></td><td>Literal replace every <code>FROM</code> with <code>TO</code>.</td></tr>
+<tr><td><code>$(patsubst PAT,REPL,TEXT)</code></td><td>Pattern replace each word. <code>%</code> is the wildcard.</td></tr>
+<tr><td><code>$(strip TEXT)</code></td><td>Collapse whitespace: one space between words, none at the edges.</td></tr>
+<tr><td><code>$(findstring NEEDLE,HAYSTACK)</code></td><td>Returns <code>NEEDLE</code> if found, else empty.</td></tr>
+<tr><td><code>$(filter PAT...,TEXT)</code></td><td>Keep words matching any pattern.</td></tr>
+<tr><td><code>$(filter-out PAT...,TEXT)</code></td><td>Drop words matching any pattern.</td></tr>
+<tr><td><code>$(sort TEXT)</code></td><td>Alpha-sort and deduplicate.</td></tr>
+<tr><td><code>$(word N,TEXT)</code></td><td>The Nth word (1-indexed).</td></tr>
+<tr><td><code>$(wordlist S,E,TEXT)</code></td><td>Words S..E inclusive.</td></tr>
+<tr><td><code>$(firstword TEXT)</code></td><td>= <code>$(word 1,...)</code></td></tr>
+<tr><td><code>$(lastword TEXT)</code></td><td>The last word.</td></tr>
+<tr><td><code>$(words TEXT)</code></td><td>Count of space-separated words.</td></tr>
+</tbody>
+</table>
+
+<h4>Examples</h4>
+<div class="code" data-lang="make">
+<pre><code>$(subst e,E,Hello there)                   # HEllo thErE
+$(patsubst %.c,%.o,main.c x.c y.h)         # main.o x.o y.h  — non-matching left alone
+$(patsubst src/%,build/%,src/a src/b c)    # build/a build/b c
+$(strip   hello     world  )               # hello world
+$(filter    %.c %.h, a.c b.h c.o d.txt)    # a.c b.h
+$(filter-out %.o,   a.c b.o c.c)           # a.c c.c
+$(sort banana apple cherry apple)          # apple banana cherry  — deduped!
+$(words one two three four)                # 4
+$(word 2,one two three)                    # two
+$(firstword a b c)                         # a</code></pre>
+</div>
+
+<div class="callout tip">
+<div class="callout-title">Substitution reference is <code>patsubst</code> in disguise</div>
+<p>
+  <code>$(VAR:.c=.o)</code> — the substitution reference you saw in
+  Chapter 5 — is exactly <code>$(patsubst %.c,%.o,$(VAR))</code>. The
+  colon form is terser for the common case. Use whichever reads better.
+</p>
+</div>
+
+<h2 id="file-fns">File-name munging</h2>
+
+<table>
+<thead><tr><th>Function</th><th>On <code>src/foo/bar.c</code></th></tr></thead>
+<tbody>
+<tr><td><code>$(dir NAMES)</code></td>      <td><code>src/foo/</code> (with trailing slash)</td></tr>
+<tr><td><code>$(notdir NAMES)</code></td>   <td><code>bar.c</code></td></tr>
+<tr><td><code>$(suffix NAMES)</code></td>   <td><code>.c</code></td></tr>
+<tr><td><code>$(basename NAMES)</code></td> <td><code>src/foo/bar</code> (strip extension)</td></tr>
+<tr><td><code>$(addsuffix .o,NAMES)</code></td><td>appends <code>.o</code> to each word</td></tr>
+<tr><td><code>$(addprefix build/,NAMES)</code></td><td>prepends <code>build/</code> to each word</td></tr>
+<tr><td><code>$(join A,B)</code></td>       <td>element-wise concatenation of A and B words</td></tr>
+<tr><td><code>$(wildcard PAT)</code></td>   <td>shell-glob expansion — Chapter 5</td></tr>
+<tr><td><code>$(realpath NAMES)</code></td> <td>canonical absolute paths (resolves symlinks)</td></tr>
+<tr><td><code>$(abspath NAMES)</code></td>  <td>absolute paths (without resolving symlinks)</td></tr>
+</tbody>
+</table>
+
+<h4>Examples</h4>
+<div class="code" data-lang="make">
+<pre><code>SRC    := src/a.c src/b.c
+$(dir $(SRC))              # src/ src/
+$(notdir $(SRC))           # a.c b.c
+$(basename $(SRC))         # src/a src/b
+$(suffix $(SRC))           # .c .c
+$(addsuffix .o,$(basename $(SRC)))       # src/a.o src/b.o
+$(addprefix obj/,$(notdir $(SRC)))       # obj/a.c obj/b.c</code></pre>
+</div>
+
+<p>You now have enough to express nearly any path transformation a build needs:</p>
+<div class="code" data-lang="make">
+<pre><code># Given: src/a.c src/b.c
+# Want:  build/obj/a.o build/obj/b.o
+
+SRC := $(wildcard src/*.c)
+OBJ := $(patsubst src/%.c,build/obj/%.o,$(SRC))</code></pre>
+</div>
+
+<h2 id="conditional-fns">Conditional functions</h2>
+
+<p>These are not conditional <em>directives</em> (which control which rules exist). They're functions that return different values based on predicates.</p>
+
+<table>
+<thead><tr><th>Function</th><th>Semantics</th></tr></thead>
+<tbody>
+<tr><td><code>$(if COND,THEN[,ELSE])</code></td><td>If <code>COND</code> expands to non-empty, result is <code>THEN</code>, else <code>ELSE</code>.</td></tr>
+<tr><td><code>$(or A,B,C)</code></td><td>First non-empty of <code>A</code>, <code>B</code>, <code>C</code>.</td></tr>
+<tr><td><code>$(and A,B,C)</code></td><td>If any is empty, empty; else the last.</td></tr>
+<tr><td><code>$(not X)</code></td><td>Empty if X is non-empty. (GNU Make 4.4+)</td></tr>
+</tbody>
+</table>
+
+<p>Make has no "boolean" type; truthiness is "non-empty string".</p>
+
+<div class="code" data-lang="make">
+<pre><code>VERBOSE ?=                         # empty unless user set V=1 or VERBOSE=1
+Q := $(if $(VERBOSE),,@)           # @ if not verbose, nothing if verbose
+
+hello: hello.c
+	$(Q)$(CC) $(CFLAGS) $&lt; -o $@</code></pre>
+</div>
+<p>
+  Now <code>make</code> runs quietly, but <code>make VERBOSE=1</code> shows
+  every command. This is the standard pattern for a "quiet build by
+  default, loud when asked".
+</p>
+
+<h2 id="foreach">Iteration — <code>$(foreach …)</code></h2>
+
+<p>
+  <code>$(foreach VAR,LIST,TEXT)</code> evaluates <code>TEXT</code> once
+  for each word in <code>LIST</code>, with <code>VAR</code> bound to
+  the current word. Results are space-joined.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>OBJS := $(foreach src,$(wildcard *.c),$(src:.c=.o))
+# equivalent to  $(wildcard *.c:.c=.o) ... which doesn't work, but
+# also equivalent to  $(patsubst %.c,%.o,$(wildcard *.c)) which does.</code></pre>
+</div>
+
+<p>Where <code>foreach</code> really shines is when you need more than a simple substitution:</p>
+<div class="code" data-lang="make">
+<pre><code>LANGS := en fr de es
+PAGES := index about contact
+
+# Cross product: en/index.html en/about.html ... es/contact.html
+OUTPUTS := $(foreach lang,$(LANGS), \
+               $(foreach page,$(PAGES), \
+                   $(lang)/$(page).html))</code></pre>
+</div>
+
+<h2 id="call">User-defined functions — <code>$(call …)</code></h2>
+
+<p>
+  Define a "function" as a variable whose body uses
+  <code>$(1)</code>, <code>$(2)</code>, … for positional arguments.
+  Invoke with <code>$(call name,arg1,arg2,...)</code>.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>define greeting
+Hello, $(1). It's $(2) today.
+endef
+
+all:
+	@echo '$(call greeting,reader,Thursday)'</code></pre>
+</div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make
+Hello, reader. It's Thursday today.</code></pre>
+</div>
+
+<p>A more useful example — a helper that compiles into a specific output dir:</p>
+<div class="code" data-lang="make">
+<pre><code>define compile
+	$(CC) $(CFLAGS) -c $(1) -o $(2)
+endef
+
+build/%.o: src/%.c
+	@mkdir -p $(@D)
+	$(call compile,$&lt;,$@)</code></pre>
+</div>
+
+<p>
+  In practice, you don't define many <code>call</code>-functions. For
+  one-shot reuse, variables and pattern rules cover 90% of needs.
+  Where <code>call</code> pays off is when you're generating many
+  similar rules — covered in Chapter 8.
+</p>
+
+<h2 id="eval">Metaprogramming — <code>$(eval …)</code></h2>
+
+<p>
+  <code>$(eval …)</code> evaluates its argument as Makefile syntax, at
+  expansion time. This is how you generate rules programmatically.
+</p>
+
+<div class="code" data-lang="make">
+<pre><code>define make_greeting_rule
+greet-$(1):
+	@echo Hello, $(1)!
+endef
+
+$(eval $(call make_greeting_rule,world))
+$(eval $(call make_greeting_rule,universe))
+
+.PHONY: greet-world greet-universe</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make greet-world
+Hello, world!
+$ make greet-universe
+Hello, universe!</code></pre>
+</div>
+
+<p>
+  <code>call</code> expands the template with arguments, and
+  <code>eval</code> feeds the result back into Make as if it were
+  typed into the Makefile. This is <em>staggeringly</em> powerful. It's
+  also how you dig your own grave when things go wrong, because
+  debugging "eval"'d rules requires careful use of <code>$(info …)</code>.
+</p>
+
+<h2 id="shell-fn">Running shell commands — <code>$(shell …)</code></h2>
+
+<p>Invokes a shell command, substitutes its stdout:</p>
+<div class="code" data-lang="make">
+<pre><code>GIT_SHA := $(shell git rev-parse --short HEAD 2&gt;/dev/null)
+HOSTNAME := $(shell hostname)
+KERNEL   := $(shell uname -r)</code></pre>
+</div>
+
+<p>
+  Remember: <code>$(shell …)</code> runs <em>every time the variable is
+  referenced</em> unless you store it with <code>:=</code>. In practice
+  you always want <code>:=</code> or <code>!=</code> for shell results.
+</p>
+
+<p>
+  <code>$(shell …)</code> ignores the command's exit status. If you
+  need to check it, use <code>$(.SHELLSTATUS)</code> — a special
+  variable set after each <code>$(shell …)</code> call:
+</p>
+<div class="code" data-lang="make">
+<pre><code>SHA := $(shell git rev-parse HEAD)
+ifneq ($(.SHELLSTATUS),0)
+$(error git not available or not in a repo)
+endif</code></pre>
+</div>
+
+<h2 id="diagnostic">Diagnostic functions</h2>
+
+<table>
+<thead><tr><th>Function</th><th>Behavior</th></tr></thead>
+<tbody>
+<tr><td><code>$(info MSG)</code></td>   <td>Prints <code>MSG</code> to stdout. Result: empty.</td></tr>
+<tr><td><code>$(warning MSG)</code></td><td>Prints <code>filename:line: MSG</code> to stderr. Result: empty.</td></tr>
+<tr><td><code>$(error MSG)</code></td>  <td>Prints <code>filename:line: MSG</code> and halts Make immediately.</td></tr>
+</tbody>
+</table>
+
+<p>These are your friends. They are the <code>print-f</code> debugging for Makefiles:</p>
+<div class="code" data-lang="make">
+<pre><code>$(info SRC is $(SRC))
+$(info OBJ is $(OBJ))
+$(if $(filter clean,$(MAKECMDGOALS)),, \
+    $(info Building in $(CURDIR)))</code></pre>
+</div>
+
+<p>These are evaluated <em>at parse time</em>, not when rules fire. That's usually what you want when you're debugging variable values.</p>
+
+<h2 id="flavor-origin">Metadata functions</h2>
+
+<table>
+<tr><td><code>$(origin VAR)</code></td>  <td>where VAR came from (file, command line, …) — Chapter 4</td></tr>
+<tr><td><code>$(flavor VAR)</code></td>  <td><code>undefined</code>, <code>recursive</code>, or <code>simple</code></td></tr>
+<tr><td><code>$(value VAR)</code></td>   <td>unexpanded text of VAR (useful to print the template of a recursive var)</td></tr>
+</table>
+
+<div class="code" data-lang="make">
+<pre><code>A = hello $(B)
+B = world
+
+$(info value of A is: $(value A))      # hello $(B)
+$(info expanded A is: $(A))            # hello world</code></pre>
+</div>
+
+<h2 id="file">The <code>$(file …)</code> function — read/write files</h2>
+
+<p>Make can itself read and write files. Handy for writing response files for linkers with huge argument lists:</p>
+<div class="code" data-lang="make">
+<pre><code># Write OBJ names to a response file
+$(file &gt;build/objs.rsp,$(OBJ))
+
+# Append
+$(file &gt;&gt;build/log,extra line)
+
+# Read (GNU Make 4.2+)
+CONTENT := $(file &lt;somefile.txt)</code></pre>
+</div>
+
+<p>This bypasses shell's <code>ARG_MAX</code> limit on huge projects.</p>
+
+<h2 id="hands-on">Hands-on: text munging drill</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · work the functions</div>
+<div class="hands-on-body">
+<p>Type this Makefile and predict the output before running:</p>
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">drill.mk</span></div>
+<pre><code>SRC := src/a.c src/b.c src/c.cpp README.md
+
+A := $(filter %.c,$(SRC))
+B := $(filter-out %.md,$(SRC))
+C := $(patsubst src/%,build/%,$(filter %.c,$(SRC)))
+D := $(notdir $(A))
+E := $(sort $(A) $(B))
+F := $(words $(SRC))
+G := $(word 2,$(SRC))
+H := $(basename $(notdir $(A)))
+I := $(addsuffix .o,$(H))
+
+show:
+	@echo "A: $(A)"
+	@echo "B: $(B)"
+	@echo "C: $(C)"
+	@echo "D: $(D)"
+	@echo "E: $(E)"
+	@echo "F: $(F)"
+	@echo "G: $(G)"
+	@echo "H: $(H)"
+	@echo "I: $(I)"</code></pre>
+</div>
+<p>Now run <code>make -f drill.mk show</code> and compare:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make -f drill.mk show
+A: src/a.c src/b.c
+B: src/a.c src/b.c src/c.cpp
+C: build/a.c build/b.c
+D: a.c b.c
+E: src/a.c src/b.c src/c.cpp
+F: 4
+G: src/b.c
+H: a b
+I: a.o b.o</code></pre>
+</div>
+<p>Note: <code>E</code> lost <code>README.md</code> (not in either set) and deduplicated the overlap. <code>G</code> is 1-indexed. <code>I</code> demonstrates chaining: notdir→basename→addsuffix.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">patsubst warmup</span>
+</div>
+<div class="exercise-body">
+<p>Given <code>SRC := src/a.c src/b.c tools/helper.c</code>, write an expression that produces <code>build/src/a.o build/src/b.o build/tools/helper.o</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>OBJ := $(patsubst %.c,build/%.o,$(SRC))</code></pre>
+</div>
+<p>
+  The <code>%</code> on the left side matches <code>src/a</code>,
+  <code>src/b</code>, or <code>tools/helper</code>, and the same stem
+  is inserted into <code>build/%.o</code>.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Quiet by default</span>
+</div>
+<div class="exercise-body">
+<p>Write a Makefile where commands are silent unless you run it with <code>V=1</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>Q := $(if $(V),,@)
+
+hello: hello.c
+	$(Q)$(CC) $(CFLAGS) $&lt; -o $@
+	@echo "  LINK hello"</code></pre>
+</div>
+<p>When <code>V</code> is empty, <code>Q</code> expands to <code>@</code> and the compiler line is silenced; the <code>@echo</code> is always silent. With <code>make V=1</code>, <code>Q</code> is empty and the compiler line is echoed.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Cross-product with foreach</span>
+</div>
+<div class="exercise-body">
+<p>Given <code>ARCHES := x86_64 arm64</code> and <code>CONFIGS := debug release</code>, compute a list of build directories like <code>build/x86_64-debug build/x86_64-release build/arm64-debug build/arm64-release</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>ARCHES  := x86_64 arm64
+CONFIGS := debug release
+
+BUILD_DIRS := $(foreach a,$(ARCHES), \
+                  $(foreach c,$(CONFIGS), \
+                      build/$(a)-$(c)))
+
+show: ; @echo $(BUILD_DIRS)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Mini-template engine</span>
+</div>
+<div class="exercise-body">
+<p>Write a user-defined function <code>make-test</code> that takes a source file like <code>test_foo.c</code> and emits a two-line rule: a <code>test_foo</code> executable built from that source, and adds it to a list <code>ALL_TESTS</code>. Use <code>$(eval)</code>.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>define make-test
+$(1:.c=): $(1)
+	$$(CC) $$(CFLAGS) $$&lt; -o $$@
+ALL_TESTS += $(1:.c=)
+endef
+
+TESTS := $(wildcard test_*.c)
+$(foreach t,$(TESTS),$(eval $(call make-test,$(t))))
+
+.PHONY: check
+check: $(ALL_TESTS)
+	@for t in $^; do ./$$t || exit 1; done
+	@echo "All tests passed."</code></pre>
+</div>
+<p>
+  Notice the <code>$$</code> inside the template: we want the single
+  <code>$</code> to be inserted into the generated Makefile, so the
+  <code>eval</code> sees <code>$(CC)</code>, not a
+  <code>call</code>-time expansion. Using <code>$</code> when
+  generating Makefile text is a recurring gotcha — when in doubt,
+  double it.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.5</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Shell status check</span>
+</div>
+<div class="exercise-body">
+<p>Write Make code that captures the output of <code>git describe --dirty</code>, but errors out clearly if <code>git</code> returns non-zero (e.g. not in a repo).</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>VERSION := $(shell git describe --dirty 2&gt;/dev/null)
+ifneq ($(.SHELLSTATUS),0)
+$(error Could not run 'git describe'. Are you in a git repo?)
+endif
+
+all:
+	@echo Building $(VERSION)</code></pre>
+</div>
+<p>An alternative that degrades gracefully rather than errors:</p>
+<div class="code" data-lang="make">
+<pre><code>VERSION := $(shell git describe --dirty 2&gt;/dev/null || echo unknown)</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.6</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Assert non-empty</span>
+</div>
+<div class="exercise-body">
+<p>Define a user function <code>require</code> that errors out if a given variable is empty. Example: <code>$(call require,PROD_HOST)</code> should halt Make with "PROD_HOST is not set" if it's empty.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>define require
+$(if $(strip $($(1))),,$(error $(1) is not set))
+endef
+
+deploy:
+	$(call require,PROD_HOST)
+	scp release $(PROD_HOST):/opt/</code></pre>
+</div>
+<p>
+  Note: <code>$($(1))</code> indirectly dereferences — if <code>$(1)</code>
+  is <code>PROD_HOST</code>, we look up <code>$(PROD_HOST)</code>. The
+  <code>strip</code> is important because whitespace alone is
+  "non-empty" to Make, which can mislead.
+</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ make deploy
+Makefile:10: *** PROD_HOST is not set.  Stop.
+$ make deploy PROD_HOST=mybox
+scp release mybox:/opt/</code></pre>
+</div>
+<p>
+  A caveat — the <code>$(error)</code> fires at <em>parse time</em>
+  because it's on the first line of the recipe. If you want it to fire
+  only when <code>deploy</code> is actually run, put the call in a
+  recipe line rather than at the top level. But for this exercise,
+  parse-time is fine.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.7</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">strip vs :=</span>
+</div>
+<div class="exercise-body">
+<p>Consider:</p>
+<div class="code" data-lang="make">
+<pre><code>A := $(shell echo hello)
+B := $(strip $(shell echo "  hello  "))</code></pre>
+</div>
+<p>
+  If both assignments store "hello", why do we need <code>strip</code>?
+  Think of a case where the shell output would naturally have leading
+  or trailing whitespace.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  <code>$(shell)</code> strips trailing newlines and replaces embedded
+  newlines with single spaces. It does <em>not</em> strip leading or
+  trailing spaces. If a command like <code>date</code> or a formatting
+  tool adds padding (some <code>grep -c</code>, for example, or tools
+  on BSDs), <code>$(shell)</code> preserves that padding. If you then
+  compare <code>$(A)</code> to another value, you might get surprising
+  inequality. <code>strip</code> normalises this: one space between
+  words, none at the edges.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 6.8</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Generate rules from a list</span>
+</div>
+<div class="exercise-body">
+<p>Your project has many independent tools in a <code>tools/</code> directory. Each is a single C file like <code>tools/toolname.c</code>, and each produces a binary <code>bin/toolname</code>. Write a Makefile that automatically generates one rule per tool, without listing them by hand.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="make">
+<pre><code>TOOL_SRC := $(wildcard tools/*.c)
+TOOL_BIN := $(patsubst tools/%.c,bin/%,$(TOOL_SRC))
+
+.PHONY: all clean
+all: $(TOOL_BIN)
+
+bin/%: tools/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $&lt; -o $@
+
+clean: ; rm -rf bin</code></pre>
+</div>
+<p>
+  The pattern rule handles everything. <code>eval</code> is overkill
+  here — <code>patsubst</code> plus a pattern rule is enough. Reach
+  for <code>eval</code> only when the rules truly differ per item
+  (different recipes, different flags) and can't be unified.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Functions: <code>$(func arg1,arg2,...)</code>. Commas separate, leading spaces stripped.</li>
+  <li>Text: <code>subst</code>, <code>patsubst</code>, <code>strip</code>, <code>filter</code>, <code>filter-out</code>, <code>sort</code>, <code>findstring</code>, <code>words</code>, <code>word</code>.</li>
+  <li>Files: <code>dir</code>, <code>notdir</code>, <code>suffix</code>, <code>basename</code>, <code>addprefix</code>, <code>addsuffix</code>, <code>realpath</code>, <code>abspath</code>, <code>wildcard</code>.</li>
+  <li>Control flow: <code>$(if)</code>, <code>$(or)</code>, <code>$(and)</code>, <code>$(foreach)</code>.</li>
+  <li>User functions: <code>define … endef</code> + <code>$(call)</code>.</li>
+  <li>Metaprogramming: <code>$(eval)</code> — evaluate a string as Makefile syntax.</li>
+  <li>Shell: <code>$(shell …)</code> — remember <code>$(.SHELLSTATUS)</code>.</li>
+  <li>Diagnostics: <code>$(info)</code>, <code>$(warning)</code>, <code>$(error)</code>. Fire at parse time.</li>
+  <li>Introspection: <code>$(origin)</code>, <code>$(flavor)</code>, <code>$(value)</code>.</li>
+  <li>Files I/O: <code>$(file &gt;NAME,CONTENT)</code>.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="05-automatic-vars.html"><span class="lbl">← Prev</span><span class="ttl">Automatic Vars &amp; Patterns</span></a>
+  <a href="07-phony-and-special.html" class="next"><span class="lbl">Next →</span><span class="ttl">Phony &amp; Special Targets</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

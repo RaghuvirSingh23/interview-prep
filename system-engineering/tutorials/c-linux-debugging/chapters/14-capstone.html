@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14 · Capstone — debug a broken pipeline</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 14</span>
+  Capstone — the broken pipeline
+</h1>
+<p class="lede">
+  You've inherited a small C++ program. It is supposed to read
+  records from a Unix socket, count them by type in a worker pool,
+  and write a summary to a file every second. It does
+  &mdash; sometimes. Other times it crashes, hangs, leaks, or
+  prints garbage. Your job: find every bug. Use everything from
+  the previous thirteen chapters.
+</p>
+
+<div class="callout">
+  <strong>How to work this capstone.</strong> Read the source
+  once. Build it. Run it. Watch it misbehave. Form a hypothesis.
+  Pick the right tool from your toolbox. Verify. Fix. Repeat.
+  Don't read the &ldquo;debrief&rdquo; section until you've
+  found at least four of the bugs yourself.
+</div>
+
+<h2 id="the-program">The program</h2>
+
+<p>Save the following as <code>aggregator.cpp</code>. It compiles
+with C++20. The bugs are intentional; do not &ldquo;clean it
+up&rdquo; before debugging &mdash; that defeats the exercise.</p>
+
+<div class="code" data-lang="cpp">
+<div class="code-hdr"><span class="lang">cpp</span><span class="title">aggregator.cpp</span></div>
+<pre><code>// Capstone: deliberately broken. Find the bugs.
+// Build:  c++ -std=c++20 -O2 -g -pthread aggregator.cpp -o aggregator
+// Run:    ./aggregator /tmp/agg.sock /tmp/summary.txt
+
+#include &lt;atomic&gt;
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;cstring&gt;
+#include &lt;condition_variable&gt;
+#include &lt;mutex&gt;
+#include &lt;queue&gt;
+#include &lt;string&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+#include &lt;unistd.h&gt;
+#include &lt;signal.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;sys/un.h&gt;
+#include &lt;fcntl.h&gt;
+
+struct Record {
+    char type;     // 'A'..'Z'
+    int  payload;
+};
+
+static std::queue&lt;Record*&gt; q;
+static std::mutex          q_mu;
+static std::condition_variable q_cv;
+static std::atomic&lt;bool&gt;   stopping{false};
+
+static int counts[26];   // shared, no lock
+
+static volatile sig_atomic_t got_sigint = 0;
+
+static void on_sigint(int) {
+    got_sigint = 1;
+    fprintf(stderr, "\ncaught SIGINT, shutting down...\n");
+    stopping = true;
+    q_cv.notify_all();
+}
+
+static void worker() {
+    while (!stopping) {
+        std::unique_lock lk(q_mu);
+        if (q.empty()) q_cv.wait(lk);
+        Record* r = q.front();
+        q.pop();
+        lk.unlock();
+
+        if (r-&gt;type &gt;= 'A' &amp;&amp; r-&gt;type &lt;= 'Z')
+            counts[r-&gt;type - 'A']++;
+        // forgot to free r
+    }
+}
+
+static void writer(const char* path) {
+    while (!stopping) {
+        sleep(1);
+        FILE* f = fopen(path, "w");
+        if (!f) continue;
+        for (int i = 0; i &lt; 26; i++)
+            fprintf(f, "%c=%d\n", 'A'+i, counts[i]);
+        fclose(f);
+    }
+}
+
+static int make_listener(const char* path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    sockaddr_un a{};
+    a.sun_family = AF_UNIX;
+    strcpy(a.sun_path, path);
+    unlink(path);
+    bind(fd, (sockaddr*)&amp;a, sizeof a);
+    listen(fd, 8);
+    return fd;
+}
+
+int main(int argc, char** argv) {
+    if (argc &lt; 3) { fprintf(stderr, "usage: %s SOCK OUT\n", argv[0]); return 2; }
+    signal(SIGINT, on_sigint);
+
+    int lfd = make_listener(argv[1]);
+
+    std::vector&lt;std::thread&gt; pool;
+    for (int i = 0; i &lt; 4; i++) pool.emplace_back(worker);
+    std::thread w(writer, argv[2]);
+
+    char buf[64];
+    while (!stopping) {
+        int cfd = accept(lfd, nullptr, nullptr);
+        if (cfd &lt; 0) continue;
+        ssize_t n = read(cfd, buf, sizeof buf);
+        if (n &gt; 0) {
+            Record* r = new Record;
+            r-&gt;type    = buf[0];
+            r-&gt;payload = atoi(buf + 1);
+            {
+                std::lock_guard lk(q_mu);
+                q.push(r);
+            }
+            q_cv.notify_one();
+        }
+        close(cfd);
+    }
+
+    for (auto&amp; t : pool) t.join();
+    w.join();
+    close(lfd);
+    return 0;
+}
+</code></pre>
+</div>
+
+<div class="code terminal" data-lang="sh">
+<div class="code-hdr"><span class="lang">sh</span><span class="title">build &amp; smoke test</span></div>
+<pre><code>$ c++ -std=c++20 -O2 -g -pthread aggregator.cpp -o aggregator
+$ ./aggregator /tmp/agg.sock /tmp/summary.txt &amp;
+
+# In another terminal:
+$ for i in $(seq 1 10000); do
+    printf 'A%d' $((RANDOM % 100)) | nc -U /tmp/agg.sock -q0
+  done
+
+$ cat /tmp/summary.txt   # numbers should add up to 10000
+</code></pre>
+</div>
+
+<h2 id="symptoms">What you'll see</h2>
+
+<ul>
+  <li>Counts in <code>summary.txt</code> sometimes add up to less than the number of records sent.</li>
+  <li>RSS in <code>top</code> climbs steadily and never comes down.</li>
+  <li>Hitting <kbd>Ctrl-C</kbd> sometimes hangs the process for several seconds, sometimes crashes it.</li>
+  <li>Under TSan: data race reports on <code>counts[]</code> and on <code>q</code>.</li>
+  <li>Under ASan: <em>direct leaks</em> from the <code>new Record</code> path.</li>
+  <li>Occasional segfault inside the worker on shutdown.</li>
+  <li>If the same socket path already exists with the wrong permissions, the program silently ignores the bind error.</li>
+</ul>
+
+<h2 id="walk">A guided debugging walk</h2>
+
+<p>This is one route to the bugs. Yours might differ; that's fine
+&mdash; the point is to develop reflexes.</p>
+
+<h3>Step 1 &mdash; first read</h3>
+
+<p>Before touching anything, read once with intent. Note things
+that look suspicious. From the source above:</p>
+
+<ul>
+  <li><code>counts[26]</code> is plain <code>int</code> shared across threads. <em>Race candidate.</em></li>
+  <li><code>q_cv.wait(lk)</code> with no predicate. <em>Spurious wakeup, missed signal.</em></li>
+  <li><code>worker()</code> calls <code>q.front()</code> after a wakeup with no check that the queue is non-empty. <em>UB on shutdown.</em></li>
+  <li><code>r</code> is allocated with <code>new</code> and never freed. <em>Leak.</em></li>
+  <li><code>strcpy</code> into <code>a.sun_path</code> with no length check. <em>Overflow if path &gt; 108 bytes.</em></li>
+  <li><code>bind</code>/<code>listen</code> return values not checked. <em>Silent failure.</em></li>
+  <li><code>fprintf</code> + <code>q_cv.notify_all</code> from a signal handler. <em>Async-signal-unsafe.</em></li>
+  <li>The <code>writer</code> reads <code>counts[]</code> while workers write &mdash; <em>another race.</em></li>
+  <li>The <code>writer</code> rewrites <code>summary.txt</code> with <code>fopen("w")</code> &mdash; <em>not atomic, partial files visible.</em></li>
+  <li><code>accept</code> blocks indefinitely; <kbd>Ctrl-C</kbd> can't unstick it &mdash; <em>shutdown hang.</em></li>
+</ul>
+
+<h3>Step 2 &mdash; sanitizers do half the work</h3>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ c++ -std=c++20 -O1 -g -pthread \
+    -fsanitize=address,undefined \
+    -fno-omit-frame-pointer \
+    aggregator.cpp -o aggregator-asan
+
+$ c++ -std=c++20 -O1 -g -pthread \
+    -fsanitize=thread \
+    -fno-omit-frame-pointer \
+    aggregator.cpp -o aggregator-tsan
+</code></pre>
+</div>
+
+<p>Run each variant against the load generator. ASan will print
+<em>direct leak</em> stacks pointing at <code>new Record</code>.
+TSan will report races on <code>counts[i]</code> and on the queue's
+internal state if you ever managed to bypass the mutex. The first
+fix is mechanical:</p>
+
+<ul>
+  <li>Wrap each <code>counts[]</code> entry in <code>std::atomic&lt;int&gt;</code>, or hold a separate mutex when reading/writing it. Atomics are simpler.</li>
+  <li>Use <code>std::unique_ptr&lt;Record&gt;</code> in the queue; the worker drops the unique_ptr at scope end and the leak is gone.</li>
+</ul>
+
+<h3>Step 3 &mdash; fix the condition variable</h3>
+
+<p>The current pattern is the textbook bug:</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>// BAD
+if (q.empty()) q_cv.wait(lk);
+Record* r = q.front();
+q.pop();
+</code></pre>
+</div>
+
+<p>If the wakeup is spurious, or if it came from the shutdown
+path with an empty queue, <code>q.front()</code> is UB. Replace
+with the predicate loop:</p>
+
+<div class="code" data-lang="cpp">
+<pre><code>// GOOD
+q_cv.wait(lk, []{ return !q.empty() || stopping; });
+if (q.empty()) return;          // shutdown
+auto r = std::move(q.front());
+q.pop();
+</code></pre>
+</div>
+
+<h3>Step 4 &mdash; signal handler hygiene</h3>
+
+<p>The handler calls <code>fprintf</code> and
+<code>q_cv.notify_all</code>. Both can deadlock or corrupt state
+if the signal lands while another thread holds the relevant lock.
+Two fixes, pick one:</p>
+
+<ol>
+  <li><strong>Bare-minimum handler.</strong> Only set <code>got_sigint = 1</code> and a self-pipe / eventfd. Have main call <code>write(self_pipe[1], "x", 1)</code> in the handler (write is async-signal-safe). The accept loop selects on listener + self-pipe and exits cleanly.</li>
+  <li><strong>signalfd.</strong> Block SIGINT in all threads with <code>pthread_sigmask</code>, register a <code>signalfd</code> in main, treat the signal as an ordinary readable event in the same poll loop as <code>accept</code>.</li>
+</ol>
+
+<p>Either way, the signal handler stops being a correctness hazard
+<em>and</em> shutdown stops hanging on a blocked <code>accept</code>.</p>
+
+<h3>Step 5 &mdash; safe socket setup</h3>
+
+<div class="code" data-lang="cpp">
+<pre><code>// BAD
+strcpy(a.sun_path, path);
+bind(fd, (sockaddr*)&amp;a, sizeof a);
+listen(fd, 8);
+
+// GOOD
+if (strlen(path) &gt;= sizeof a.sun_path) {
+    fprintf(stderr, "socket path too long\n");
+    return -1;
+}
+strncpy(a.sun_path, path, sizeof a.sun_path - 1);
+unlink(path);
+if (bind(fd, (sockaddr*)&amp;a, sizeof a) &lt; 0) { perror("bind"); return -1; }
+if (listen(fd, 8) &lt; 0)                      { perror("listen"); return -1; }
+</code></pre>
+</div>
+
+<h3>Step 6 &mdash; atomic file replacement</h3>
+
+<div class="code" data-lang="cpp">
+<pre><code>// In writer():
+char tmp[256];
+snprintf(tmp, sizeof tmp, "%s.tmp.%d", path, getpid());
+int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+// ... write counts to fd ...
+fsync(fd);
+close(fd);
+rename(tmp, path);
+// fsync the directory too if you care about crash safety
+</code></pre>
+</div>
+
+<h3>Step 7 &mdash; frame-by-frame in GDB</h3>
+
+<p>If after all that you still get an occasional segfault, run
+under GDB and let it catch the SIGSEGV:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ gdb --args ./aggregator /tmp/agg.sock /tmp/summary.txt
+(gdb) handle SIGINT pass nostop noprint
+(gdb) catch syscall
+(gdb) run
+# reproduce, then on crash:
+(gdb) thread apply all bt
+(gdb) frame 2
+(gdb) info args
+(gdb) info locals
+</code></pre>
+</div>
+
+<p>The most useful single trick: once you suspect a particular
+address is being smashed, set a hardware watchpoint on it and
+restart. The writer becomes obvious.</p>
+
+<h2 id="reference-fix">A reference fixed version</h2>
+
+<p>Don't read this until you've debugged on your own. The fix is
+not unique &mdash; this is one acceptable shape.</p>
+
+<div class="code" data-lang="cpp">
+<div class="code-hdr"><span class="lang">cpp</span><span class="title">aggregator-fixed.cpp (excerpt)</span></div>
+<pre><code>#include &lt;array&gt;
+#include &lt;atomic&gt;
+#include &lt;memory&gt;
+#include &lt;sys/eventfd.h&gt;
+#include &lt;sys/epoll.h&gt;
+#include &lt;sys/signalfd.h&gt;
+
+static std::queue&lt;std::unique_ptr&lt;Record&gt;&gt; q;
+static std::mutex          q_mu;
+static std::condition_variable q_cv;
+static std::atomic&lt;bool&gt;   stopping{false};
+static std::array&lt;std::atomic&lt;int&gt;, 26&gt; counts{};
+
+static void worker() {
+    for (;;) {
+        std::unique_lock lk(q_mu);
+        q_cv.wait(lk, []{ return !q.empty() || stopping; });
+        if (q.empty()) return;
+        auto r = std::move(q.front());
+        q.pop();
+        lk.unlock();
+
+        if (r-&gt;type &gt;= 'A' &amp;&amp; r-&gt;type &lt;= 'Z')
+            counts[r-&gt;type - 'A'].fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+static void writer_atomic(const char* path) {
+    while (!stopping) {
+        sleep(1);
+        char tmp[256];
+        snprintf(tmp, sizeof tmp, "%s.tmp.%d", path, getpid());
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd &lt; 0) continue;
+        for (int i = 0; i &lt; 26; i++) {
+            char line[32];
+            int n = snprintf(line, sizeof line, "%c=%d\n",
+                             'A'+i,
+                             counts[i].load(std::memory_order_relaxed));
+            write(fd, line, n);
+        }
+        fsync(fd);
+        close(fd);
+        rename(tmp, path);
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc &lt; 3) { fprintf(stderr, "usage: %s SOCK OUT\n", argv[0]); return 2; }
+
+    sigset_t mask;
+    sigemptyset(&amp;mask);
+    sigaddset(&amp;mask, SIGINT);
+    sigaddset(&amp;mask, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &amp;mask, nullptr);
+
+    int sfd = signalfd(-1, &amp;mask, SFD_CLOEXEC);
+    int lfd = make_listener(argv[1]);
+    if (lfd &lt; 0) return 1;
+
+    std::vector&lt;std::thread&gt; pool;
+    for (int i = 0; i &lt; 4; i++) pool.emplace_back(worker);
+    std::thread w(writer_atomic, argv[2]);
+
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    epoll_event ev{};
+    ev.events = EPOLLIN; ev.data.fd = lfd; epoll_ctl(ep, EPOLL_CTL_ADD, lfd, &amp;ev);
+    ev.data.fd = sfd;                       epoll_ctl(ep, EPOLL_CTL_ADD, sfd, &amp;ev);
+
+    while (!stopping) {
+        epoll_event out;
+        if (epoll_wait(ep, &amp;out, 1, -1) &lt; 1) continue;
+        if (out.data.fd == sfd) { stopping = true; q_cv.notify_all(); break; }
+        int cfd = accept4(lfd, nullptr, nullptr, SOCK_CLOEXEC);
+        if (cfd &lt; 0) continue;
+        char buf[64];
+        ssize_t n = read(cfd, buf, sizeof buf);
+        if (n &gt; 0) {
+            auto r = std::make_unique&lt;Record&gt;();
+            r-&gt;type    = buf[0];
+            r-&gt;payload = atoi(buf + 1);
+            { std::lock_guard lk(q_mu); q.push(std::move(r)); }
+            q_cv.notify_one();
+        }
+        close(cfd);
+    }
+
+    for (auto&amp; t : pool) t.join();
+    w.join();
+    close(lfd); close(sfd); close(ep);
+    return 0;
+}
+</code></pre>
+</div>
+
+<h2 id="debrief">Debrief — the bug list</h2>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>Bug</th><th>Found by</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1</td><td>Race on <code>counts[]</code></td><td>TSan</td></tr>
+    <tr><td>2</td><td>Leak: <code>new Record</code> never freed</td><td>ASan (direct leak)</td></tr>
+    <tr><td>3</td><td><code>q_cv.wait</code> with no predicate</td><td>Code review; manifests as crash on shutdown</td></tr>
+    <tr><td>4</td><td><code>q.front()</code> on possibly-empty queue</td><td>GDB SIGSEGV on shutdown</td></tr>
+    <tr><td>5</td><td>Async-signal-unsafe handler (<code>fprintf</code>, <code>notify_all</code>)</td><td>Hang / occasional deadlock; rule reading</td></tr>
+    <tr><td>6</td><td><code>strcpy</code> into <code>sun_path</code></td><td>cppcheck / clang-tidy <code>cppcoreguidelines-no-malloc</code> &amp; bounds analysis</td></tr>
+    <tr><td>7</td><td>Unchecked <code>bind</code>/<code>listen</code> return values</td><td>scan-build / strace</td></tr>
+    <tr><td>8</td><td>Non-atomic <code>fopen</code>(&ldquo;w&rdquo;) for summary</td><td>Reader sees partial files; fix with rename(2)</td></tr>
+    <tr><td>9</td><td>Shutdown hang: <code>accept</code> blocks past Ctrl-C</td><td>strace -p shows blocked accept; fix with signalfd + epoll</td></tr>
+    <tr><td>10</td><td><code>read</code> returns up to 64 bytes &mdash; framing bug if records concat</td><td>Spec ambiguity; design review</td></tr>
+    <tr><td>11</td><td>No <code>SO_CLOEXEC</code> &mdash; fds leak across exec</td><td>strace; <code>ls /proc/$$/fd</code></td></tr>
+    <tr><td>12</td><td>Worker iterates while <code>stopping</code> reads with default seq_cst &mdash; correct but expensive</td><td>perf profile; consider relaxed</td></tr>
+  </tbody>
+</table>
+
+<div class="callout pitfall">
+  <strong>Bugs you might find but aren't really bugs.</strong>
+  <code>std::queue</code>'s default deque-based storage is fine here.
+  <code>signal</code> vs <code>sigaction</code> &mdash;
+  <code>signal</code> is portable enough for SIGINT; the upgrade is
+  <code>sigaction</code> with <code>SA_RESTART</code> off. Don't
+  invent bugs that aren't there.
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+  <div class="exercise-hdr">
+    <span class="exercise-num">14.1</span>
+    <span class="exercise-diff medium">medium</span>
+    <span class="exercise-title">Add a regression test</span>
+  </div>
+  <div class="exercise-body">
+    <p>Write a shell script that drives the aggregator with a
+    known input distribution (say, 100 records each of 'A'..'Z'),
+    waits for the writer cycle, and asserts that
+    <code>summary.txt</code> shows exactly 100 of each. Run it
+    a thousand times in a loop. The flakiness rate before and
+    after your fixes is your scoreboard.</p>
+    <details class="solution"><summary>Hint</summary>
+    <p>Use <code>nc -U -q0</code> to send and a <code>sleep 2</code>
+    plus a <code>while ! diff &lt;(expected) summary.txt; do
+    sleep 0.1; done</code> with a timeout. Wrap in
+    <code>for i in $(seq 1 1000); do ...; done</code> and count
+    failures. The atomic rename + atomic counters fix should
+    bring failures to zero.</p></details>
+  </div>
+</div>
+
+<div class="exercise">
+  <div class="exercise-hdr">
+    <span class="exercise-num">14.2</span>
+    <span class="exercise-diff hard">hard</span>
+    <span class="exercise-title">Convert to a single-thread epoll design</span>
+  </div>
+  <div class="exercise-body">
+    <p>Replace the worker pool with a single thread that drives
+    everything off epoll: the listener, accepted connections, a
+    timerfd for the writer, and the signalfd for shutdown. No
+    locks, no condvars, no atomics needed. Compare throughput
+    via a load generator.</p>
+    <details class="solution"><summary>Hint</summary>
+    <p>Each accepted connection becomes non-blocking and joins
+    epoll edge-triggered. <code>timerfd_create</code> + 1-second
+    interval drives the summary write. Counters are now plain
+    <code>int</code>s in a struct because there's exactly one
+    accessor. This design is what production servers like nginx
+    use; it's typically faster than a small thread pool because
+    there's no contention to begin with.</p></details>
+  </div>
+</div>
+
+<div class="exercise">
+  <div class="exercise-hdr">
+    <span class="exercise-num">14.3</span>
+    <span class="exercise-diff hard">hard</span>
+    <span class="exercise-title">Make it survive a kill -9 mid-write</span>
+  </div>
+  <div class="exercise-body">
+    <p>Kill the process with <code>kill -9</code> at random
+    times during the writer loop. Verify <code>summary.txt</code>
+    is always either the previous fully-written summary or the
+    latest one &mdash; never a half-written or missing file.
+    Then power-cut the VM (or use <code>echo b &gt; /proc/sysrq-trigger</code>)
+    and verify durability.</p>
+    <details class="solution"><summary>Hint</summary>
+    <p>The atomic-replace pattern: write to
+    <code>summary.txt.tmp</code>, <code>fsync</code> the tmp,
+    <code>rename(tmp, summary.txt)</code>, then
+    <code>fsync</code> the parent directory. The
+    <em>directory</em> fsync is what most engineers forget; without
+    it, the rename can be lost across a power cut even though the
+    data file is on disk.</p></details>
+  </div>
+</div>
+
+<div class="exercise">
+  <div class="exercise-hdr">
+    <span class="exercise-num">14.4</span>
+    <span class="exercise-diff medium">medium</span>
+    <span class="exercise-title">Wire it into CI under three sanitizer matrices</span>
+  </div>
+  <div class="exercise-body">
+    <p>Build the program three ways: release
+    (<code>-O2</code>), ASan+UBSan (<code>-O1 -fsanitize=address,undefined</code>),
+    TSan+UBSan (<code>-O1 -fsanitize=thread,undefined</code>).
+    Run the regression test from 14.1 against each. Assert
+    sanitizer error count is zero.</p>
+    <details class="solution"><summary>Hint</summary>
+    <p>ASan and TSan can't be combined &mdash; they instrument the
+    allocator differently. Three jobs in CI is the standard.
+    Set <code>ASAN_OPTIONS=halt_on_error=1
+    detect_leaks=1</code> and
+    <code>TSAN_OPTIONS=halt_on_error=1
+    second_deadlock_stack=1</code>. A single sanitizer report
+    should fail the build.</p></details>
+  </div>
+</div>
+
+<h2 id="recap">Recap — what you should leave with</h2>
+
+<ul>
+  <li>You can take a multi-threaded C++ program with race + UB + leak + signal-handler bug + I/O-durability bug and find every class of bug with the right tool.</li>
+  <li>You know which tool fits each bug class: TSan for races, ASan for memory errors, GDB watchpoints for &ldquo;who corrupted this&rdquo;, strace for hangs, code review for signal-handler hygiene and durability.</li>
+  <li>You have an idiom for shutdown that doesn't use signal-from-a-handler tricks: <code>signalfd</code> + <code>epoll</code> + a <code>stopping</code> atomic.</li>
+  <li>You have an idiom for atomic file updates: write tmp + fsync + rename + fsync dir.</li>
+  <li>You can articulate <em>why</em> the bugs are bugs, in the language of the C/C++ memory model and the Linux kernel.</li>
+</ul>
+
+<p>That's the whole tutorial. Build something with this. Break
+it on purpose. Then break it by accident, and watch how much
+faster you find the cause now than before.</p>
+
+<div class="page-nav">
+  <a href="13-50-questions.html"><span class="lbl">← Prev</span><span class="ttl">The 50 Questions</span></a>
+  <a href="../index.html" class="next"><span class="lbl">Next →</span><span class="ttl">Home</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

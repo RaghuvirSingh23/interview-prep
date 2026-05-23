@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1 · Why Make Exists — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 01</span>
+  Why Make Exists
+</h1>
+<p class="lede">
+  Before we write a single <code>Makefile</code>, it's worth understanding
+  <em>what problem Make solves</em> and <em>what makes it different from a
+  shell script</em>. If you skip this chapter you will keep writing
+  Makefiles that are just shell scripts in a trench coat — and you'll
+  never feel the power of the tool.
+</p>
+
+<h2 id="the-problem">The problem: builds are graphs, not lists</h2>
+
+<p>
+  Imagine you're writing a C program in 1976. You have three source files:
+  <code>main.c</code>, <code>parse.c</code>, and <code>util.c</code>. Each
+  compiles to a <code>.o</code> file, and those link into an executable
+  called <code>program</code>.
+</p>
+
+<p>Here is that build as a shell script:</p>
+
+<div class="code" data-lang="sh">
+<div class="code-hdr"><span class="lang">sh</span><span class="title">build.sh</span></div>
+<pre><code>cc -c main.c  -o main.o
+cc -c parse.c -o parse.o
+cc -c util.c  -o util.o
+cc main.o parse.o util.o -o program</code></pre>
+</div>
+
+<p>
+  This works. It also takes 4 compile steps every time you run it, even
+  if you only changed one file. In 1976 on a PDP-11 that could be
+  <em>minutes</em> of recompilation. Today, on a project with 10,000
+  files, it's still minutes — you've just bumped the scale.
+</p>
+
+<p>The real build is not a list of commands. It's a graph:</p>
+
+<div class="code" data-lang="text">
+<div class="code-hdr"><span class="lang">graph</span><span class="title">dependency graph</span></div>
+<pre><code>    program
+   /   |    \
+  /    |     \
+main.o parse.o util.o
+  |      |     |
+main.c parse.c util.c</code></pre>
+</div>
+
+<p>
+  Each node is a file. Each edge says <em>this file depends on this
+  other file</em>. <code>main.o</code> depends on <code>main.c</code>;
+  <code>program</code> depends on all three <code>.o</code> files.
+</p>
+
+<p>
+  The insight that makes Make special: <strong>a file does not need to be
+  rebuilt if it is newer than all the files it depends on</strong>.
+  Make reads this graph, compares filesystem timestamps, and rebuilds
+  <em>only the parts that are out of date</em>. That is the whole idea.
+</p>
+
+<div class="callout history">
+<div class="callout-title">How Make was born</div>
+<p>
+  Stuart Feldman wrote the first version of Make at Bell Labs in April
+  1976. The story he tells: a colleague had wasted a whole afternoon
+  debugging an executable that seemed broken, only to realise he'd
+  forgotten to recompile one of its source files. Feldman went home
+  that weekend, came back Monday, and within a few days had a tool that
+  looked at file timestamps and figured out for you what needed to be
+  rebuilt.
+</p>
+<p>
+  The tool stuck. Variants exist — BSD Make, nmake, ninja, bazel — but
+  50 years later, GNU Make is still the most common build tool on Unix
+  systems. Every Linux kernel, every C project on GitHub, every
+  moderately serious research codebase: all Make.
+</p>
+</div>
+
+<h2 id="why-not-a-script">Why not just a script?</h2>
+
+<p>
+  This is the most common question from newcomers: "Why do I need Make?
+  Can't I just write a bash script?" You can. Here's what you lose.
+</p>
+
+<table>
+<thead><tr><th>Feature</th><th>Shell script</th><th>Make</th></tr></thead>
+<tbody>
+<tr><td>Rebuilds only what's stale</td><td>No — runs everything</td><td>Yes — timestamp-based</td></tr>
+<tr><td>Parallel execution of independent steps</td><td>Manual (<code>&amp;</code>, <code>wait</code>)</td><td>Built-in with <code>-j</code></td></tr>
+<tr><td>Declarative: describes the graph, not the order</td><td>No — imperative</td><td>Yes</td></tr>
+<tr><td>Stops at first error with full diagnostics</td><td><code>set -e</code> if you remember</td><td>Yes, by default</td></tr>
+<tr><td>Works across machines without tool sprawl</td><td>Mostly</td><td>Yes — ubiquitous</td></tr>
+<tr><td>Scales to 1000+ steps</td><td>Slow, error-prone</td><td>Fine</td></tr>
+</tbody>
+</table>
+
+<p>
+  The one Make gets most wrong: "rebuilds only what's stale". Timestamps
+  are a coarse proxy for "did the content change". Modern build systems
+  (bazel, nix) use content hashes instead. But for 99% of projects,
+  timestamps are good enough — and they are <em>fast</em>, because a
+  filesystem <code>stat()</code> is essentially free.
+</p>
+
+<h2 id="the-big-idea">The big idea, stated once</h2>
+
+<div class="callout tip">
+<div class="callout-title">The Make model</div>
+<p>
+  A <strong>Makefile</strong> is a list of <strong>rules</strong>.
+  Each rule says:
+</p>
+<ul>
+  <li>This <strong>target</strong> file</li>
+  <li>depends on these <strong>prerequisite</strong> files</li>
+  <li>and is built by running this <strong>recipe</strong>.</li>
+</ul>
+<p>
+  When you type <code>make foo</code>, Make looks at <code>foo</code>'s
+  prerequisites, checks if any are newer than <code>foo</code> (or if
+  <code>foo</code> doesn't exist), and if so, runs the recipe to
+  (re)build it. It does this recursively: before running <code>foo</code>'s
+  recipe, it makes sure all of <code>foo</code>'s prerequisites are
+  themselves up to date.
+</p>
+</div>
+
+<p>That's it. Everything else in this tutorial is elaboration.</p>
+
+<h2 id="preview">A first Makefile, as a preview</h2>
+
+<p>Here is the shell script from above, rewritten as a Makefile:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile</span></div>
+<pre><code>program: main.o parse.o util.o
+	cc main.o parse.o util.o -o program
+
+main.o: main.c
+	cc -c main.c -o main.o
+
+parse.o: parse.c
+	cc -c parse.c -o parse.o
+
+util.o: util.c
+	cc -c util.c -o util.o</code></pre>
+</div>
+
+<p>
+  Four rules. Each says "this file depends on these other files and
+  is built this way". If you change only <code>parse.c</code>, running
+  <code>make</code> will:
+</p>
+<ol>
+  <li>Notice <code>parse.o</code> is older than <code>parse.c</code> — rebuild it.</li>
+  <li>Notice <code>program</code>'s prerequisites have changed — relink.</li>
+  <li>Leave <code>main.o</code> and <code>util.o</code> alone.</li>
+</ol>
+
+<p>
+  You've just saved two compile steps. On a large project, this matters
+  enormously.
+</p>
+
+<div class="callout hood">
+<div class="callout-title">Under the hood</div>
+<p>
+  When Make runs, it:
+</p>
+<ol>
+  <li>Parses the Makefile into an in-memory graph.</li>
+  <li>Determines the goal target (the one you asked for, or the first target in the file).</li>
+  <li>Walks the graph depth-first, checking <code>stat()</code> timestamps.</li>
+  <li>For each target whose mtime is older than any prerequisite's mtime (or which doesn't exist), schedules its recipe.</li>
+  <li>Executes recipes in topological order — or in parallel if you passed <code>-j</code>.</li>
+</ol>
+<p>
+  That's the entire algorithm. You can read an early version of Make's
+  source in about an evening.
+</p>
+</div>
+
+<h2 id="common-mistake">The most common mistake beginners make</h2>
+
+<p>
+  Beginners look at a Makefile and think it's a script. They read the
+  rules top-to-bottom and assume they run in that order. <strong>They
+  don't.</strong> The order of rules in the file is irrelevant. What
+  matters is the <em>graph</em> they define.
+</p>
+
+<p>You could write our Makefile in any order:</p>
+
+<div class="code" data-lang="make">
+<div class="code-hdr"><span class="lang">make</span><span class="title">Makefile — same graph, different order</span></div>
+<pre><code>util.o: util.c
+	cc -c util.c -o util.o
+
+program: main.o parse.o util.o
+	cc main.o parse.o util.o -o program
+
+main.o: main.c
+	cc -c main.c -o main.o
+
+parse.o: parse.c
+	cc -c parse.c -o parse.o</code></pre>
+</div>
+
+<p>
+  Same graph, same behaviour. The only thing order affects is which
+  target is the <strong>default goal</strong> — if you run <code>make</code>
+  with no arguments, it builds the first target in the file. By convention
+  the first target is the "main" one (here, <code>program</code>).
+</p>
+
+<h2 id="vs-modern">Make vs. modern build tools</h2>
+
+<p>
+  Today there are shinier options: <code>ninja</code>, <code>bazel</code>,
+  <code>cmake</code>, <code>meson</code>, <code>buck</code>, <code>nix</code>.
+  Should you learn Make anyway? Yes, and here's why.
+</p>
+
+<ul>
+  <li><strong>CMake generates Makefiles.</strong> When CMake breaks, you debug a Makefile.</li>
+  <li><strong>Ninja is a faster Make.</strong> It uses the same mental model; learning Make teaches you Ninja for free.</li>
+  <li><strong>Bazel is a different beast</strong> (content-addressable, hermetic, huge) but it's overkill for most projects. Make is still the right tool for a 20-file C library or a data pipeline.</li>
+  <li><strong>Make is everywhere.</strong> Your Linux kernel, your Raspberry Pi cross-compile, your embedded firmware, your Emacs config, your LaTeX thesis — Make is already installed.</li>
+  <li><strong>Make has no dependencies.</strong> A Makefile is 15 lines of text. A <code>CMakeLists.txt</code> can evaluate to a 10,000-line generated Makefile. Sometimes you want the small thing.</li>
+</ul>
+
+<p>
+  That said: if you're starting a new C++ project with 500 files and
+  cross-platform needs, use CMake or Meson. Make's weakness is that it
+  has no built-in notion of "find me a compiler" or "is this library
+  installed" — it just runs commands. For large systems that's not
+  enough.
+</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Draw the graph</span>
+</div>
+<div class="exercise-body">
+<p>
+  You have a LaTeX document with the following structure:
+</p>
+<ul>
+  <li><code>thesis.tex</code> includes <code>intro.tex</code> and <code>results.tex</code>.</li>
+  <li>Running <code>pdflatex thesis.tex</code> produces <code>thesis.pdf</code>.</li>
+  <li>One of the figures, <code>fig1.pdf</code>, is produced by <code>gnuplot fig1.plt</code> reading <code>data.csv</code>.</li>
+</ul>
+<p>
+  Draw the dependency graph. Which files are leaves (no prerequisites)?
+  Which are internal nodes? What is the root?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="text">
+<pre><code>         thesis.pdf  ← root (goal)
+              |
+    ┌─────────┼──────────┬──────────────┐
+    |         |          |              |
+thesis.tex intro.tex results.tex    fig1.pdf
+                                        |
+                                     fig1.plt, data.csv  ← leaves</code></pre>
+</div>
+<p>
+  Leaves: <code>thesis.tex</code>, <code>intro.tex</code>,
+  <code>results.tex</code>, <code>fig1.plt</code>, <code>data.csv</code>
+  (things you edit by hand). Internal nodes: <code>fig1.pdf</code>.
+  Root: <code>thesis.pdf</code>.
+</p>
+<p>
+  Notice: touching <code>data.csv</code> should cause <code>fig1.pdf</code>
+  to regenerate, which should cause <code>thesis.pdf</code> to rebuild.
+  Touching <code>intro.tex</code> should only trigger the latex run,
+  not the gnuplot step. Make's whole job is to enforce this.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Shell script vs Makefile — wasted work</span>
+</div>
+<div class="exercise-body">
+<p>
+  Consider a project with 100 C files, each compiling in 1 second. You
+  change one file. How long does the rebuild take with a
+  <code>build.sh</code> that runs all 100 compilations? How long with a
+  Makefile that tracks dependencies? How much CPU is wasted?
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Shell: ~100 seconds, with 99 seconds wasted. Make: ~1 second for the
+  changed file plus a second or two for the link step — ~2 seconds
+  total, essentially zero waste.
+</p>
+<p>
+  Multiply by 20 times per day, 200 working days per year, and you
+  begin to see why a senior developer cares so much about build
+  systems. "It only takes 5 minutes to compile" means you wait 5
+  minutes, 40 times a day, every day. That's 3+ hours of your life, per
+  day, staring at a progress bar.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Find where Make doesn't help</span>
+</div>
+<div class="exercise-body">
+<p>
+  Come up with a scenario where Make's timestamp-based model gives the
+  <em>wrong</em> answer. (Hint: think about what happens if you <code>git
+  checkout</code> an older branch, or <code>touch</code> a file without
+  changing its contents.)
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Several:
+</p>
+<ul>
+  <li>
+    <strong>Branch switch.</strong> You <code>git checkout</code> a
+    branch. The file <code>foo.c</code> now has the contents of that
+    branch's version, but its mtime is set to "now" by git. Its
+    <code>.o</code> file, built earlier, has an older mtime, so Make
+    rebuilds it. That's correct. But if you <code>git checkout</code>
+    <em>back</em>, the old <code>foo.c</code> is restored with a newer
+    mtime than the <code>.o</code> — Make rebuilds, even though the
+    <code>.o</code> is already correct. Wasted work.
+  </li>
+  <li>
+    <strong><code>touch</code>.</strong> You run <code>touch foo.c</code>
+    to reset its mtime. Make thinks <code>foo.c</code> changed and
+    rebuilds. No content actually changed. Wasted work.
+  </li>
+  <li>
+    <strong>Clock skew.</strong> NFS or cross-machine file systems
+    sometimes have clock drift between client and server. Make can be
+    confused into thinking a file is "from the future" and either
+    never-rebuild it or constantly rebuild it.
+  </li>
+  <li>
+    <strong>Compiler flag changes.</strong> You edit the Makefile to
+    add <code>-O2</code>. <code>foo.c</code> didn't change, so Make
+    doesn't rebuild <code>foo.o</code> — but the flags did change.
+    The <code>.o</code> is now built with the wrong flags and Make has
+    no way to know.
+  </li>
+</ul>
+<p>
+  Content-hashing build systems like Bazel or Nix avoid most of these.
+  We'll work around the flag-change one in a later chapter.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 1.4</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Read the manual once</span>
+</div>
+<div class="exercise-body">
+<p>
+  Open <a href="https://www.gnu.org/software/make/manual/make.html">the
+  GNU Make manual</a> in another tab. Read §1 ("Overview") and §2 ("An
+  Introduction to Makefiles"). It's about 10 minutes. You'll recognise
+  most of what you've just read here, but seeing the concepts stated by
+  the GNU authors themselves is grounding.
+</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  No solution — just do it. If you skip it, come back after Chapter 5
+  and do it then. It's a rite of passage.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>A build is a <strong>graph</strong> of file dependencies, not a list of commands.</li>
+  <li>Make rebuilds a target only if one of its prerequisites is newer than it (or it doesn't exist).</li>
+  <li>Rules can appear in any order; what matters is the graph they define.</li>
+  <li>Timestamp-based dependency tracking is coarse but fast. It's wrong in edge cases (touch, branch switch, flag changes) — we'll patch these holes later.</li>
+  <li>The first target in a Makefile is the default goal.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="../index.html"><span class="lbl">← Prev</span><span class="ttl">Introduction</span></a>
+  <a href="02-hello-make.html" class="next"><span class="lbl">Next →</span><span class="ttl">Hello, Make</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

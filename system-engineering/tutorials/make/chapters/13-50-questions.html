@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · The 50 Questions — GNU Make Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">GNU Make</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-why-make.html">Why Make Exists</a></li>
+      <li><a href="02-hello-make.html">Hello, Make</a></li>
+      <li><a href="03-anatomy-of-a-rule.html">Anatomy of a Rule</a></li>
+      <li><a href="04-variables.html">Variables — All Six Flavors</a></li>
+      <li><a href="05-automatic-vars.html">Automatic Vars &amp; Patterns</a></li>
+      <li><a href="06-functions.html">Functions</a></li>
+      <li><a href="07-phony-and-special.html">Phony &amp; Special Targets</a></li>
+      <li><a href="08-metaprogramming.html">Metaprogramming</a></li>
+      <li><a href="09-real-projects.html">Real Projects</a></li>
+      <li><a href="10-parallel-make.html">Parallel Make</a></li>
+      <li><a href="11-debugging.html">Debugging Make</a></li>
+      <li><a href="12-recursive-harmful.html">Recursive Make Considered Harmful</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 13</span>
+  The 50 Questions
+</h1>
+<p class="lede">
+  50 questions you will be asked about Make — in interviews, code
+  reviews, Slack channels, and the back of your own mind at 2 AM.
+  Each one gets a concise answer with a code snippet where relevant.
+  Treat this chapter as a reference you'll come back to.
+</p>
+
+<h2 id="fundamentals">Fundamentals</h2>
+
+<div class="qa">
+<div class="qa-q" id="q1">What does Make actually do in one sentence?</div>
+<p>It walks a dependency graph of files, comparing filesystem timestamps, and runs the recipe for any target whose prerequisites are newer than it (or which doesn't exist).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q2">What's the difference between Make and a shell script?</div>
+<p>A shell script is an imperative list of commands that always runs in full. A Makefile is a <em>declarative</em> description of a dependency graph; Make decides what to run based on which files have changed. Make also parallelises naturally and stops on error by default.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q3">What's the difference between GNU Make and BSD Make?</div>
+<p>Same core idea, different syntax for anything beyond basic rules. <code>.for</code> loops, conditionals, variable modifiers all differ. <strong>GNU Make</strong> is what 99% of Linux/macOS Makefiles target. On BSD systems (and macOS), GNU Make is often called <code>gmake</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q4">Why the tab character for recipes?</div>
+<p>Stuart Feldman wanted recipes to be visually distinct from target lines. He picked tab. By the time he realised it was a mistake, too many Makefiles existed to change it. Use <code>.RECIPEPREFIX := &gt;</code> in GNU Make 3.82+ if you want a different character — but most projects stick with tab for consistency.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q5">What order do rules execute in?</div>
+<p>The order is dictated by the <em>graph</em>, not file position. Make walks from the goal, depth-first. Independent branches may parallelise with <code>-j</code>. The first target in the file is just the <em>default goal</em> (unless overridden with <code>.DEFAULT_GOAL</code>), not "the first thing to run".</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q6">What's the default goal?</div>
+<p>The target Make builds when you type <code>make</code> with no arguments. By default: the first real (non-special) target defined in the Makefile. Set explicitly with <code>.DEFAULT_GOAL := name</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q7">What files does Make look for?</div>
+<p>In order: <code>GNUmakefile</code>, <code>makefile</code>, <code>Makefile</code>. Use <code>-f FILE</code> to pick a specific one.</p>
+</div>
+
+<h2 id="syntax">Syntax &amp; semantics</h2>
+
+<div class="qa">
+<div class="qa-q" id="q8">What's the difference between <code>=</code> and <code>:=</code>?</div>
+<p><code>=</code> is recursively expanded: the right side is stored as text and re-evaluated every reference. <code>:=</code> is simply expanded: the right side is evaluated once, at assignment, and the result is stored. Default to <code>:=</code> unless you specifically need late binding.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q9">What are all the variable assignment operators?</div>
+<p><code>=</code> recursive, <code>:=</code> simple, <code>::=</code> POSIX-simple (same as <code>:=</code>), <code>?=</code> if-not-set, <code>+=</code> append preserving flavor, <code>!=</code> assign from shell output.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q10">What do <code>$@</code>, <code>$&lt;</code>, <code>$^</code>, <code>$?</code>, <code>$*</code>, <code>$+</code>, <code>$|</code> mean?</div>
+<p>Target, first prerequisite, all prerequisites (deduped), prerequisites newer than target, stem of a pattern match, all prerequisites (with duplicates), order-only prerequisites.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q11">What's a pattern rule?</div>
+<p>A rule using <code>%</code> as a single wildcard. <code>%.o: %.c</code> applies to any <code>.o → .c</code> pair. The matched text (the stem) is available as <code>$*</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q12">What's a static pattern rule?</div>
+<p><code>targets: target-pat: prereq-pat</code>. Restricts a pattern to a specific target list. Example: <code>$(OBJ): %.o: %.c</code> applies only to files in <code>OBJ</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q13">What's the difference between <code>include</code>, <code>-include</code>, and <code>sinclude</code>?</div>
+<p><code>include</code> errors if file missing. <code>-include</code> (or <code>sinclude</code>) silently skips missing files. Use the latter for optional fragments like auto-generated <code>.d</code> files.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q14">What's the difference between <code>$(X)</code> and <code>$${X}</code> in a recipe?</div>
+<p><code>$(X)</code> is a Make variable expanded by Make before the recipe is handed to the shell. <code>$${X}</code> (equivalently <code>$$X</code>) is a <em>shell</em> variable — Make expands <code>$$</code> to <code>$</code> and the shell then expands <code>$X</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q15">What does the <code>@</code> at the start of a recipe line do?</div>
+<p>Suppresses the usual "echo this command before running it". The command still runs.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q16">What does a <code>-</code> at the start of a recipe line do?</div>
+<p>Ignore non-zero exit status; don't stop the build if this command fails.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q17">What does a <code>+</code> at the start of a recipe line do?</div>
+<p>Run the command even under <code>-n</code> / <code>-q</code> / <code>-t</code>. Used for recursive <code>$(MAKE)</code> calls so the jobserver still works under dry run.</p>
+</div>
+
+<h2 id="phony">Phony, special, and wildcards</h2>
+
+<div class="qa">
+<div class="qa-q" id="q18">What does <code>.PHONY</code> do?</div>
+<p>Tells Make that a target isn't a real file. Make won't check for a file with that name, always runs the recipe, and skips implicit rule matching. Mark all action targets (<code>all</code>, <code>clean</code>, <code>test</code>, <code>install</code>) as phony.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q19">What's an order-only prerequisite?</div>
+<p>A prerequisite whose existence is required, but whose mtime doesn't trigger rebuilds. Syntax: <code>target: deps | order-only-deps</code>. Canonical use: build directories.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q20">What's the difference between <code>.INTERMEDIATE</code>, <code>.SECONDARY</code>, and <code>.PRECIOUS</code>?</div>
+<p><code>.INTERMEDIATE</code>: Make creates and then deletes these files when done. <code>.SECONDARY</code>: same treatment but don't delete. <code>.PRECIOUS</code>: don't delete on interrupt (Ctrl-C).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q21">What does <code>.DELETE_ON_ERROR</code> do?</div>
+<p>If a recipe fails, Make deletes the target it was trying to build. Prevents half-written files from looking "up to date" on the next run. Include in every non-trivial Makefile.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q22">What's the difference between a double-colon rule and a grouped target?</div>
+<p>Double-colon (<code>::</code>) rules: multiple independent rules for the same target, each fires when <em>its own</em> prerequisites change. Grouped target (<code>&amp;:</code>): one recipe produces multiple files simultaneously; fires once even if multiple of the files are stale.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q23">How do you make a target always run?</div>
+<p>Declare it phony (<code>.PHONY: target</code>) and optionally make it depend on a <code>FORCE</code> phony target. Avoid if possible — always-rebuild targets defeat Make's purpose.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q24">What's the difference between <code>$(wildcard *.c)</code> and <code>*.c</code>?</div>
+<p><code>*.c</code> is a literal string in variable assignments. <code>$(wildcard *.c)</code> expands to a space-separated list of matching files. In recipe contexts, the shell expands globs naturally.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q25">How do I ensure a directory exists before writing to it?</div>
+<p>Make it an order-only prerequisite: <code>build/%.o: src/%.c | build</code>, with a <code>build:</code> rule that does <code>mkdir -p $@</code>. Alternative: <code>mkdir -p $(@D)</code> in the recipe.</p>
+</div>
+
+<h2 id="flags">Flags &amp; invocation</h2>
+
+<div class="qa">
+<div class="qa-q" id="q26">How do I override a variable from the command line?</div>
+<p><code>make VAR=value target</code>. Command-line assignments win over Makefile assignments (unless <code>override</code> is used) and over the environment.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q27">How do I pass an environment variable into Make's recipes?</div>
+<p>Export at the shell before calling Make (<code>VAR=value make</code>), or in the Makefile use <code>export VAR</code> to export a Make variable to child shells. <code>.EXPORT_ALL_VARIABLES:</code> exports everything.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q28">What does <code>-j</code> do?</div>
+<p>Run multiple recipes in parallel. <code>-j N</code> = up to N; <code>-j</code> alone = unlimited (rarely what you want). On modern machines, <code>-j $(nproc)</code> or <code>-j 8</code> is a sane default.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q29">What's the jobserver?</div>
+<p>GNU Make's mechanism for letting recursive <code>$(MAKE)</code> calls share a single pool of parallel-job tokens. Prevents <code>make -j 8</code> + recursive submakes from fork-bombing your machine.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q30">What does <code>-n</code> do?</div>
+<p>Dry run — print the recipes Make <em>would</em> execute, without running them. Essential for reviewing a build before committing to it.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q31">What does <code>-B</code> do?</div>
+<p>Unconditionally rebuild everything, ignoring timestamps. Useful when you know the dependency graph is wrong or just want a clean re-verify without <code>make clean</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q32">What does <code>-k</code> do?</div>
+<p>Keep going after errors. Normally Make stops at the first failed recipe; with <code>-k</code>, it builds as much of the rest of the graph as it can before exiting non-zero. Handy in CI.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q33">What does <code>-W file</code> (<code>--what-if</code>) do?</div>
+<p>Pretend <code>file</code> was just modified. Combined with <code>-n</code>, answers: "what would change if I edited this file?"</p>
+</div>
+
+<h2 id="practical">Practical patterns</h2>
+
+<div class="qa">
+<div class="qa-q" id="q34">How do I do automatic header-dependency tracking in C/C++?</div>
+<p>Add <code>-MMD -MP</code> to <code>CFLAGS</code> and include the generated <code>.d</code> files:</p>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS += -MMD -MP
+OBJ := ... ; DEP := $(OBJ:.o=.d)
+-include $(DEP)</code></pre>
+</div>
+<p>Each compile emits a <code>.d</code> file with header deps; Make reads them on subsequent invocations.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q35">How do I get a quiet build by default but verbose with <code>V=1</code>?</div>
+<div class="code" data-lang="make">
+<pre><code>Q := $(if $(V),,@)
+hello: hello.c
+	$(Q)$(CC) $(CFLAGS) $&lt; -o $@</code></pre>
+</div>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q36">How do I embed a git commit SHA in my binary?</div>
+<div class="code" data-lang="make">
+<pre><code>VERSION != git describe --always --dirty 2&gt;/dev/null || echo dev
+CPPFLAGS += -DVERSION='"$(VERSION)"'</code></pre>
+</div>
+<p>Then use <code>VERSION</code> as a C macro in your code.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q37">How do I conditionally build for debug vs release?</div>
+<p>Cleanest: use a computed variable name (Chapter 8):</p>
+<div class="code" data-lang="make">
+<pre><code>CFLAGS_release := -O2 -DNDEBUG
+CFLAGS_debug   := -O0 -g
+BUILD ?= release
+CFLAGS := $(CFLAGS_$(BUILD))</code></pre>
+</div>
+<p>Invoke as <code>make BUILD=debug</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q38">How do I make a target-specific flag override?</div>
+<p><code>debug: CFLAGS := -O0 -g</code> — this flags only apply while building <code>debug</code> and its prerequisites.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q39">How do I stop Make from deleting intermediate files?</div>
+<p><code>.SECONDARY:</code> with no arguments preserves all intermediates. Or list specific ones: <code>.SECONDARY: foo.a foo.b</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q40">How do I run something only when a file changes?</div>
+<p>Declare the file as a prerequisite. Make will only fire the recipe when its mtime moves. For "only if git HEAD changed" and similar, you need a stamp file:</p>
+<div class="code" data-lang="make">
+<pre><code>.git-hash: FORCE
+	@SHA=$$(git rev-parse HEAD); \
+	 [ -f $@ ] &amp;&amp; [ "$$SHA" = "$$(cat $@)" ] || echo $$SHA &gt; $@
+FORCE:
+
+build/version.h: .git-hash
+	echo "#define GIT $$(cat .git-hash)" &gt; $@</code></pre>
+</div>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q41">How do I fail fast if a required tool is missing?</div>
+<div class="code" data-lang="make">
+<pre><code>$(if $(shell command -v ninja 2&gt;/dev/null),,$(error 'ninja' not in PATH))</code></pre>
+</div>
+</div>
+
+<h2 id="quirks">Quirks &amp; gotchas</h2>
+
+<div class="qa">
+<div class="qa-q" id="q42">My Makefile says "missing separator". What's wrong?</div>
+<p>Spaces where a tab should be. Recipe lines must start with a literal tab character. Turn on "show whitespace" in your editor and check.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q43">Make keeps rebuilding X even though nothing changed. Why?</div>
+<p>Likely causes, in order: (1) X depends on a phony target, so it rebuilds every time. (2) X's recipe doesn't actually produce the file it claims to. (3) A prereq is always newer (perhaps auto-generated or constantly touched by another process). Diagnose with <code>make --debug=basic</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q44">Make won't rebuild X even though I changed a header. Why?</div>
+<p>Make doesn't know about the dependency. Either declare it explicitly (<code>X.o: X.c header.h</code>) or set up <code>-MMD -MP</code> auto-deps. Verify with <code>make -p | grep X.o</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q45">Why does my multi-line recipe lose its shell state between lines?</div>
+<p>Each recipe line runs in its own shell by default. Chain with <code>&amp;&amp;</code> or <code>\</code>, or set <code>.ONESHELL:</code> globally.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q46">Why is my <code>$SHELL_VAR</code> empty in the recipe?</div>
+<p>Because Make expanded <code>$S</code> (a Make variable, empty) and left <code>HELL_VAR</code>. Double the dollar: <code>$$SHELL_VAR</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q47">Why did Make run my target when the file already exists?</div>
+<p>The target is declared <code>.PHONY</code>. Or: a prerequisite has a later mtime. Or: <code>-B</code> is in effect (check <code>$(MAKEFLAGS)</code>). Or: the target is chained via a pattern rule whose input is an intermediate that Make considers stale.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q48">Why is <code>make -j 4</code> slower than <code>make -j 1</code>?</div>
+<p>Rare but real. Possibilities: (a) parallel link steps thrash disk/IO on hardware that parallelises poorly; (b) a race-dependent recipe is hitting locks; (c) the dependency graph is fully serial and <code>-j</code> adds overhead without parallelism. Usually (a) or (b) — profile with <code>--output-sync=target</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q49">How do I make Make forget one variable?</div>
+<p><code>undefine VAR</code> (GNU Make 3.82+). Note: for variables that came from the environment, also <code>unexport</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q50">Should I use Make or something newer?</div>
+<p>
+  Use Make when: you need a build tool that's already installed, the
+  project is small-to-medium (under 10k files), a single Makefile can
+  describe the graph, you want no configuration step. Use something
+  newer (ninja + cmake, bazel, nix) when: you have cross-platform
+  builds, you need hermetic reproducibility, you have 100k+ files, or
+  you need content-based cache invalidation. Knowing Make well makes
+  everything else easier to learn.
+</p>
+</div>
+
+<hr>
+
+<p>Bonus: a few more that come up just often enough to want written down.</p>
+
+<h2 id="bonus">Bonus questions</h2>
+
+<div class="qa">
+<div class="qa-q" id="q51">What's <code>MAKECMDGOALS</code>?</div>
+<p>A variable containing the list of goals the user passed on the command line. Useful for conditional logic like "skip dep generation when user ran <code>make clean</code>":</p>
+<div class="code" data-lang="make">
+<pre><code>ifeq ($(filter clean,$(MAKECMDGOALS)),)
+-include $(DEP)
+endif</code></pre>
+</div>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q52">What's <code>CURDIR</code>?</div>
+<p>The absolute path of Make's current working directory. Changes as Make enters subdirectories with <code>-C</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q53">What's <code>MAKEFILE_LIST</code>?</div>
+<p>A variable that grows to contain every Makefile Make has read. Useful for <code>$(lastword $(MAKEFILE_LIST))</code> — "the file that just got included".</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q54">How do I source a shell <code>.env</code> file?</div>
+<p>Make doesn't natively read dotenv. Use either:</p>
+<div class="code" data-lang="make">
+<pre><code># Option 1: shell out and parse
+include .env
+# .env would look like:  FOO = bar   (plain Make syntax)
+
+# Option 2: eval with export
+include .env
+export $(shell sed 's/=.*//' .env)</code></pre>
+</div>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q55">How do Make variables compare to shell variables?</div>
+<p>Make variables exist in Make's memory and are expanded by Make before the recipe runs. Shell variables exist in the recipe's subshell(s). They occupy different namespaces. <code>$(FOO)</code> → Make; <code>$$FOO</code> → shell.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q56">What does <code>.LIBPATTERNS</code> do?</div>
+<p>Controls how Make resolves <code>-lNAME</code> prerequisites. Default: <code>lib%.so lib%.a</code>. If you list <code>-lfoo</code> as a prerequisite, Make looks for <code>libfoo.so</code> or <code>libfoo.a</code> in the library search path.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q57">Why does <code>ifeq "$(A)" "$(B)"</code> fail weirdly?</div>
+<p>The quoted form requires matching quote styles on both sides. <code>ifeq "$(A)" "$(B)"</code> works; <code>ifeq ($(A),"$(B)")</code> doesn't. Pick one style (the paren form is more common).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q58">Does Make re-read the Makefile after <code>include</code>?</div>
+<p>No — <code>include</code> is processed in-line during the initial parse. However, Make <em>will</em> restart if a Makefile (or <code>include</code>d file) is a target that got rebuilt. That's how auto-dependency chains self-heal.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q59">How do I write a Makefile that works on both GNU Make 3.81 and 4.x?</div>
+<p>Avoid features new to 4.x: <code>!=</code>, <code>$(file ...)</code>, <code>&amp;:</code> grouped targets, <code>.ONESHELL</code>'s error-propagation (was subtly different). Use <code>$(shell …)</code> + <code>:=</code> instead of <code>!=</code>. Stay simple.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q60">What's the one-line "most important thing to remember"?</div>
+<p><strong>Make executes a <em>graph</em>, not a script.</strong> Every other confusion (why things rebuild, why they don't, why ordering matters for some things and not others) flows from either remembering or forgetting this.</p>
+</div>
+
+<div class="page-nav">
+  <a href="12-recursive-harmful.html"><span class="lbl">← Prev</span><span class="ttl">Recursive Make Considered Harmful</span></a>
+  <a href="14-capstone.html" class="next"><span class="lbl">Next →</span><span class="ttl">Capstone Project</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

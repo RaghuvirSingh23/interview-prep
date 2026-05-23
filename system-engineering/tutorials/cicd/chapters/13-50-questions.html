@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · The 50 Questions — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 13</span>
+  The 50 Questions
+</h1>
+<p class="lede">
+  Fifty questions you will be asked — in interviews, design reviews,
+  Slack channels, and your own head at 2 AM. Concise answers with
+  snippets when the right answer is code.
+</p>
+
+<h2 id="concepts">Concepts</h2>
+
+<div class="qa">
+<div class="qa-q" id="q1">In one sentence: CI vs CD?</div>
+<p>CI validates every change on a shared branch with automated build + tests; CD packages (Delivery) or releases (Deployment) every change that passes CI.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q2">What's the difference between a pipeline and a workflow?</div>
+<p>They're the same idea; different tools picked different words. Jenkins says "pipeline"; GitLab says "pipeline"; GitHub Actions says "workflow". All mean: one end-to-end run containing jobs and stages.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q3">What are DORA metrics and why do they matter?</div>
+<p>Deployment frequency, lead time for changes, change failure rate, and mean time to recovery. They correlate strongly with team performance and business outcomes per Google's DORA research. Good CI/CD moves all four in the right direction.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q4">What's a dependency graph in pipeline terms?</div>
+<p>The graph of jobs where an edge means "this job needs this other job's output". Tools vary in how much of the real graph they let you express — stages (waterfall) vs <code>needs</code> (DAG).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q5">Artifact vs cache?</div>
+<p>Artifact: required for downstream jobs; persisted with retention; pipeline-scope. Cache: optional speed-up; best-effort; key-scoped across pipelines.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q6">Why is trunk-based development associated with CI/CD?</div>
+<p>Small, frequent merges to main is what enables CI to catch problems early and CD to always have a shippable main. Long-lived feature branches break this.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q7">What's a "flaky" test and how do you deal with it?</div>
+<p>A test that passes sometimes, fails sometimes, with the same code. Options: fix the flake (best), retry N times automatically (<code>retry</code> in all three tools), quarantine to a non-blocking suite, or remove entirely. Accepting flakes erodes trust in the whole pipeline.</p>
+</div>
+
+<h2 id="jenkins">Jenkins</h2>
+
+<div class="qa">
+<div class="qa-q" id="q8">Controller vs agent?</div>
+<p>The controller schedules jobs and holds config/state; agents execute the work. In production, agents are where builds run — the controller should rarely run builds itself.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q9">Freestyle vs Pipeline?</div>
+<p>Freestyle is UI-configured, stored in Jenkins, brittle. Pipeline is code in a <code>Jenkinsfile</code>, in your repo, reviewable, rollbackable. Use Pipeline.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q10">Scripted vs Declarative Pipeline?</div>
+<p>Scripted is raw Groovy (<code>node { ... }</code>). Declarative is a constrained DSL (<code>pipeline { agent … stages { ... } }</code>). Declarative is the default for new work; falls back to <code>script { ... }</code> when you need imperative Groovy.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q11">Why should I use a Shared Library?</div>
+<p>To factor common pipeline logic out of every Jenkinsfile. Define steps/templates once, version them in git, pin consumers to tags. The only way to keep 50 Jenkinsfiles consistent.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q12">What does <code>agent none</code> mean?</div>
+<p>Don't allocate an agent at pipeline scope — require each stage to declare its own agent. Useful for "wait for input" stages that shouldn't hold an executor, or for mixing Linux/Windows stages.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q13">Why <code>@</code>, <code>-</code>, and <code>+</code> on recipe/step lines? (GNU Make analogue)</div>
+<p>Different: Jenkins doesn't have these. You get similar capability via <code>sh(label: '...', returnStatus: true)</code>, <code>catchError</code>, and the various <code>options</code>. Fail-fast vs continue is controlled by <code>post</code> or <code>catchError</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q14">How do I run a pipeline locally before pushing?</div>
+<p>Closest: <em>Replay</em> feature on an existing build (lets you edit and re-run). For linting, use the <code>jenkins-cli declarative-linter</code> or the Jenkinsfile Runner container. True local runs are awkward — another reason to prefer simpler Jenkinsfiles.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q15">How do you parallelise in Declarative Pipeline?</div>
+<p><code>parallel { stage('A') { ... }; stage('B') { ... } }</code> within a <code>stage</code>. Add <code>failFast true</code> to stop all branches when one fails.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q16">How do you share files between stages?</div>
+<p><code>stash name: 'foo', includes: '...'</code> and <code>unstash 'foo'</code>. For persistence beyond the pipeline, use <code>archiveArtifacts</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q17">What is Jenkins Configuration as Code (JCasC)?</div>
+<p>A plugin that lets you define the entire Jenkins controller config in YAML. Applied on startup. Brings Jenkins config into git, reviewable and rollback-able.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q18">Why pin shared library versions?</div>
+<p>Because live-at-HEAD libraries mean a bug in the library breaks every consumer at once. Pin with <code>@Library('name@v1.2.0')</code> or a commit SHA; upgrade deliberately.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q19">How do I handle credentials safely in a Jenkinsfile?</div>
+<p>Use <code>withCredentials([...])</code> with single-quoted shell strings so Groovy doesn't interpolate the secret into the command line. Or bind via <code>environment { credentials('id') }</code> when you want the value available across the whole block.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q20">What's a multibranch pipeline?</div>
+<p>A Jenkins project that scans a git repo and creates a sub-job per branch/PR that has a <code>Jenkinsfile</code>. Auto-builds every branch and MR/PR. Default choice for any serious project.</p>
+</div>
+
+<h2 id="gitlab">GitLab CI</h2>
+
+<div class="qa">
+<div class="qa-q" id="q21">What are runners?</div>
+<p>The worker processes that execute jobs. GitLab schedules, runners pull and run. Scopes: instance/shared, group, project. Executors: shell, docker, kubernetes, ssh, vm, custom.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q22">What are the default stages?</div>
+<p><code>.pre</code>, <code>build</code>, <code>test</code>, <code>deploy</code>, <code>.post</code>. Override with the top-level <code>stages:</code> list.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q23">rules vs only/except?</div>
+<p><code>rules</code> is the modern replacement — supports <code>if</code>, <code>changes</code>, <code>exists</code>, <code>when</code>, <code>variables</code>, all in one list evaluated top-to-bottom. Don't mix with legacy <code>only:</code>/<code>except:</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q24">What's <code>needs:</code>?</div>
+<p>Declares a job's specific prerequisites, converting the default stage-waterfall into a DAG. A job with <code>needs:</code> starts as soon as its named prereqs finish, skipping ahead of other jobs in the same stage.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q25">What's a dynamic child pipeline?</div>
+<p>A job that <em>generates</em> a YAML pipeline file (from script) and triggers it via <code>trigger: { include: { artifact: generated.yml, job: ... } }</code>. Great for monorepos — generate only the jobs relevant to changed paths.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q26">What's the integrated container registry?</div>
+<p>Every GitLab project has a built-in Docker registry reachable at <code>$CI_REGISTRY_IMAGE</code>. Authenticate with <code>$CI_REGISTRY_USER</code>/<code>$CI_REGISTRY_PASSWORD</code> — both auto-injected.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q27">How do I avoid duplicate pipelines on MRs?</div>
+<p>Workflow rules that skip branch pipelines when an MR exists:</p>
+<div class="code" data-lang="yaml">
+<pre><code>workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH &amp;&amp; $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH</code></pre>
+</div>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q28">What's the difference between <code>include</code> and <code>extends</code>?</div>
+<p><code>include</code> pulls in an external YAML file. <code>extends</code> inherits fields from another job in the same file (or included via include). They compose — you extend jobs defined in included files.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q29">Environments in GitLab?</div>
+<p>Named deploy targets (staging, production, PR-123) attached via <code>environment: { name, url }</code>. GitLab tracks deploys per env, supports rollback, and (on paid tiers) review apps (dynamic environments per MR).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q30">What's a Merge Train?</div>
+<p>Premium feature. When multiple MRs are ready, GitLab queues them, rebases each onto the prior, tests the combined result, and merges only if each combined pipeline passes. Eliminates "green alone, red together" bugs.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q31">CI/CD Components vs <code>include:</code>?</div>
+<p>Components are a newer, more structured way to share CI logic: versioned, with explicit inputs declared in <code>spec.inputs</code>, discoverable via the CI/CD Catalog. Prefer them for new reusable logic; <code>include:</code> for quick-and-dirty sharing.</p>
+</div>
+
+<h2 id="gha">GitHub Actions</h2>
+
+<div class="qa">
+<div class="qa-q" id="q32">Workflow vs job vs step vs action?</div>
+<p>Workflow = <code>.github/workflows/*.yml</code>. Job = runs on one runner. Step = one unit inside a job, either <code>run:</code> (shell) or <code>uses:</code> (action). Action = a reusable step distributed as a git repo.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q33">What's the marketplace?</div>
+<p>A public directory of Actions and Workflows others have published. Most have sources on GitHub. Extremely useful; pin untrusted ones by SHA.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q34">GitHub-hosted vs self-hosted runners?</div>
+<p>Hosted: ephemeral VMs provisioned by GitHub (free tier + paid); zero maintenance. Self-hosted: your machines polling GitHub; required for private networks, special hardware, or heavy usage economics.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q35">What's <code>GITHUB_TOKEN</code>?</div>
+<p>A short-lived token auto-injected into every workflow run. Default permissions are broad — lock them down per-workflow with <code>permissions: {...}</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q36">Reusable workflows vs composite actions?</div>
+<p>Reusable workflow wraps jobs (full-runner unit). Composite action wraps steps (inlined inside a caller's job). Pick by scope.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q37">How do I skip a run?</div>
+<p>Commit message with <code>[skip ci]</code> (many hosts recognise this). Or <code>paths-ignore:</code> on the trigger. Or a first job that checks and bails with <code>if: ...</code>.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q38">Matrix <code>include</code>/<code>exclude</code>?</div>
+<p><code>exclude</code> drops cells from the cartesian grid. <code>include</code> adds cells (or extra vars to existing cells). Let you customise without expanding the full matrix.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q39">What's concurrency + cancel-in-progress?</div>
+<p>Groups runs by a key (usually <code>${{ github.ref }}</code>). With <code>cancel-in-progress: true</code>, a new run cancels the earlier one — saving runner minutes on rapid pushes.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q40">How do I trigger a workflow from another workflow?</div>
+<p>Three ways: <code>workflow_call</code> (reusable workflows), <code>workflow_run</code> (chain after another workflow completes), or <code>repository_dispatch</code> (external API).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q41">How do I dynamically compute a matrix?</div>
+<p>One job emits a JSON array to <code>$GITHUB_OUTPUT</code>; a later job uses <code>strategy: matrix: ${{ fromJSON(needs.first.outputs.values) }}</code>.</p>
+</div>
+
+<h2 id="security">Security &amp; ops</h2>
+
+<div class="qa">
+<div class="qa-q" id="q42">Why OIDC?</div>
+<p>To eliminate long-lived cloud credentials from CI. Each job exchanges a short-lived JWT (signed by the CI system) for a cloud credential via the cloud's IAM, scoped by claim (repo, branch, environment).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q43">How do I pin a third-party action safely?</div>
+<p>By full commit SHA, not tag: <code>uses: some-org/some-action@<em>a1b2c3...</em></code>. Dependabot can keep the pin updated via reviewable PRs.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q44">What's an SBOM?</div>
+<p>Software Bill of Materials. Machine-readable list of components in an artifact (direct and transitive deps). Generate with <code>syft</code>, <code>cyclonedx-*</code>, language-specific tools. Ship alongside releases.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q45">What's SLSA?</div>
+<p>A framework of four levels describing build-provenance integrity, from "some metadata" (L1) to "hermetic, deterministic, two-person-reviewed" (L4). Common aspiration: SLSA 3, reachable for most teams via GitHub attestations + signed artifacts.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q46">Why never store long-lived cloud keys?</div>
+<p>Because a leak = weeks of exposure while you notice and rotate. Short-lived (OIDC, STS) reduce blast radius to minutes. Plus, fewer places for secrets = less surface area.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q47">How do you prevent secrets from leaking into logs?</div>
+<p>Never echo them. Use env vars (all three tools mask literal values). Don't transform them (base64/hash defeats masking). Prefer file-type secrets for CLIs. Turn on secret scanning so you detect when one sneaks through.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q48">What's the "fork PR problem"?</div>
+<p>An external fork PR can modify the pipeline file itself; running that pipeline with full secrets and deploy access = supply-chain compromise. Mitigate: forks don't get secrets by default; require manual approval for first-time contributors; keep deploy steps gated by branch + environment approvals.</p>
+</div>
+
+<h2 id="decisions">Decision-making</h2>
+
+<div class="qa">
+<div class="qa-q" id="q49">When should I self-host runners?</div>
+<p>Three reasons: private-network access, specialty hardware (GPUs, macOS in bulk, specific OS versions), or cost (at &gt;$5k/month of SaaS minutes, self-hosted on spot instances usually wins). Otherwise stick with SaaS.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q50">If I had to pick one in 2026 for a green-field startup on GitHub?</div>
+<p>GitHub Actions. Zero ops, free tier is generous, the marketplace covers every integration you'll reach for, OIDC-to-cloud is easy, and if you outgrow it you can add self-hosted runners or escape-hatch to Buildkite/CircleCI for specific workloads. Only reach for Jenkins if a specific requirement forces it.</p>
+</div>
+
+<hr>
+
+<h2 id="bonus">Bonus: ten more that come up</h2>
+
+<div class="qa">
+<div class="qa-q" id="q51">What's the 10-minute CI budget and why?</div>
+<p>Developers context-switch after ~10 minutes of waiting. Pipelines slower than that push people toward "push and pray" rather than "test locally, commit small". Under 10 min for the fast-feedback path; longer for nightly/release pipelines is fine.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q52">Blue/green vs canary deploy?</div>
+<p>Blue/green: two identical environments, switch traffic atomically. Canary: gradual rollout (1% → 10% → 100%) with health checks. Blue/green is safer for small apps; canary gives richer feedback on larger ones.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q53">How do I run a step only on schedule?</div>
+<p>In all three: condition on the trigger. GHA: <code>if: github.event_name == 'schedule'</code>. GitLab: <code>if: $CI_PIPELINE_SOURCE == "schedule"</code>. Jenkins: <code>when: triggeredBy 'TimerTrigger'</code> (or check <code>currentBuild.getBuildCauses()</code>).</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q54">What's a "pipeline-as-code" anti-pattern you see?</div>
+<p>Using CI as a scripting host for arbitrary tasks — cron-like utility scripts that don't actually validate code. If a "job" isn't part of your build-or-release flow, it belongs in a scheduler (Airflow, CronJobs), not the CI.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q55">Where should integration tests run?</div>
+<p>In CI, but after unit tests (fast-fail), and ideally in parallel. Gate on their success before publish/deploy. If they're flaky, fix them before accepting their red/green as reliable signal.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q56">How do I handle secrets for local development?</div>
+<p>A separate dev-secret file excluded from git (<code>.envrc</code>, <code>direnv</code>, macOS Keychain, 1Password CLI). Never share the CI's secrets with local devs — different blast radius, different rotation cadence.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q57">Why does my matrix cell take so long in GHA?</div>
+<p>Typical culprits: cache miss, container pulls, <code>actions/checkout</code> with full fetch-depth. Fixes: explicit <code>cache:</code>, <code>fetch-depth: 1</code> unless you need more, self-hosted runner with warm image cache.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q58">How do I deal with monorepo pipelines?</div>
+<p>Detect changed paths in job-0, then either (a) skip jobs whose paths didn't change, or (b) generate a dynamic pipeline with only the relevant jobs. GitLab's dynamic child pipelines and GHA's <code>fromJSON</code> matrix are the main tools.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q59">What's a "deploy freeze"?</div>
+<p>A period when production deploys are prohibited (holidays, big-launch weekends, on-call handoffs). Implement as a check that fails the pipeline during those windows — <em>policy as code</em>, visible to humans.</p>
+</div>
+
+<div class="qa">
+<div class="qa-q" id="q60">If my CI goes down, what's my plan?</div>
+<p>Depends. If it's a SaaS outage: wait it out, or trigger manual deploys via the cloud CLI from an on-call's laptop. If it's self-hosted: have runbooks for restore-from-backup, pre-provisioned standby controller, and tested scripts to push emergency releases without CI. Document the plan; practice it.</p>
+</div>
+
+<div class="page-nav">
+  <a href="12-comparison.html"><span class="lbl">← Prev</span><span class="ttl">Head-to-head Comparison</span></a>
+  <a href="14-capstone.html" class="next"><span class="lbl">Next →</span><span class="ttl">Capstone Project</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

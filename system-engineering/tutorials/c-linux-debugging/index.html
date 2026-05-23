@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>C / C++ · Linux · Debugging — A Deep Dive</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="chapters/01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="chapters/02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="chapters/03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="chapters/04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="chapters/05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="chapters/06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="chapters/07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="chapters/08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="chapters/09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="chapters/10-gdb.html">GDB deep dive</a></li>
+      <li><a href="chapters/11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="chapters/12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="chapters/13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="chapters/14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="exercises.html">All Exercises</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<section class="hero">
+  <h1>
+    <span class="chap-num">A Deep Dive</span>
+    C, C++, Linux, and the art of debugging.
+  </h1>
+  <p class="lede">
+    The toolkit for systems programmers: C and C++ as they actually
+    work (not as the textbooks pretend), the Linux APIs you reach for
+    every week, and the debugging techniques that turn a six-hour
+    detective story into a thirty-minute fix. Threading, sanitizers,
+    GDB, perf, eBPF — all of it. Pointed at people who already know
+    how to write a function but want to debug a segfault on a Tuesday
+    night and not panic.
+  </p>
+  <div class="hero-meta">
+    <span><strong>14</strong> chapters</span>
+    <span><strong>3</strong> domains</span>
+    <span><strong>80+</strong> exercises</span>
+    <span><strong>50</strong> interview Qs</span>
+  </div>
+</section>
+
+<h2 id="how-to-use">How this is organised</h2>
+<ul>
+  <li><strong>Chapters 1–3 — The languages.</strong> C as a careful subset, C++ as a modern subset (RAII, smart pointers, move), the memory model and undefined behaviour you'll dance around forever.</li>
+  <li><strong>Chapter 4 — Build &amp; link.</strong> Translation units, ELF, symbols, static vs dynamic libs, the linker errors that read like ancient runes.</li>
+  <li><strong>Chapters 5–8 — The Linux APIs.</strong> Process model, files &amp; I/O, threads &amp; atomics, IPC and sockets — the system calls you'll trace on every job.</li>
+  <li><strong>Chapter 9 — Performance &amp; observability.</strong> <code>perf</code>, <code>strace</code>, eBPF/bpftrace, flamegraphs, cache effects, the difference between "slow" and "actually slow".</li>
+  <li><strong>Chapters 10–12 — Debugging.</strong> GDB cover-to-cover, the sanitizers (ASan/TSan/UBSan/MSan/valgrind), and the kernel-adjacent tricks (kgdb, kprobes, ftrace, dmesg, JTAG).</li>
+  <li><strong>Chapter 13 — The 50 Questions.</strong> Interview-style answers across the lot.</li>
+  <li><strong>Chapter 14 — Capstone.</strong> A deliberately-broken multi-threaded C++ program: race + UB + leak + signal-handler bug. You diagnose every problem with the right tool.</li>
+</ul>
+
+<div class="callout tip">
+<div class="callout-title">Prerequisites</div>
+<ul>
+<li>You've written some C or C++. You know what a pointer is, even if you don't always trust them.</li>
+<li>A Linux machine. Real, VM, WSL2, or container — any modern distro will do. macOS works for most of it; Linux-specific bits (perf, eBPF, /proc) need actual Linux.</li>
+<li><code>gcc</code> or <code>clang</code>, <code>make</code>, <code>gdb</code>, <code>valgrind</code>. We'll install the rest as we go.</li>
+<li>Comfort at the shell. <code>ls</code>, <code>grep</code>, <code>find</code> should be reflex.</li>
+</ul>
+</div>
+
+<h2 id="contents">Table of contents</h2>
+
+<div class="toc-grid">
+  <a href="chapters/01-c-refresher.html" class="toc-card">
+    <span class="num">01</span><h3>C — the working subset</h3>
+    <p>Pointers, arrays-vs-pointers, integer promotion, sequence points, the parts you actually trust.</p>
+  </a>
+  <a href="chapters/02-cpp-refresher.html" class="toc-card">
+    <span class="num">02</span><h3>C++ — the modern subset</h3>
+    <p>RAII, smart pointers, move semantics, references, templates basics, the C++17/20 features that pay rent.</p>
+  </a>
+  <a href="chapters/03-memory-and-ub.html" class="toc-card">
+    <span class="num">03</span><h3>Memory model &amp; UB</h3>
+    <p>Lifetime, alignment, strict aliasing, signed overflow, what compilers exploit and how to stay sane.</p>
+  </a>
+  <a href="chapters/04-build-and-link.html" class="toc-card">
+    <span class="num">04</span><h3>Build &amp; link</h3>
+    <p>Preprocessor, translation units, linkage rules, ELF, symbol resolution, static vs shared libs, ABI.</p>
+  </a>
+  <a href="chapters/05-linux-process-model.html" class="toc-card">
+    <span class="num">05</span><h3>Linux process model</h3>
+    <p>fork/exec/wait, file descriptors, signals, pipes, exit semantics, zombies, /proc.</p>
+  </a>
+  <a href="chapters/06-files-and-io.html" class="toc-card">
+    <span class="num">06</span><h3>Files &amp; I/O</h3>
+    <p>open/read/write/close, mmap, O_DIRECT, fsync, atomic rename, /proc and /sys.</p>
+  </a>
+  <a href="chapters/07-threads-and-concurrency.html" class="toc-card">
+    <span class="num">07</span><h3>Threads &amp; concurrency</h3>
+    <p>pthreads, std::thread, atomics, memory orderings, races, false sharing, lock-free patterns.</p>
+  </a>
+  <a href="chapters/08-ipc-and-sockets.html" class="toc-card">
+    <span class="num">08</span><h3>IPC &amp; sockets</h3>
+    <p>Unix sockets, shared memory, futex, TCP/UDP, epoll, the patterns behind every server.</p>
+  </a>
+  <a href="chapters/09-perf-and-observability.html" class="toc-card">
+    <span class="num">09</span><h3>Performance &amp; observability</h3>
+    <p><code>perf</code>, <code>strace</code>, <code>ltrace</code>, eBPF/bpftrace, flamegraphs, cache effects.</p>
+  </a>
+  <a href="chapters/10-gdb.html" class="toc-card">
+    <span class="num">10</span><h3>GDB deep dive</h3>
+    <p>Breakpoints, watchpoints, reverse debug, core dumps, TUI, scripting, multi-thread, remote serial.</p>
+  </a>
+  <a href="chapters/11-sanitizers.html" class="toc-card">
+    <span class="num">11</span><h3>Sanitizers &amp; static analysis</h3>
+    <p>ASan, TSan, UBSan, MSan, valgrind, clang-tidy, scan-build — when each catches what.</p>
+  </a>
+  <a href="chapters/12-kernel-adjacent.html" class="toc-card">
+    <span class="num">12</span><h3>Kernel-adjacent debug</h3>
+    <p>dmesg, kprobes, ftrace, kgdb, JTAG, hardware watchpoints, the embedded debug toolbox.</p>
+  </a>
+  <a href="chapters/13-50-questions.html" class="toc-card">
+    <span class="num">13</span><h3>The 50 Questions</h3>
+    <p>Interview-style questions across C/C++, Linux APIs, and debugging.</p>
+  </a>
+  <a href="chapters/14-capstone.html" class="toc-card">
+    <span class="num">14</span><h3>Capstone Project</h3>
+    <p>Debug a deliberately-broken multi-threaded C++ program: race + UB + leak + signal bug.</p>
+  </a>
+</div>
+
+<p style="text-align: center; margin-top: 60px;">
+  <a href="chapters/01-c-refresher.html" style="font-size: 20px;">→ Begin: Chapter 1 — C, the working subset</a>
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

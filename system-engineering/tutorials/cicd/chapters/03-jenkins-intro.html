@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3 · Jenkins — Architecture — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 03</span>
+  Jenkins — Architecture
+</h1>
+<p class="lede">
+  Jenkins is the grandfather of CI. It's simultaneously the most
+  powerful tool in this tutorial and the most frustrating. Before we
+  write a <code>Jenkinsfile</code>, understand what Jenkins
+  <em>is</em>: a long-running Java server with a plugin architecture,
+  built around a controller-and-agents model. Get this chapter right
+  and the next three will make sense.
+</p>
+
+<h2 id="history">A short, useful history</h2>
+
+<p>
+  In 2005 Kohsuke Kawaguchi, at Sun Microsystems, wrote a tool called
+  <strong>Hudson</strong> to automate build/test cycles for Java
+  projects. Hudson became popular; Oracle acquired Sun in 2010; a
+  governance fight ensued; in 2011 the community forked Hudson and
+  renamed the fork <strong>Jenkins</strong>. Jenkins flourished,
+  Hudson withered.
+</p>
+
+<p>
+  Jenkins' defining feature has always been the <strong>plugin
+  ecosystem</strong>. Anything a CI tool might need — git, docker,
+  kubernetes, every cloud, every language, every notification channel
+  — exists as a plugin. Today there are 1,800+ of them. That's both
+  Jenkins' superpower and its curse.
+</p>
+
+<div class="callout history">
+<div class="callout-title">Why Jenkins is still around</div>
+<p>
+  Jenkins solves problems no SaaS CI can: <em>you control the
+  infrastructure</em>. Which means you can plug it into a mainframe,
+  build on classified air-gapped networks, integrate with ancient LDAP
+  and older Kerberos, run on ARM64 cross-compiled for a custom RTOS,
+  orchestrate a 10,000-node simulation farm. The "open-source and
+  self-hosted" design is the point.
+</p>
+</div>
+
+<h2 id="architecture">The architecture, drawn</h2>
+
+<div class="code" data-lang="text">
+<pre><code>   ┌─────────────────────────────────────────┐
+   │              Controller                 │
+   │  (the "Jenkins server" you browse to)   │
+   │                                         │
+   │  - schedules jobs                       │
+   │  - stores config, credentials, logs     │
+   │  - serves the web UI                    │
+   │  - runs plugins                         │
+   │  - processes Pipeline DSL (Groovy)      │
+   └────────┬────────┬────────────┬──────────┘
+            │        │            │
+      ┌─────┴───┐ ┌──┴────┐ ┌─────┴─────┐
+      │ Agent A │ │Agent B│ │  Agent C  │
+      │  Linux  │ │ macOS │ │  Windows  │
+      │  Docker │ │ Intel │ │ ARM64     │
+      └─────────┘ └───────┘ └───────────┘
+      (where the actual build work runs)</code></pre>
+</div>
+
+<p>
+  The <strong>Controller</strong> is the brain: it holds state,
+  schedules work, and exposes the UI. <strong>Agents</strong>
+  (historically called "slaves", now "agents" or "nodes") are worker
+  machines that actually run your builds. The Controller can run
+  builds itself, but in any non-trivial setup it shouldn't — agents
+  handle execution, Controller handles scheduling.
+</p>
+
+<h4>Why separate Controller from Agents?</h4>
+<ul>
+  <li><strong>Isolation.</strong> A build that fork-bombs its machine shouldn't take down your CI system.</li>
+  <li><strong>Parallelism.</strong> N agents = N builds running simultaneously.</li>
+  <li><strong>Heterogeneity.</strong> One agent is Linux, another macOS, another a Windows box on ARM. Jobs specify which they need.</li>
+  <li><strong>Scaling.</strong> Add agents on-demand (cloud plugin) or keep a fleet.</li>
+</ul>
+
+<h4>Agent connection methods</h4>
+<ul>
+  <li><strong>SSH.</strong> Controller SSHes into the agent and starts a Java process. Simple.</li>
+  <li><strong>JNLP / inbound.</strong> Agent connects <em>out</em> to the Controller. Required when firewalls forbid inbound connections.</li>
+  <li><strong>Docker cloud.</strong> Controller spins up an agent container for each build, tears it down after. Clean, ephemeral, scalable.</li>
+  <li><strong>Kubernetes cloud.</strong> Same idea but each build is a K8s pod. The modern-and-scaling answer.</li>
+</ul>
+
+<h2 id="install">Installing Jenkins</h2>
+
+<p>
+  The easiest install is the official LTS (Long-Term Support) docker
+  image. <strong>Do this in a throwaway VM or Docker, not your work
+  laptop for real use</strong> — Jenkins is a <em>server</em>.
+</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run -d \
+    --name jenkins \
+    -p 8080:8080 -p 50000:50000 \
+    -v jenkins_home:/var/jenkins_home \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    jenkins/jenkins:lts
+
+$ docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+# use this password on first login at http://localhost:8080</code></pre>
+</div>
+
+<p>The volume mount of <code>/var/run/docker.sock</code> lets your Jenkins container start other containers on the host — useful for Docker-based agents. Omit it if you don't need that.</p>
+
+<p>Open <code>http://localhost:8080</code>. Paste the password. Step through the setup wizard. When prompted, install "suggested plugins" — roughly 20 plugins that cover basic CI.</p>
+
+<h2 id="ui-tour">A tour of the UI</h2>
+
+<p>On the dashboard you'll see these main left-nav items:</p>
+<ul>
+  <li><strong>New Item</strong> — create a job (freestyle, pipeline, multibranch, …).</li>
+  <li><strong>People</strong> — users who've committed to projects Jenkins knows about.</li>
+  <li><strong>Build History</strong> — recent runs across all jobs.</li>
+  <li><strong>Manage Jenkins</strong> — settings, plugins, security, credentials, system config, <em>everything admin</em>. This is where you'll spend most of your admin time.</li>
+  <li><strong>My Views</strong> — customised dashboards filtered to subsets of jobs.</li>
+</ul>
+
+<p>A <strong>job</strong> (or "item" or "project") has:</p>
+<ul>
+  <li>A name and description.</li>
+  <li>Source control config (git repo URL, branches).</li>
+  <li>Build triggers (poll SCM, webhook, periodic, upstream).</li>
+  <li>Build steps (what to do — for freestyle jobs) or a Pipeline script.</li>
+  <li>Post-build actions (archive artifacts, publish test results, notify).</li>
+</ul>
+
+<h2 id="first-job">Your first (freestyle) job</h2>
+
+<p>"Freestyle" is the legacy way. You'll mostly write Pipelines (Chapter 4), but it's worth building one freestyle job to understand the UI.</p>
+
+<ol>
+  <li>Dashboard → <strong>New Item</strong>.</li>
+  <li>Name: <code>hello-freestyle</code>. Select <strong>Freestyle project</strong>. OK.</li>
+  <li>Under <strong>Build Steps</strong>, <em>Add build step</em> → <em>Execute shell</em>, and enter:</li>
+</ol>
+
+<div class="code" data-lang="sh">
+<pre><code>echo "Hello from Jenkins on $(hostname) at $(date -u)"
+uname -a</code></pre>
+</div>
+
+<p>Save. Click <strong>Build Now</strong>. Watch a run appear in "Build History". Click its number, then "Console Output". You'll see the output of your shell, wrapped in Jenkins preamble like:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>Started by user admin
+Running as SYSTEM
+Building in workspace /var/jenkins_home/workspace/hello-freestyle
+[hello-freestyle] $ /bin/sh -xe /tmp/jenkins1234.sh
++ echo Hello from Jenkins on ...
+Hello from Jenkins on jenkins-controller at 2026-04-23T...
++ uname -a
+Linux jenkins-controller 6.1.0-13-amd64 #1 SMP Debian ...
+Finished: SUCCESS</code></pre>
+</div>
+
+<p>That's it. You just made a CI system run a shell script.</p>
+
+<h2 id="jenkinsfile">Why Jenkinsfile exists</h2>
+
+<p>
+  Freestyle jobs have a fatal flaw: <strong>the config lives in
+  Jenkins, not in your repo</strong>. Which means:
+</p>
+<ul>
+  <li>No code review on pipeline changes.</li>
+  <li>No git history of how your CI evolved.</li>
+  <li>No "this build on this commit" atomic pair — if you change the pipeline, every previous commit's build breaks.</li>
+  <li>Disaster recovery is backing up a Jenkins server instead of a git repo.</li>
+</ul>
+
+<p>
+  Around 2015 Jenkins introduced <strong>Pipelines</strong> — CI
+  logic expressed as code, stored in a <code>Jenkinsfile</code> in
+  your repo. That's how every modern Jenkins installation looks.
+  Freestyle still exists, and you'll find it in the wild, but new work
+  should be Pipeline.
+</p>
+
+<h2 id="pipeline-preview">A <code>Jenkinsfile</code>, briefly</h2>
+
+<div class="code" data-lang="groovy">
+<div class="code-hdr"><span class="lang">groovy</span><span class="title">Jenkinsfile — preview</span></div>
+<pre><code>pipeline {
+    agent any
+    stages {
+        stage('Checkout') { steps { checkout scm } }
+        stage('Test')     { steps { sh 'make check' } }
+        stage('Build')    { steps { sh 'make' } }
+    }
+    post {
+        always { archiveArtifacts artifacts: 'build/**/*', fingerprint: true }
+    }
+}</code></pre>
+</div>
+
+<p>Don't worry about the syntax yet — we dissect it in Chapters 4 and 5. Just notice:</p>
+<ul>
+  <li>It's Groovy, a JVM scripting language.</li>
+  <li>It reads top-to-bottom like a recipe.</li>
+  <li><code>stages</code> are the visual phases shown in the UI.</li>
+  <li><code>post</code> runs cleanup/notification.</li>
+</ul>
+
+<h2 id="plugins">Plugins — power and pain</h2>
+
+<p>
+  Almost every Jenkins capability is a plugin. The "suggested plugins"
+  set includes git, maven, matrix authorisation, timestamper, workflow
+  (which is <em>Pipelines themselves</em>), and maybe 15 others. Want
+  Docker? Install the Docker plugin. Kubernetes? Install the Kubernetes
+  plugin. Slack? Install the Slack Notification plugin.
+</p>
+
+<p>Go to <strong>Manage Jenkins → Plugins → Available</strong> and browse. Some plugins you'll almost always want:</p>
+<ul>
+  <li><strong>Blue Ocean</strong> — a prettier pipeline UI (though recent Jenkins versions have caught up natively).</li>
+  <li><strong>Pipeline Utility Steps</strong> — read/write YAML/JSON, checksums, etc.</li>
+  <li><strong>Credentials Binding</strong> — surface credentials as env vars safely.</li>
+  <li><strong>JUnit</strong> — parse &amp; display test results.</li>
+  <li><strong>Workspace Cleanup</strong> — <code>cleanWs()</code> step.</li>
+  <li><strong>Matrix Authorization Strategy</strong> — fine-grained RBAC.</li>
+  <li><strong>Warnings-NG</strong> — parse linter/compiler output into findings.</li>
+  <li><strong>HTML Publisher</strong> — show generated HTML reports (coverage, etc.).</li>
+</ul>
+
+<div class="callout pitfall">
+<div class="callout-title">Plugins are shared state</div>
+<p>
+  Plugins are installed system-wide, on the Controller, and affect
+  every job. Upgrading a plugin can break every job in subtle ways.
+  Rule: <em>never upgrade plugins on Friday afternoon</em>. Keep a
+  staging Jenkins; test upgrades there; have a rollback plan.
+</p>
+</div>
+
+<h2 id="agents-setup">Adding an agent</h2>
+
+<p>Dashboard → <strong>Manage Jenkins → Nodes → New Node</strong>.</p>
+
+<p>Give it a name (e.g. <code>docker-builder</code>), pick <strong>Permanent Agent</strong>, and configure:</p>
+<ul>
+  <li><strong># of executors</strong>: how many builds this agent runs simultaneously. Often 2-4 depending on the machine.</li>
+  <li><strong>Remote root directory</strong>: where the agent stores its workspace (<code>/home/jenkins</code>).</li>
+  <li><strong>Labels</strong>: tags you'll use to pin jobs to certain agents. E.g. <code>linux docker gpu</code>.</li>
+  <li><strong>Launch method</strong>: SSH, JNLP, or command.</li>
+  <li><strong>Availability</strong>: always online, or on-demand.</li>
+</ul>
+
+<p>For ephemeral agents (preferred in modern setups), use the <em>Kubernetes</em> or <em>Docker</em> plugin to spin up a fresh container per build. We cover this in Chapter 6.</p>
+
+<h2 id="labels">Labels and agent selection</h2>
+
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent { label 'linux &amp;&amp; docker' }     // AND of labels
+    // or
+    agent none
+    stages {
+        stage('Linux build')   { agent { label 'linux'   }; steps { sh 'make' } }
+        stage('Windows build') { agent { label 'windows' }; steps { bat 'msbuild' } }
+    }
+}</code></pre>
+</div>
+
+<p>
+  Expressions like <code>linux &amp;&amp; docker</code>,
+  <code>linux || macos</code>, <code>!windows</code> let you pin
+  stages to whichever agent fits.
+</p>
+
+<h2 id="credentials">Credentials, briefly</h2>
+
+<p>
+  Never put secrets in a <code>Jenkinsfile</code>. Use Jenkins'
+  credentials store (Manage Jenkins → Credentials). Types include:
+</p>
+<ul>
+  <li><strong>Username + password</strong> (e.g. DB login).</li>
+  <li><strong>Secret text</strong> (e.g. API token).</li>
+  <li><strong>Secret file</strong> (e.g. a kubeconfig).</li>
+  <li><strong>SSH private key</strong>.</li>
+  <li><strong>Certificate</strong>.</li>
+</ul>
+
+<p>In a pipeline, reference them with <code>withCredentials</code>:</p>
+<div class="code" data-lang="groovy">
+<pre><code>withCredentials([string(credentialsId: 'npm-token', variable: 'NPM_TOKEN')]) {
+    sh 'npm publish'
+}</code></pre>
+</div>
+<p>The token is exposed as the <code>NPM_TOKEN</code> env var for the duration of the block, masked in logs.</p>
+
+<p>More on this in Chapter 6 and, cross-tool, Chapter 11.</p>
+
+<h2 id="hands-on">Hands-on: a local Jenkins, a real job</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · spin up and build</div>
+<div class="hands-on-body">
+<p>1. Start Jenkins locally:</p>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ docker run -d --name jenkins \
+    -p 8080:8080 -p 50000:50000 \
+    -v jenkins_home:/var/jenkins_home \
+    jenkins/jenkins:lts
+$ docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword</code></pre>
+</div>
+<p>2. Open <code>http://localhost:8080</code>, paste the password, install suggested plugins, create an admin user.</p>
+<p>3. Create an item → "Pipeline" (not Freestyle). Name it <code>hello-pipeline</code>.</p>
+<p>4. Under "Pipeline" → "Definition", pick <em>Pipeline script</em>. Paste:</p>
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent any
+    stages {
+        stage('Hello')       { steps { sh 'echo "Hello from Jenkins"' } }
+        stage('System info') { steps { sh 'uname -a; java -version 2&gt;&amp;1' } }
+        stage('Fake build')  {
+            steps {
+                sh 'mkdir -p out &amp;&amp; echo "release $(date -u +%F)" &gt; out/version.txt'
+            }
+        }
+    }
+    post {
+        always { archiveArtifacts artifacts: 'out/**' }
+    }
+}</code></pre>
+</div>
+<p>5. Save → Build Now. Watch the stages light up green in the stage view. Click the run → "Console Output" for the full log. Note the "Artifacts" section on the build page — click to download <code>version.txt</code>.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Two-agent pinning</span>
+</div>
+<div class="exercise-body">
+<p>Sketch a Declarative pipeline that runs <code>make test</code> on Linux and <code>ctest</code> on Windows, in parallel, then a single "report" stage that runs anywhere.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="groovy">
+<pre><code>pipeline {
+    agent none
+    stages {
+        stage('Test') {
+            parallel {
+                stage('Linux')   { agent { label 'linux'   }; steps { sh  'make test' } }
+                stage('Windows') { agent { label 'windows' }; steps { bat 'ctest'     } }
+            }
+        }
+        stage('Report') {
+            agent any
+            steps { sh 'echo both test suites done' }
+        }
+    }
+}</code></pre>
+</div>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.2</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Why is Freestyle inferior?</span>
+</div>
+<div class="exercise-body">
+<p>State three concrete reasons Pipeline-as-code beats Freestyle for anything bigger than a toy.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>Config lives in git: reviewable, versioned, rollbackable.</li>
+<li>Fails atomically with the code: a commit's pipeline is the pipeline that built <em>that</em> commit.</li>
+<li>Testable: you can dry-run the Jenkinsfile with the replay feature or a linter.</li>
+</ol>
+<p>Other valid reasons: better parallelism primitives, shared libraries for reuse, native stage visualisation, diff-able changes in PRs.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Diagnose a stuck job</span>
+</div>
+<div class="exercise-body">
+<p>A colleague reports a job that shows "pending — (waiting for executor)" and never starts. What are the first three things you check?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li><strong>Label match.</strong> Does the job's <code>agent { label '...' }</code> match any online agent? Go to Manage Jenkins → Nodes and verify.</li>
+<li><strong>Executor saturation.</strong> Are all matching agents' executors busy? Look at node status.</li>
+<li><strong>Agent health.</strong> Is the agent "offline" or "disconnected"? Often a JVM crash or network issue on the agent itself.</li>
+</ol>
+<p>Other causes: quiet period after plugin upgrade; restricted build windows; resource restrictions from the Lockable Resources plugin.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.4</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Plugins audit</span>
+</div>
+<div class="exercise-body">
+<p>On your local Jenkins, go to Manage Jenkins → Plugins → Installed. How many are installed? How many have updates available? How many have critical CVEs warnings? Document three of the more surprising ones.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>
+  Fresh install typically has 60-80 plugins from "suggested" (many are
+  transitive). Updates and CVE advisories are checked continuously
+  against Jenkins' advisories database. Regularly auditing this page
+  (weekly, monthly) is part of running Jenkins responsibly.
+</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 3.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Ephemeral agent flow</span>
+</div>
+<div class="exercise-body">
+<p>Sketch what happens (in order) when a pipeline with <code>agent { kubernetes { ... } }</code> triggers: where does the work run, what creates the pod, and what tears it down?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ol>
+<li>Pipeline trigger fires on the Controller (webhook, push, schedule).</li>
+<li>The Controller evaluates the Jenkinsfile's <code>agent</code> directive and decides it needs a Kubernetes-backed agent.</li>
+<li>The Kubernetes plugin on the Controller calls the K8s API and <code>POST /api/v1/namespaces/jenkins/pods</code> with a pod template.</li>
+<li>Kubernetes schedules the pod onto a worker node.</li>
+<li>The pod's "jnlp" sidecar starts and connects <em>back</em> to the Controller over port 50000.</li>
+<li>Controller assigns the pipeline steps to that pod; the pod runs them.</li>
+<li>On completion, the plugin deletes the pod via the K8s API.</li>
+</ol>
+<p>Net effect: each build gets a pristine environment, no shared state, autoscales with load. This is the modern default for large Jenkins shops.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Jenkins = long-running Java server + plugin ecosystem + Controller-Agents architecture.</li>
+  <li>Controller schedules &amp; stores state; Agents run the work.</li>
+  <li>Freestyle jobs are legacy — write Pipeline (<code>Jenkinsfile</code>) instead.</li>
+  <li>Plugins give enormous power; they're also the primary source of upgrade pain and security issues.</li>
+  <li>Ephemeral agents via Docker/Kubernetes are the modern default.</li>
+  <li>Credentials live in Jenkins' credentials store; use <code>withCredentials</code> to expose them safely.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="02-pipeline-thinking.html"><span class="lbl">← Prev</span><span class="ttl">Pipeline Thinking</span></a>
+  <a href="04-jenkins-pipelines.html" class="next"><span class="lbl">Next →</span><span class="ttl">Jenkins — Pipelines</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

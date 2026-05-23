@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · Kernel-adjacent debug</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">C · Linux · Debugging</a>
+  <span class="brand-sub">a deep dive — 2026</span>
+  <nav>
+    <ol>
+      <li><a href="01-c-refresher.html">C, the working subset</a></li>
+      <li><a href="02-cpp-refresher.html">C++, the modern subset</a></li>
+      <li><a href="03-memory-and-ub.html">Memory model &amp; UB</a></li>
+      <li><a href="04-build-and-link.html">Build &amp; link</a></li>
+      <li><a href="05-linux-process-model.html">Linux process model</a></li>
+      <li><a href="06-files-and-io.html">Files &amp; I/O</a></li>
+      <li><a href="07-threads-and-concurrency.html">Threads &amp; concurrency</a></li>
+      <li><a href="08-ipc-and-sockets.html">IPC &amp; sockets</a></li>
+      <li><a href="09-perf-and-observability.html">Performance &amp; observability</a></li>
+      <li><a href="10-gdb.html">GDB deep dive</a></li>
+      <li><a href="11-sanitizers.html">Sanitizers &amp; static analysis</a></li>
+      <li><a href="12-kernel-adjacent.html">Kernel-adjacent debug</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 12</span>
+  Kernel-adjacent debug
+</h1>
+<p class="lede">
+  Sometimes the bug isn't in your code. The kernel, a driver, an
+  embedded MCU, or a deadlock between userspace and a syscall — these
+  need different tools. dmesg, kprobes, ftrace, kgdb, JTAG, hardware
+  watchpoints, and the embedded debug toolbox.
+</p>
+
+<h2 id="dmesg">dmesg — the kernel's voice</h2>
+
+<p>The kernel prints to a ring buffer; <code>dmesg</code> reads it. This is where you learn that your USB device disconnected, that an OOM killer fired, that a driver shouted on init.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ dmesg                                  # whole buffer
+$ dmesg --human --ctime                  # human-readable timestamps
+$ dmesg -w                               # follow (watch in real time)
+$ dmesg --level=err,warn                 # filter by severity
+$ dmesg | grep -i memory                 # OOM, page-faults
+$ dmesg | grep -i usb                    # device events
+
+# Boot-time messages persist:
+$ journalctl -k                          # kernel messages from systemd journal
+$ journalctl -k --since "1 hour ago"
+$ journalctl -k -f                       # follow
+$ journalctl -k -p err                   # error or higher
+</code></pre>
+</div>
+
+<p>Things to scan for:</p>
+<ul>
+  <li><code>Out of memory: Killed process X</code> → OOM killer; investigate memory pressure.</li>
+  <li><code>SLAB: Unable to allocate</code> → kernel allocation pressure.</li>
+  <li><code>kernel BUG at ...</code> or <code>oops</code> → driver crash; bug-report-worthy.</li>
+  <li><code>I/O error</code>, <code>Buffer I/O error</code>, <code>blk_update_request</code> → disk failing.</li>
+  <li><code>TCP: out of memory -- consider tuning</code> → socket buffer pressure.</li>
+  <li><code>nf_conntrack: table full</code> → connection-tracking overflow.</li>
+</ul>
+
+<h2 id="oops">Reading an oops</h2>
+
+<p>A kernel crash in a driver looks like:</p>
+
+<div class="code" data-lang="text">
+<pre><code>BUG: kernel NULL pointer dereference, address: 0000000000000010
+PGD 0 P4D 0
+Oops: 0000 [#1] SMP NOPTI
+CPU: 3 PID: 1234 Comm: my_app Not tainted 6.6.0
+RIP: 0010:my_driver_read+0x42/0x80 [my_driver]
+Code: 48 8b 47 10 48 ...
+RSP: 0018:ffffabc000123c40 EFLAGS: 00010246
+...
+Call Trace:
+ ? page_fault_handler ...
+ my_driver_read+0x42/0x80 [my_driver]
+ vfs_read+0xa5/0x180
+ ksys_read+0x57/0xb0
+ do_syscall_64+0x33/0x80
+</code></pre>
+</div>
+
+<p>Read it like a backtrace. <code>my_driver_read+0x42</code> = byte 0x42 into <code>my_driver_read</code>. Resolve to a line:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ addr2line -e /lib/modules/$(uname -r)/extra/my_driver.ko -i 0x42
+my_driver.c:153
+</code></pre>
+</div>
+
+<p>Or use <code>./scripts/decode_stacktrace.sh</code> from the kernel tree. For tainted kernels, check if a binary blob is loaded — distros often won't accept oops reports from tainted kernels.</p>
+
+<h2 id="ftrace">ftrace — the in-tree tracer</h2>
+
+<p>ftrace lives in <code>/sys/kernel/tracing</code> (or <code>debug/tracing</code> on older). It can trace function entries/exits, syscalls, scheduling events, and more. <code>trace-cmd</code> wraps it ergonomically.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Quick syscall trace for a process
+$ sudo trace-cmd record -e syscalls -P $(pidof my_app) -- sleep 5
+$ trace-cmd report | head -30
+
+# Function-graph: tree of every kernel function called
+$ sudo trace-cmd record -p function_graph -P $(pidof my_app) -l 'tcp_*' -- sleep 5
+$ trace-cmd report
+
+# Top-of-stack visualisation
+$ kernelshark trace.dat
+</code></pre>
+</div>
+
+<p>The "what's the kernel doing right now" power-tool. Function-graph for "show me the tcp_* call tree under heavy load" is hard to match.</p>
+
+<h2 id="perf-kernel">perf for kernel work</h2>
+
+<p>Most of chapter 9's perf invocations work for the kernel too. Run with privileges (<code>sudo</code>) and on a kernel built with debug info (<code>CONFIG_DEBUG_INFO</code>; distro packages: <code>linux-image-XXX-dbg</code>):</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ sudo perf top                                          # system-wide hot kernel funcs
+$ sudo perf record -ag -- sleep 30                       # 30s system-wide profile
+$ sudo perf report --kallsyms=/proc/kallsyms
+
+# Why am I in kernel?
+$ sudo perf stat -e 'syscalls:sys_enter_*' -p $PID -- sleep 5
+
+# Block I/O latency:
+$ sudo perf record -e 'block:*' -ag -- sleep 5
+$ sudo perf script
+</code></pre>
+</div>
+
+<h2 id="bpftrace-kernel">bpftrace for kernel one-liners</h2>
+
+<p>The eBPF-based tools shine in kernel observation. The <code>bcc</code> suite has dozens of pre-built scripts; bpftrace is the awk-equivalent.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Histogram of disk I/O latencies
+$ sudo bpftrace -e '
+    kprobe:blk_account_io_start { @start[arg0] = nsecs; }
+    kprobe:blk_account_io_done /@start[arg0]/ {
+        @us = hist((nsecs - @start[arg0]) / 1000);
+        delete(@start[arg0]);
+    }'
+
+# Trace TCP retransmissions
+$ sudo bpftrace -e 'kprobe:tcp_retransmit_skb { printf("%s -&gt; retransmit\n", comm); }'
+
+# Why am I being killed by OOM killer? Show invoking task and target:
+$ sudo bpftrace -e 'kprobe:oom_kill_process { printf("OOM kill: %s\n", str(arg1)); }'
+</code></pre>
+</div>
+
+<p>BCC tools you'll reach for: <code>opensnoop</code>, <code>execsnoop</code>, <code>tcpconnect</code>, <code>biolatency</code>, <code>cachetop</code>, <code>profile</code>, <code>offcputime</code>, <code>tcptop</code>, <code>filetop</code>.</p>
+
+<h2 id="kprobes">kprobes / uprobes</h2>
+
+<p>kprobe = breakpoint inside the kernel; uprobe = breakpoint in userspace. Both expose to bpftrace, perf, and ftrace. You can attach to "any address in <code>tcp_v4_connect</code>" without recompiling anything.</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Trace every entry to a kernel function:
+$ sudo bpftrace -e 'kprobe:do_sys_openat2 { printf("%s opens\n", comm); }'
+
+# Trace a specific function in a userspace binary at offset:
+$ sudo bpftrace -e 'uprobe:/usr/local/bin/myapp:my_function { printf("%d\n", arg0); }'
+</code></pre>
+</div>
+
+<p>Note: kprobes need <code>CONFIG_KPROBES=y</code> (default on most distros). Some functions are blacklisted (the kprobe machinery itself). Check <code>cat /sys/kernel/debug/kprobes/blacklist</code>.</p>
+
+<h2 id="kgdb">kgdb — debugging the kernel itself</h2>
+
+<p>kgdb is in-kernel GDB-stub support. With it, you connect a real GDB to a running or panicked kernel.</p>
+
+<p>Setup needs:</p>
+<ol>
+  <li>Kernel built with <code>CONFIG_KGDB</code>, <code>CONFIG_KGDB_SERIAL_CONSOLE</code>, and debug info.</li>
+  <li>A serial line between debugger machine and target (or virtio-serial in a VM).</li>
+  <li>Kernel boot args: <code>kgdboc=ttyS0,115200 nokaslr</code> (KASLR makes addresses move; disable while debugging).</li>
+</ol>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Trigger entry into kgdb on the target:
+$ echo g &gt; /proc/sysrq-trigger        # sysrq-g sends SIGTRAP to kernel
+
+# On debugger machine:
+$ gdb vmlinux
+(gdb) target remote /dev/ttyS0
+(gdb) bt
+(gdb) info threads                     # all CPUs, all tasks
+(gdb) c
+</code></pre>
+</div>
+
+<p>For kernel module debugging, load symbols with:</p>
+<div class="code terminal" data-lang="gdb">
+<pre><code>(gdb) lx-symbols /path/to/module-build-dir
+</code></pre>
+</div>
+
+<p>kgdb is the heavy artillery. Day-to-day, kprobes and ftrace cover 99% of kernel curiosity. Reach for kgdb when you have a kernel deadlock, a hard panic that won't reproduce, or are bringing up a new driver.</p>
+
+<h2 id="kdb">kdb — kernel debugger console</h2>
+
+<p>kdb is an in-kernel mini-debugger that doesn't require a remote GDB. Activated via <code>SysRq+g</code> on the console; you get a prompt right on the screen. Useful on a single-machine system without serial — though most "real" debugging is via kgdb's serial GDB.</p>
+
+<h2 id="sysrq">SysRq — when nothing else works</h2>
+
+<p>Linux's last-resort key combos. Enabled with <code>echo 1 &gt; /proc/sys/kernel/sysrq</code>.</p>
+
+<table>
+<thead><tr><th>Key</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>SysRq + h</code></td><td>Help — list available commands</td></tr>
+<tr><td><code>SysRq + s</code></td><td>Sync filesystems</td></tr>
+<tr><td><code>SysRq + u</code></td><td>Remount read-only</td></tr>
+<tr><td><code>SysRq + b</code></td><td>Reboot immediately (no sync)</td></tr>
+<tr><td><code>SysRq + c</code></td><td>Crash the kernel — drop a kernel core</td></tr>
+<tr><td><code>SysRq + e</code></td><td>SIGTERM all processes except init</td></tr>
+<tr><td><code>SysRq + i</code></td><td>SIGKILL same</td></tr>
+<tr><td><code>SysRq + t</code></td><td>Dump task list to dmesg</td></tr>
+<tr><td><code>SysRq + w</code></td><td>Dump tasks in uninterruptible sleep</td></tr>
+<tr><td><code>SysRq + l</code></td><td>Stack trace of every CPU</td></tr>
+<tr><td><code>SysRq + g</code></td><td>Drop into kgdb/kdb</td></tr>
+</tbody>
+</table>
+
+<p>Trigger from terminal: <code>echo b &gt; /proc/sysrq-trigger</code> (root). The mnemonic for clean reboot from a stuck system is "REISUB": Raw → tErminate → kIll → Sync → Unmount → reBoot.</p>
+
+<h2 id="oom">OOM debugging</h2>
+
+<p>The Out-Of-Memory killer fires when memory is critically low. It picks a victim based on a score (RSS, oom_score_adj, etc.). After a kill:</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ dmesg | grep -A 30 'killed process'
+[ 4521.123]  oom-kill: ... task=my_app pid=1234 ...
+[ 4521.124]  Out of memory: Killed process 1234 (my_app) total-vm:8GiB ...
+</code></pre>
+</div>
+
+<p>Tune behaviour with <code>oom_score_adj</code> (write to <code>/proc/PID/oom_score_adj</code>; -1000 = exempt, 1000 = first to die). Or set memory cgroups (<code>systemd</code>'s <code>MemoryLimit=</code>) to bound a process group.</p>
+
+<p>Reading the oom-kill log: <code>RSS</code> = resident pages. <code>total-vm</code> = total virtual size (often huge with mmap). <code>shmem</code> = shared mem usage. <code>Mem-Info</code> dump shows the system's memory state — what's free, cached, slab.</p>
+
+<h2 id="embedded">Embedded debugging</h2>
+
+<p>For an MCU or SoC running bare-metal or an RTOS, you'll typically use:</p>
+
+<ul>
+  <li><strong>JTAG/SWD probe</strong> — Segger J-Link, ST-Link, Black Magic Probe, FT2232-based, or built into evaluation boards. Hardware connection to debug pins.</li>
+  <li><strong>OpenOCD</strong> — open-source server that speaks the GDB Remote Serial Protocol on one side and JTAG/SWD on the other.</li>
+  <li><strong>arm-none-eabi-gdb</strong> (or <code>aarch64-elf-gdb</code>, <code>riscv64-elf-gdb</code>) — cross-debugger.</li>
+</ul>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Terminal 1: start OpenOCD against your hardware
+$ openocd -f interface/stlink.cfg -f target/stm32f4x.cfg
+Open On-Chip Debugger ...
+Listening on port 3333 for gdb connections
+
+# Terminal 2: cross-GDB
+$ arm-none-eabi-gdb firmware.elf
+(gdb) target extended-remote :3333
+(gdb) monitor reset halt        # OpenOCD command, prefixed with "monitor"
+(gdb) load                      # flash the binary
+(gdb) b main
+(gdb) c
+</code></pre>
+</div>
+
+<p>Hardware niceties:</p>
+<ul>
+  <li><strong>Hardware breakpoints</strong> — limited (Cortex-M usually has 6); placed by writing breakpoint registers, not by patching code. Required for code in flash.</li>
+  <li><strong>Watchpoints</strong> — usually 4. Same hardware machinery as on x86.</li>
+  <li><strong>Single-step</strong> — set the <code>TRAP</code> bit in DEMCR (Cortex-M); the CPU halts after each instruction.</li>
+  <li><strong>SWO/ITM</strong> — printf-over-debug-pin, no need for UART. <code>openocd</code> can dump it.</li>
+</ul>
+
+<h2 id="logic-analyzer">Logic analyzers and protocol decoders</h2>
+
+<p>For "is the I2C/SPI/UART actually doing what I think?" — a $30 USB logic analyzer + <code>sigrok</code>/<code>PulseView</code> shows the bus traffic decoded. For "is the timing right?" — an oscilloscope. The kind of bug that's invisible to a debugger: a 5 ns glitch on a clock line, a too-long setup time, a noisy reset. Software won't tell you; the scope will.</p>
+
+<h2 id="serial-console">Serial console — the embedded developer's <code>printf</code></h2>
+
+<p>Boot a Linux board over serial (USB-to-TTL adapter, 115200 8N1 typical):</p>
+
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ls /dev/ttyUSB*       # or /dev/ttyACM*
+/dev/ttyUSB0
+$ minicom -D /dev/ttyUSB0 -b 115200
+$ # or:
+$ picocom /dev/ttyUSB0 -b 115200
+$ # or just:
+$ screen /dev/ttyUSB0 115200
+</code></pre>
+</div>
+
+<p>Boot messages, kernel panics, U-Boot prompts — all on serial. Don't go to a customer site without a USB-serial adapter.</p>
+
+<h2 id="cross">Cross-compiling, briefly</h2>
+
+<div class="code terminal" data-lang="sh">
+<pre><code># Toolchain naming convention: TARGET-vendor-kernel-libc
+$ aarch64-linux-gnu-gcc app.c -o app          # 64-bit ARM, glibc
+$ arm-linux-gnueabihf-gcc app.c -o app        # 32-bit ARM hard-float
+$ riscv64-linux-gnu-gcc app.c -o app
+$ arm-none-eabi-gcc fw.c -o fw                # bare-metal ARM (no OS)
+
+# Sysroot — where the target's libc and headers live
+$ aarch64-linux-gnu-gcc --sysroot=/path/to/sysroot ...
+
+# Run target binary on host via QEMU user-mode emulation:
+$ qemu-aarch64 -L /path/to/sysroot ./app
+</code></pre>
+</div>
+
+<p>Yocto and Buildroot generate sysroots and toolchains for entire embedded distributions. <code>conan</code>, <code>vcpkg</code>, <code>CMake toolchain files</code> are how you wire cross-compilation into the build.</p>
+
+<h2 id="hands-on">Hands-on: trace why a process is in D-state</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · uninterruptible sleep — what is it doing?</div>
+<div class="hands-on-body">
+<div class="code terminal" data-lang="sh">
+<pre><code>$ ps -eo pid,state,wchan:30,comm | awk '$2 == "D"'
+1234 D    blk_finish_plug                stuck_app
+
+# wchan tells you the kernel function the task is blocked in. Get the full kernel stack:
+$ sudo cat /proc/1234/stack
+[&lt;0&gt;] blk_finish_plug+0x4a/0x60
+[&lt;0&gt;] do_blockdev_direct_IO+0x...
+[&lt;0&gt;] ext4_direct_IO+0x...
+[&lt;0&gt;] generic_file_read_iter+0x...
+[&lt;0&gt;] ksys_read+0x...
+
+# Or with bpftrace:
+$ sudo bpftrace -e '
+    profile:hz:99 /pid == 1234/ {
+        @[kstack] = count();
+    }'
+</code></pre>
+</div>
+<p>The kernel stack tells you the process is doing direct I/O on ext4. If it's there for minutes, the underlying disk is slow or the device is dead. <code>iostat -xz 1</code> + <code>dmesg</code> will tell you which.</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Read an oops</span>
+</div>
+<div class="exercise-body">
+<p>From this oops fragment, where in <code>my_driver.c</code> did the crash happen?</p>
+<div class="code" data-lang="text">
+<pre><code>RIP: 0010:my_driver_irq+0x36/0x70 [my_driver]
+</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ addr2line -e /lib/modules/$(uname -r)/extra/my_driver.ko -i 0x36
+my_driver.c:148
+</code></pre>
+</div>
+<p>Or use <code>./scripts/decode_stacktrace.sh</code> from the kernel source tree, which decodes a whole oops at once.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Why D-state?</span>
+</div>
+<div class="exercise-body">
+<p>A process shows state <code>D</code> in <code>ps</code> for several seconds. <code>kill -9</code> doesn't work. Why, and how do you find out what it's blocked on?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p><code>D</code> = uninterruptible sleep. Kernel guarantees this state can't be interrupted by signals — typically because the process is in a critical kernel path (block I/O, NFS, mutex held by another task). <code>kill -9</code> queues a signal but it can't be delivered until the task returns to user mode.</p>
+<p>Find out what it's blocked in: <code>cat /proc/PID/wchan</code> (one function), or <code>cat /proc/PID/stack</code> (full kernel stack, root-only). For NFS, that's usually a stuck server — fix the server or unmount with <code>-l</code> (lazy).</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">OOM killed without warning</span>
+</div>
+<div class="exercise-body">
+<p>Your service vanishes. systemd restarted it; you don't know why. How do you confirm it was OOM, and how do you keep it from being a victim next time?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code terminal" data-lang="sh">
+<pre><code>$ journalctl -k --since "10 min ago" | grep -i oom
+$ dmesg | grep -i 'killed process'
+</code></pre>
+</div>
+<p>If OOM killer fired, the dmesg shows the victim. Mitigations:</p>
+<ul>
+<li><code>echo -1000 &gt; /proc/$PID/oom_score_adj</code> — exempt this process. Use carefully; you might just shift the kill to something else.</li>
+<li>Lower the score for less important processes (<code>oom_score_adj &gt; 0</code>).</li>
+<li>Set a cgroup memory limit on the noisy neighbour so it crashes itself rather than the system getting low globally.</li>
+<li>Add swap; tune <code>vm.swappiness</code>.</li>
+<li>Fix the actual leak — <code>heaptrack</code>/<code>massif</code>.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Embedded breakpoint limit</span>
+</div>
+<div class="exercise-body">
+<p>You're debugging firmware on a Cortex-M4. You set a 7th breakpoint and GDB silently turns it into a software breakpoint that doesn't fire. Why?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Cortex-M4 has 6 hardware breakpoints (FPB unit). Software breakpoints work by patching the instruction with <code>BKPT</code> — but if the code is in flash, you can't patch it without flashing. GDB falls back to "set breakpoint" but the patch never lands; nothing fires.</p>
+<p>Fixes:</p>
+<ul>
+<li>Use fewer hardware breakpoints — clear unused ones.</li>
+<li>For RAM-resident code, software breakpoints work normally.</li>
+<li>For flash-resident code, attach a <code>BKPT</code> instruction at the source (insert a <code>__BKPT()</code> intrinsic), or use a JTAG hardware breakpoint resource.</li>
+<li>Some debug probes support FPB rewriting at runtime.</li>
+</ul>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 12.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Latency hidden in the kernel</span>
+</div>
+<div class="exercise-body">
+<p>A real-time process misses its 1 ms deadline a few times per minute. Userspace profile (perf) shows nothing hot. What kernel-side mechanisms could cause this, and how do you confirm?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>Common culprits:</p>
+<ul>
+<li><strong>Interrupt storm</strong> on the CPU your process runs on. Pin the process to an isolated CPU with <code>taskset</code> + boot with <code>isolcpus=</code>.</li>
+<li><strong>Long kernel paths with preemption disabled</strong> — measure with <code>cyclictest</code> and ftrace's <code>preemptirqsoff</code> tracer.</li>
+<li><strong>RCU grace periods</strong> or <strong>workqueue activity</strong> on the same CPU.</li>
+<li><strong>SMI</strong> (System Management Interrupts) — invisible to OS profilers; you'll need <code>turbostat</code> or hardware-level tools to detect.</li>
+<li><strong>Power management</strong> — C-states; pin with <code>idle=poll</code> or use <code>cpuidle.off=1</code> on the kernel cmdline.</li>
+</ul>
+<p>Tools: <code>cyclictest -p 99 -t1 -h 100</code> for latency histogram. <code>tracecmd</code> with <code>function_graph</code> for the offending kernel path. PREEMPT_RT kernel for hard-real-time guarantees.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li><code>dmesg</code> / <code>journalctl -k</code> — first stop for kernel-level issues.</li>
+  <li>Kernel oops + <code>addr2line</code> = source location.</li>
+  <li>ftrace / trace-cmd for in-tree tracing of kernel control flow and syscalls.</li>
+  <li>perf and bpftrace work on the kernel as well as userspace.</li>
+  <li>kprobes/uprobes attach to arbitrary functions without recompiling.</li>
+  <li>kgdb + remote GDB to debug kernel itself; sysrq to drop in.</li>
+  <li>Embedded: OpenOCD + JTAG/SWD + cross-GDB, plus serial console.</li>
+  <li>Logic analyzers and oscilloscopes when the bug is below software's view.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="11-sanitizers.html"><span class="lbl">← Prev</span><span class="ttl">Sanitizers &amp; static analysis</span></a>
+  <a href="13-50-questions.html" class="next"><span class="lbl">Next →</span><span class="ttl">The 50 Questions</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · Security &amp; Secrets — CI/CD Deep Dive</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<button class="sidebar-toggle" aria-label="Toggle navigation">☰ Menu</button>
+<div class="layout">
+<aside class="sidebar">
+  <a href="../index.html" class="brand">CI/CD Deep Dive</a>
+  <span class="brand-sub">Jenkins · GitLab · GitHub</span>
+  <nav>
+    <ol>
+      <li><a href="01-cicd-fundamentals.html">CI/CD Fundamentals</a></li>
+      <li><a href="02-pipeline-thinking.html">Pipeline Thinking</a></li>
+      <li><a href="03-jenkins-intro.html">Jenkins — Architecture</a></li>
+      <li><a href="04-jenkins-pipelines.html">Jenkins — Pipelines</a></li>
+      <li><a href="05-jenkins-declarative.html">Jenkins — Declarative DSL</a></li>
+      <li><a href="06-jenkins-advanced.html">Jenkins — Advanced</a></li>
+      <li><a href="07-gitlab-intro.html">GitLab CI — Fundamentals</a></li>
+      <li><a href="08-gitlab-advanced.html">GitLab CI — Advanced</a></li>
+      <li><a href="09-gha-intro.html">GitHub Actions — Fundamentals</a></li>
+      <li><a href="10-gha-advanced.html">GitHub Actions — Advanced</a></li>
+      <li><a href="11-security.html">Security &amp; Secrets</a></li>
+      <li><a href="12-comparison.html">Head-to-head Comparison</a></li>
+      <li><a href="13-50-questions.html">The 50 Questions</a></li>
+      <li><a href="14-capstone.html">Capstone Project</a></li>
+    </ol>
+    <div class="extras">
+      <a href="../exercises.html">All Exercises</a>
+      <a href="../index.html">← Home</a>
+    </div>
+  </nav>
+  <div class="progress"></div>
+</aside>
+
+<main class="content">
+
+<h1>
+  <span class="chap-num">Chapter 11</span>
+  Security &amp; Secrets
+</h1>
+<p class="lede">
+  CI systems are privileged processes that run code on every commit.
+  They're also the path to production. Compromising a CI system means
+  compromising your software supply chain. This chapter covers
+  least-privilege design, OIDC, secret scanning, signing, SBOMs, and
+  the SLSA framework — across all three tools.
+</p>
+
+<h2 id="threat-model">The CI/CD threat model</h2>
+
+<p>Four attacker goals, in rough order of severity:</p>
+
+<ol>
+  <li><strong>Steal secrets.</strong> Access cloud credentials, registry tokens, signing keys stored in the CI.</li>
+  <li><strong>Inject malicious artifacts.</strong> Poison the build output so production runs attacker code (the supply-chain attack).</li>
+  <li><strong>Abuse compute.</strong> Mine crypto on your runner minutes, or use your CI as a jump box.</li>
+  <li><strong>Tamper with approvals / gates.</strong> Bypass or forge the "is this safe to deploy" checks.</li>
+</ol>
+
+<p>Vectors include: malicious dependencies, attacker-controlled forks submitting PRs, typo-squatted or hijacked actions, leaked secrets in logs, compromised maintainers, insecure runner isolation, and plain old misconfigured permissions.</p>
+
+<h2 id="principles">Five principles</h2>
+
+<h4>1 · Least privilege</h4>
+<p>Each job gets only the permissions it needs. Workflow-level <code>permissions: {}</code> + per-job escalation in GHA. Folder-scoped credentials in Jenkins. Environment-scoped variables in GitLab.</p>
+
+<h4>2 · Short-lived credentials</h4>
+<p>Prefer OIDC-to-cloud over long-lived access keys. Tokens expire in minutes; compromise is time-bounded.</p>
+
+<h4>3 · Pin what you depend on</h4>
+<p>Actions by commit SHA, Docker images by digest (<code>FROM alpine@sha256:…</code>), npm via lockfile, Python via <code>requirements.lock</code> or <code>uv.lock</code>. Tags are mutable; hashes are not.</p>
+
+<h4>4 · Defense in depth</h4>
+<p>Secrets stored in the tool's secret manager, not in repo. Secret scanning on the repo. Secret masking in logs. Branch protection. Required reviews on workflow-file changes.</p>
+
+<h4>5 · Assume compromise</h4>
+<p>Detect, don't just prevent. Monitor for unusual activity — new secrets accessed, unexpected deploy targets, image signatures failing. Have a rotation/incident plan.</p>
+
+<h2 id="secrets-comp">Secret management — all three tools</h2>
+
+<table>
+<thead><tr><th></th><th>Jenkins</th><th>GitLab CI</th><th>GitHub Actions</th></tr></thead>
+<tbody>
+<tr><td>Where stored</td><td>Credentials plugin (encrypted in <code>$JENKINS_HOME/secrets/</code>)</td><td>Settings → CI/CD → Variables (masked, protected)</td><td>Settings → Secrets and variables</td></tr>
+<tr><td>Scope granularity</td><td>Global / Folder / User</td><td>Instance / Group / Project / Environment</td><td>Repo / Environment / Org</td></tr>
+<tr><td>Masked in logs</td><td>Yes (via <code>withCredentials</code>)</td><td>Yes (if marked "Masked")</td><td>Yes (if value appears literally)</td></tr>
+<tr><td>File-type secrets</td><td>Yes (Secret File)</td><td>Yes (File type)</td><td>No — workaround: store base64-encoded string</td></tr>
+<tr><td>OIDC to cloud</td><td>Via plugins (AWS Steps, GCP Steps)</td><td>Built-in (CI_JOB_JWT)</td><td>Built-in (id-token permission)</td></tr>
+</tbody>
+</table>
+
+<p>For anything serious, consider external secret stores (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager). The CI tool holds <em>only</em> the OIDC trust or a short-lived access token to fetch the real secret.</p>
+
+<h2 id="oidc-deep">OIDC: federate don't store</h2>
+
+<p>We touched OIDC in Chapter 10. The concept generalises.</p>
+
+<p>Setup happens twice — once per cloud, once per pipeline tool:</p>
+
+<h4>1. On the cloud side</h4>
+<ul>
+  <li>Create an OIDC provider trusting the pipeline tool's issuer URL.</li>
+  <li>Create a role with a trust policy that verifies claims: <em>which repo, which branch, which environment, which action</em> is allowed to assume.</li>
+  <li>Scope the role's permissions to just what CI needs: push to this ECR repo, deploy to this ECS service.</li>
+</ul>
+
+<h4>2. On the CI side</h4>
+<ul>
+  <li>Declare <code>id-token: write</code> (GHA) or <code>id_tokens</code> (GitLab) permission.</li>
+  <li>Exchange the OIDC JWT for a cloud credential.</li>
+</ul>
+
+<h4>Trust claim best practices</h4>
+<ul>
+  <li>Scope to specific branches (<code>ref:refs/heads/main</code>) — don't allow PRs from forks to assume prod roles.</li>
+  <li>Scope to specific environments (<code>environment:production</code>) — combine with GHA environment approvals.</li>
+  <li>Use different IAM roles per environment; don't reuse the prod role for staging.</li>
+  <li>Review the trust policy during secret rotation — orphaned trusts are attack surface.</li>
+</ul>
+
+<h4>Example AWS trust policy (GHA)</h4>
+<div class="code" data-lang="json">
+<pre><code>{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+      },
+      "StringLike": {
+        "token.actions.githubusercontent.com:sub": [
+          "repo:myorg/myrepo:ref:refs/heads/main",
+          "repo:myorg/myrepo:environment:production"
+        ]
+      }
+    }
+  }]
+}</code></pre>
+</div>
+
+<h2 id="secret-scanning">Secret scanning</h2>
+
+<p>Committed secrets are forever. Once a secret hits a public commit, assume it's compromised — rotate. Prevention:</p>
+
+<ul>
+  <li><strong>GitHub secret scanning</strong> — built-in, scans public repos for 200+ patterns (AWS keys, Stripe tokens, etc.), automatically revokes tokens for participating providers. Enable "Push protection" in Settings → Security.</li>
+  <li><strong>GitLab secret detection</strong> — the <code>Secret-Detection.gitlab-ci.yml</code> template, plus push rules on self-hosted.</li>
+  <li><strong>gitleaks / trufflehog</strong> — run in pipelines; block PRs with findings.</li>
+  <li><strong>Pre-commit hooks</strong> — catch before push: <code>pre-commit</code> + <code>detect-secrets</code>, <code>gitleaks</code>, or <code>ggshield</code>.</li>
+</ul>
+
+<div class="code" data-lang="yaml">
+<div class="code-hdr"><span class="lang">yaml</span><span class="title">GHA — gitleaks</span></div>
+<pre><code>jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}</code></pre>
+</div>
+
+<h2 id="masking">Log masking &amp; why it sometimes fails</h2>
+
+<p>All three tools mask secret values in logs when the raw value appears. But transformations defeat masking:</p>
+
+<div class="code" data-lang="sh">
+<pre><code>echo "$SECRET"                              # masked
+echo "$SECRET" | base64                     # NOT masked — different bytes
+echo "pre-${SECRET}-post"                   # masked (substring match)
+curl -H "Auth: $(echo $SECRET | base64)"    # NOT masked</code></pre>
+</div>
+
+<p>Rules:</p>
+<ul>
+  <li>Never echo or <code>set -x</code> around secrets.</li>
+  <li>Never base64 / hash / rot13 a secret into a log.</li>
+  <li>If a build command accepts a secret via env var, it'll usually do the right thing. Use file-based secrets for tools that only accept path arguments.</li>
+</ul>
+
+<h2 id="sbom">SBOMs &amp; provenance</h2>
+
+<p>A <strong>Software Bill of Materials</strong> (SBOM) lists every component in your artifact — direct and transitive dependencies. Regulators and customers increasingly require them. Formats: SPDX, CycloneDX.</p>
+
+<p>Generating one is one command:</p>
+<div class="code" data-lang="sh">
+<pre><code># Docker image
+$ syft registry/myapp:1.2.3 -o spdx-json &gt; sbom.spdx.json
+
+# npm
+$ npm sbom --sbom-format=cyclonedx &gt; sbom.cdx.json
+
+# Python
+$ cyclonedx-py env -o sbom.cdx.json</code></pre>
+</div>
+
+<p>Ship the SBOM alongside your artifacts. Better: publish it as an in-toto attestation signed to your artifact, so consumers can verify.</p>
+
+<h4>SLSA — the framework to know</h4>
+
+<p>
+  <a href="https://slsa.dev">SLSA</a> (Supply-chain Levels for
+  Software Artifacts) defines four levels of build provenance:
+</p>
+<ul>
+  <li><strong>SLSA 1</strong> — provenance exists: you emit some metadata about the build.</li>
+  <li><strong>SLSA 2</strong> — version-controlled builds, authenticated build service.</li>
+  <li><strong>SLSA 3</strong> — hosted CI system, hardened against tampering, provenance is non-forgeable.</li>
+  <li><strong>SLSA 4</strong> — hermetic, two-person review on every change, deterministic.</li>
+</ul>
+
+<p>
+  GitHub's own attestations feature and the SLSA GitHub Generator
+  make SLSA 3 reachable for most teams: a signed statement saying
+  "this artifact was built from this commit on this workflow at this
+  time". Consumers verify at deploy time.
+</p>
+
+<h2 id="signing">Signing artifacts</h2>
+
+<p>Two ecosystems matter:</p>
+
+<h4>Sigstore / cosign</h4>
+<div class="code" data-lang="sh">
+<pre><code># Keyless signing using OIDC identity — no long-lived keys
+$ cosign sign --yes ghcr.io/myorg/myapp@sha256:abc123
+
+# Verify
+$ cosign verify \
+    --certificate-identity-regexp "^https://github.com/myorg/myapp/\.github/workflows/.*@.*$" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    ghcr.io/myorg/myapp@sha256:abc123</code></pre>
+</div>
+
+<p>
+  "Keyless" Sigstore uses your OIDC identity to sign via the public
+  Fulcio CA, logs the certificate to Rekor. No private keys you have
+  to rotate or steal. Pairs beautifully with GHA's OIDC.
+</p>
+
+<h4>GPG / PGP</h4>
+<p>The old-school approach — import a key in the runner, sign releases, publish the public key. Still common for Debian/RPM packages.</p>
+
+<h2 id="third-party">Third-party action / image safety</h2>
+
+<p>The supply-chain risk of <code>uses: some-random-action@v1</code>:</p>
+<ul>
+  <li>The tag can be moved to a malicious commit by the action's author.</li>
+  <li>The action's repo can be transferred to a new owner.</li>
+  <li>The action runs inside your runner, with access to your secrets (respecting the workflow's permissions).</li>
+</ul>
+
+<p>Mitigations:</p>
+<ul>
+  <li><strong>Pin by commit SHA</strong>: <code>uses: tj-actions/changed-files@<em>ab12cd34</em></code>.</li>
+  <li><strong>Maintain an allowlist</strong> — org-level setting in GHA: "only verified creators + specific list".</li>
+  <li><strong>Vendor critical actions</strong> — fork into your org, review code, update deliberately.</li>
+  <li><strong>Run with minimum permissions</strong> — so even a malicious action can't do much.</li>
+  <li><strong>Dependabot</strong> — keep pinned SHAs updated via reviewable PRs.</li>
+</ul>
+
+<p>Same logic for Docker base images: pin by digest (<code>FROM alpine@sha256:...</code>), rebuild periodically, scan with <code>trivy</code> / <code>grype</code>.</p>
+
+<h2 id="branch-protection">Branch protection &amp; required checks</h2>
+
+<p>Most teams require:</p>
+<ul>
+  <li>Pull request review (1–2 reviewers).</li>
+  <li>Required status checks passing (specific CI jobs named explicitly).</li>
+  <li>No direct pushes to <code>main</code>.</li>
+  <li>Required signed commits (in regulated environments).</li>
+  <li>Code owners review on critical paths (<code>CODEOWNERS</code> file).</li>
+</ul>
+
+<p>GitHub's rulesets, GitLab's push rules, and Bitbucket's branch permissions all cover this. Enforce via code when possible — <em>policy as code</em>.</p>
+
+<h2 id="public-pr">The forked-PR problem</h2>
+
+<p>A PR from an external fork can modify the pipeline file itself. If your CI blindly runs that pipeline with full secrets, a malicious PR becomes "run attacker-supplied code with your prod credentials."</p>
+
+<p>All three tools have safeguards:</p>
+<ul>
+  <li><strong>GHA:</strong> fork PRs don't get access to secrets by default; <code>pull_request_target</code> does but is riskier; manual approval of first-time contributors.</li>
+  <li><strong>GitLab:</strong> by default, forked MR pipelines run in the fork's project, not yours. To run in yours, configure "Pipelines for merge requests results" and scope secrets by protected branches.</li>
+  <li><strong>Jenkins:</strong> usually only polls known refs; webhook-triggered PR builds need to be careful.</li>
+</ul>
+
+<p>Rule: <strong>secrets and deploy permissions are for protected branches / merged main code</strong>. CI for PRs should only verify, never publish.</p>
+
+<h2 id="hands-on">Hands-on: harden a pipeline</h2>
+
+<div class="hands-on">
+<div class="hands-on-hdr">Hands-on · end-to-end hardening</div>
+<div class="hands-on-body">
+<p>Take any of the Hands-on pipelines from earlier chapters and add:</p>
+<ol>
+<li><strong>Minimum permissions.</strong> For GHA, <code>permissions:</code> block at workflow scope. For GitLab, protect CI/CD variables. For Jenkins, move secrets into folder-scoped credentials.</li>
+<li><strong>Action/image pinning.</strong> Replace every <code>@v4</code> with an explicit commit SHA on third-party actions. For base Docker images, pin by digest.</li>
+<li><strong>Secret scanning job.</strong> Add gitleaks (or equivalent) that fails the pipeline on findings.</li>
+<li><strong>SBOM generation.</strong> After building your artifact, run <code>syft</code> to emit an SBOM; upload as an artifact.</li>
+<li><strong>OIDC for cloud.</strong> Replace any stored cloud credentials with OIDC trust in AWS/GCP/Azure.</li>
+<li><strong>Environment approvals.</strong> Gate the prod deploy with a required-reviewer environment (GHA) or a manual rule (GitLab) or <code>input</code> step (Jenkins).</li>
+</ol>
+<p>Each change alone is modest. Combined, you move from "typical hobbyist CI" to "passes a competent security review".</p>
+</div>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.1</span>
+  <span class="exercise-diff easy">easy</span>
+  <span class="exercise-title">Spot the leak</span>
+</div>
+<div class="exercise-body">
+<p>Find the security issue:</p>
+<div class="code" data-lang="yaml">
+<pre><code>- env:
+    TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+  run: |
+    echo "Deploying with token: $TOKEN"
+    curl -H "Auth: $TOKEN" https://api.example.com/deploy</code></pre>
+</div>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The <code>echo "…$TOKEN"</code> line prints the token literally. GHA will mask <em>exact</em> occurrences, but anything that appends text to it can defeat the mask. Fix: remove the debug line; or echo only prefix/suffix (<code>echo "TOKEN is set: ${#TOKEN} chars"</code>).</p>
+<p>Second subtler issue: <code>curl -H "Auth: $TOKEN"</code> is fine for the API call, but if <code>curl</code> echoes request headers under some verbose flag, that ends up in logs too. Prefer a Netrc or credentials file.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.2</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Trust policy review</span>
+</div>
+<div class="exercise-body">
+<p>The AWS trust policy for a GHA OIDC role has <code>"sub": "repo:myorg/myrepo:*"</code>. What's wrong? Rewrite it correctly.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<p>The <code>*</code> wildcard matches <em>any</em> ref from the repo — PRs from forks, tags, arbitrary branches. A malicious PR could assume the role. Scope tighter:</p>
+<div class="code" data-lang="json">
+<pre><code>"StringLike": {
+  "token.actions.githubusercontent.com:sub": [
+    "repo:myorg/myrepo:ref:refs/heads/main",
+    "repo:myorg/myrepo:environment:production",
+    "repo:myorg/myrepo:ref:refs/tags/v*"
+  ]
+}</code></pre>
+</div>
+<p>Principle: every claim should be the tightest match your legitimate workflows need.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.3</span>
+  <span class="exercise-diff medium">medium</span>
+  <span class="exercise-title">Pin by digest</span>
+</div>
+<div class="exercise-body">
+<p>Convert <code>FROM node:20-slim</code> to a digest-pinned form. Write a small command pattern your team could use to refresh pins periodically.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="sh">
+<pre><code>$ docker pull node:20-slim
+$ docker inspect --format='{{index .RepoDigests 0}}' node:20-slim
+node:20-slim@sha256:ab12cd34...</code></pre>
+</div>
+<p>In Dockerfile:</p>
+<div class="code" data-lang="sh">
+<pre><code>FROM node:20-slim@sha256:ab12cd34...</code></pre>
+</div>
+<p>Refresh monthly via a renovate or dependabot PR — they understand digest pinning and open automated updates.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.4</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">Fork PR policy</span>
+</div>
+<div class="exercise-body">
+<p>Design a GHA policy where fork PRs run lint + tests but can never deploy, access prod secrets, or push to registries. What mechanisms enforce this?</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<ul>
+<li>By default, fork PRs don't get secrets. Verify this — don't use <code>pull_request_target</code> for untrusted code.</li>
+<li>Put deploy steps in a job with <code>if: github.event_name != 'pull_request'</code> and also restrict to the default branch.</li>
+<li>Move deploys to environments with required reviewers — fork PR jobs can't trigger reviewed environments anyway.</li>
+<li>For first-time contributors, enable "require approval for all outside collaborators" (org setting).</li>
+<li>Use OIDC-scoped-to-main for prod: even a fork job that somehow reached the deploy step couldn't assume the role.</li>
+</ul>
+<p>Result: fork PRs run CI, but every path to production is blocked by multiple independent controls.</p>
+</div>
+</details>
+</div>
+</div>
+
+<div class="exercise">
+<div class="exercise-hdr">
+  <span class="exercise-num">EX 11.5</span>
+  <span class="exercise-diff hard">hard</span>
+  <span class="exercise-title">SBOM + signed build</span>
+</div>
+<div class="exercise-body">
+<p>Sketch a GHA workflow that builds a Docker image, generates an SBOM, signs the image and the SBOM with cosign (keyless), then pushes everything to GHCR.</p>
+<details class="solution">
+<summary>Show solution</summary>
+<div>
+<div class="code" data-lang="yaml">
+<pre><code>permissions:
+  id-token: write          # OIDC for cosign
+  packages: write          # push to GHCR
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          output-file: sbom.spdx.json
+
+      - uses: sigstore/cosign-installer@v3
+      - run: |
+          cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          cosign attest --yes --predicate sbom.spdx.json --type spdxjson \
+            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}</code></pre>
+</div>
+<p>Consumers can verify at pull time: <code>cosign verify-attestation …</code>.</p>
+</div>
+</details>
+</div>
+</div>
+
+<h2 id="recap">Recap</h2>
+<ul>
+  <li>Threat model: secret theft, artifact poisoning, compute abuse, approval bypass.</li>
+  <li>Five principles: least privilege, short-lived credentials, pin dependencies, defense in depth, assume compromise.</li>
+  <li>OIDC eliminates long-lived cloud credentials; scope trust policies to specific repo/branch/environment.</li>
+  <li>Secret scanning in-repo + log-masking awareness + file-type secrets for CLIs that need paths.</li>
+  <li>SBOMs with syft, signing with cosign (keyless), SLSA framework for build provenance.</li>
+  <li>Pin actions by SHA, images by digest, libs by lockfile. Use Dependabot/Renovate for reviewed updates.</li>
+  <li>Fork PRs: run CI yes, access prod no — enforced by multiple mechanisms.</li>
+</ul>
+
+<div class="page-nav">
+  <a href="10-gha-advanced.html"><span class="lbl">← Prev</span><span class="ttl">GitHub Actions — Advanced</span></a>
+  <a href="12-comparison.html" class="next"><span class="lbl">Next →</span><span class="ttl">Head-to-head Comparison</span></a>
+</div>
+
+</main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>
