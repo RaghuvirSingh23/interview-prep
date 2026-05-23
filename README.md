@@ -40,8 +40,11 @@ interview-prep/
 │   ├── 08_cap_theorem.md       # Distributed systems theory
 │   ├── 09_rate_limiting.md     # Throttling algorithms
 │   └── 10_observability.md     # Logging, metrics, tracing
-├── system-engineering/          # Hands-on systems tutorials
-│   └── tutorials/               # CI/CD, Make, Python/Kubernetes, C/Linux debugging
+├── systems-engineering/         # Hands-on systems tutorials
+│   ├── cicd/                    # CI/CD, Jenkins, GitLab CI, GitHub Actions
+│   ├── make/                    # Makefile fundamentals and project patterns
+│   ├── python-kubernetes/       # Python automation, Docker, Kubernetes
+│   └── c-linux-debugging/       # C/C++, Linux internals, GDB, sanitizers
 ├── lld/                         # Low-Level Design practice
 │   ├── 01_lru_cache_basic.cpp
 │   ├── 02_lru_cache_threadsafe.cpp
