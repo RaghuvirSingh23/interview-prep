@@ -39,7 +39,10 @@ interview-prep/
 │   ├── 07_database_scaling.md  # Sharding, replication
 │   ├── 08_cap_theorem.md       # Distributed systems theory
 │   ├── 09_rate_limiting.md     # Throttling algorithms
-│   └── 10_observability.md     # Logging, metrics, tracing
+│   ├── 10_observability.md     # Logging, metrics, tracing
+│   ├── 11_postgresql.md        # PostgreSQL internals and operations
+│   └── hld-problems/           # End-to-end high-level design practice
+│       └── 01_url_shortener.md # URL shortener system design
 ├── systems-engineering/         # Hands-on systems tutorials
 │   ├── cicd/                    # CI/CD, Jenkins, GitLab CI, GitHub Actions
 │   ├── make/                    # Makefile fundamentals and project patterns
@@ -93,6 +96,7 @@ These are high-impact, frequently asked in interviews, and used daily in product
 | 8 | **CAP Theorem & Consistency Models** | Foundation for distributed systems discussions |
 | 9 | **Rate Limiting** | Security + scalability - common interview question |
 | 10 | **Observability (Logging, Metrics, Tracing)** | Production debugging - separates junior from senior devs |
+| 11 | **PostgreSQL** | Practical relational database internals, indexing, MVCC, replication |
 
 ### Nice to Have (Learn Later)
 
@@ -111,7 +115,7 @@ These are high-impact, frequently asked in interviews, and used daily in product
 | CI/CD (Jenkins, ArgoCD) | Usually team-specific setup |
 | RabbitMQ | Simpler alternative to Kafka |
 
-**Recommended Order**: Docker → Redis → Kafka → gRPC → Load Balancers
+**Recommended Order**: Docker -> Redis -> Kafka -> gRPC -> Load Balancers -> PostgreSQL -> Database Scaling -> CAP -> Rate Limiting -> Observability -> HLD Problems
 
 ---
 
@@ -182,6 +186,40 @@ These are high-impact, frequently asked in interviews, and used daily in product
 - [ ] Practice with a friend or use online platforms
 - [ ] Focus on communication and problem-solving process
 
+### Week 4: System Design Focus
+
+**Day 1: Infrastructure Foundation**
+- [ ] Read `system-design-topics/01_docker.md`
+- [ ] Read `system-design-topics/05_kubernetes.md`
+- [ ] Focus on: containers, Pods, Deployments, Services, rollouts, probes
+
+**Day 2: Caching and Messaging**
+- [ ] Read `system-design-topics/02_redis.md`
+- [ ] Read `system-design-topics/03_kafka.md`
+- [ ] Focus on: cache-aside, eviction, Redis Cluster, partitions, consumer groups, delivery semantics
+
+**Day 3: Service Communication and Traffic**
+- [ ] Read `system-design-topics/04_grpc.md`
+- [ ] Read `system-design-topics/06_load_balancers.md`
+- [ ] Focus on: deadlines, retries, idempotency, L4 vs L7, health checks, canary routing
+
+**Day 4: Databases and Distributed Systems**
+- [ ] Read `system-design-topics/11_postgresql.md`
+- [ ] Read `system-design-topics/07_database_scaling.md`
+- [ ] Read `system-design-topics/08_cap_theorem.md`
+- [ ] Focus on: indexes, MVCC, replication lag, shard keys, consistency choices
+
+**Day 5: Protection and Production Readiness**
+- [ ] Read `system-design-topics/09_rate_limiting.md`
+- [ ] Read `system-design-topics/10_observability.md`
+- [ ] Focus on: rate-limit algorithms, Redis atomicity, SLOs, alerting, traces, debugging playbooks
+
+**Day 6-7: HLD Practice**
+- [ ] Read `system-design-topics/hld-problems/01_url_shortener.md`
+- [ ] Re-design the system from a blank page without looking
+- [ ] Practice explaining requirements, APIs, storage, scaling, failure modes, and observability
+- [ ] Repeat with one new system: news feed, payment system, chat, file storage, or notification service
+
 ---
 
 ## How to Use Practice Files
@@ -231,6 +269,21 @@ g++ -std=c++17 -o solution filename.cpp && ./solution
 | **LRU Cache** | HashMap + DLL, O(1) Operations | `lld/` |
 | **Scheduling** | Priority Queues, Job Management | `heaps/04_sjf_scheduler.cpp` |
 | **OOP Design** | SOLID, Design Patterns | `docs/01_oop_cpp.md`, `docs/02_design_patterns.md` |
+
+### For System Design
+
+| Topic | Key Concepts | Reference |
+|-------|--------------|-----------|
+| **Caching** | Cache-aside, TTL, eviction, stampede, hot keys | `system-design-topics/02_redis.md` |
+| **Messaging** | Partitions, consumer groups, ordering, idempotency | `system-design-topics/03_kafka.md` |
+| **RPC** | Protobuf, deadlines, retries, load balancing | `system-design-topics/04_grpc.md` |
+| **Orchestration** | Pods, Deployments, Services, probes, autoscaling | `system-design-topics/05_kubernetes.md` |
+| **Traffic** | L4/L7, algorithms, TLS, health checks, canaries | `system-design-topics/06_load_balancers.md` |
+| **Databases** | Indexes, MVCC, replication, sharding, consistency | `system-design-topics/07_database_scaling.md`, `system-design-topics/11_postgresql.md` |
+| **Distributed Systems** | CAP, quorums, consensus, conflict resolution | `system-design-topics/08_cap_theorem.md` |
+| **Protection** | Rate limits, quotas, Redis Lua, fail-open/closed | `system-design-topics/09_rate_limiting.md` |
+| **Production Readiness** | Logs, metrics, traces, SLOs, alerts, debugging | `system-design-topics/10_observability.md` |
+| **HLD Practice** | Requirements, APIs, capacity, scaling, trade-offs | `system-design-topics/hld-problems/01_url_shortener.md` |
 
 ### For CS Fundamentals
 
