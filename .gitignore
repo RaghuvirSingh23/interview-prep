@@ -1,0 +1,35 @@
+# Local build directories
+build/
+build-systems-lab/cmake-build/
+build-systems-lab/install/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.bin
+*.d
+
+# Local executable scratch artifacts
+lld/design-patterns-examples/temp
+lld/design-problems/vending
+lld/design-problems/ride
+/temp.cpp
+/temp.txt
+
+# Editor and machine-local files
+.cache/
+.vscode/
+.DS_Store
